@@ -27,7 +27,6 @@ class Key:
 class OwnershipRegistry:
     _position_owner: dict[Key, str] = field(default_factory=dict)
     _order_owner: dict[str, tuple[Key, str]] = field(default_factory=dict)
-    _api_key_owner: dict[tuple[str, str, int], str] = field(default_factory=dict)
     # 面板与引擎多线程共享：claim/release/查询全部串行化（M4）
     _lock: threading.RLock = field(default_factory=threading.RLock,
                                    repr=False, compare=False)
@@ -51,6 +50,13 @@ class OwnershipRegistry:
         with self._lock:
             owner = self._position_owner.get(key)
             return owner is None or owner == strategy
+
+    def keys_of(self, strategy: str) -> list[Key]:
+        """某策略当前 claim 的全部键（策略层 caps 按全部腿合计
+        名义校验时用，见 Executor.place 的统一口径）。"""
+        with self._lock:
+            return [k for k, v in self._position_owner.items()
+                    if v == strategy]
 
     def release(self, key: Key, strategy: str) -> None:
         with self._lock:
@@ -80,13 +86,8 @@ class OwnershipRegistry:
         with self._lock:
             self._order_owner.pop(order_id, None)
 
-    # ----- Lighter api_key_index 占用（nonce 隔离）-----
-    def claim_api_key(self, venue: str, account: str, key_index: int, strategy: str) -> None:
-        with self._lock:
-            k = (venue, account, key_index)
-            owner = self._api_key_owner.get(k)
-            if owner is not None and owner != strategy:
-                raise ConflictError(
-                    f"{venue}/{account} 的 api_key_index={key_index} 已被 {owner} 占用"
-                )
-            self._api_key_owner[k] = strategy
+    # 注：旧版有 claim_api_key（Lighter api_key_index 按策略隔离
+    # 登记）——从未接线：factory 每所只建一个适配器实例（一组
+    # 账户/一个 api_key_index），nonce 由适配器内部计数器串行
+    # 分配，多任务共用也不会冲突。已按审查 R2 删除该死代码，
+    # DESIGN 第 5 节同步改为如实表述。

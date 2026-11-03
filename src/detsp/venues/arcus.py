@@ -3,7 +3,8 @@
 移植自 Parallax Hedge（MIT）：签名/精度/强平价在 _arcus_sign.py，
 本文件是 REST 客户端与下单执行：
 - 只读：GET /v1/markets、/v1/bbo、/v1/l2OrderBook、/v1/account、
-  /v1/positions、/v1/openOrders（只要公开地址，不签名）
+  /v1/positions、/v1/openOrders、/v1/fills（只要公开地址，不签名；
+  fills 用于 poll_order 的逐单成交匹配，对照审查 M5）
 - 写：POST /v1/placeOrder、/v1/cancelOrder、/v1/setLeverage，
   Ed25519 签名 + 请求头 X-API-Key / X-Timestamp / X-Signature，只发一次不重试
 - 强平价交易所不返回，按 _arcus_sign 的公式用账户权益复算（全仓最坏口径）
@@ -126,6 +127,8 @@ class ArcusVenue(SkeletonVenue):
         self._markets_cache: dict[str, dict] = {}
         self._markets_ts = 0.0
         self._order_market: dict[str, int] = {}
+        self._fills_rows: list | None = None   # /v1/fills 短缓存
+        self._fills_ts = 0.0
 
     # ── 基础 ────────────────────────────────────────────────
     def _get_http(self) -> httpx.Client:
@@ -234,13 +237,35 @@ class ArcusVenue(SkeletonVenue):
             if str(raw.get("baseAsset") or "").upper() != symbol.upper():
                 continue
             rate = _f(raw.get("nextFundingRate"))
+            kind = "predicted"
             if rate is None:
                 rate = _f(raw.get("fundingRate")) or 0.0
+                kind = "current"  # 无预测值时退回当期，如实标注口径
             # Arcus 资金费每小时结算，rate 本身就是每小时费率
             return FundingInfo(symbol=symbol, rate=rate,
                                next_ts=time.time() + 3600,
-                               interval_seconds=3600)
+                               interval_seconds=3600,
+                               rate_kind=kind)
         raise RuntimeError(f"Arcus 找不到市场 {symbol}")
+
+    def funding_snapshot(self) -> list[FundingInfo]:
+        if self._paper is not None:
+            return super().funding_snapshot()
+        payload = self._get("/v1/markets")
+        rows = payload.get("markets") if isinstance(payload, dict) else payload
+        out: list[FundingInfo] = []
+        for raw in rows or []:
+            if not isinstance(raw, dict):
+                continue
+            rate = _f(raw.get("nextFundingRate"))
+            kind = "predicted"
+            if rate is None:
+                rate = _f(raw.get("fundingRate")) or 0.0
+                kind = "current"
+            out.append(FundingInfo(
+                symbol=str(raw.get("baseAsset") or "").upper(), rate=rate,
+                interval_seconds=3600, rate_kind=kind))
+        return out
 
     # ── 账户 ────────────────────────────────────────────────
     def _account_snapshot(self) -> dict:
@@ -454,18 +479,66 @@ class ArcusVenue(SkeletonVenue):
                 "/v1/cancelOrder", body, ts, ax.sign_hex(key, payload))
         return status in (200, 202)
 
+    # ── 成交记录（对照审查 M5：/v1/fills 逐单匹配）──────
+    def fills(self, since: float,
+              market_id: int | None = None) -> list[dict]:
+        """/v1/fills：本账户从 since（epoch 秒）起的成交，单页最多
+        1000 条，只要公开地址（移植 Parallax exchanges.arcus_fills）。"""
+        if self._paper is not None:
+            return []
+        params = {**self._account_params(),
+                  "from": str(int(max(0.0, since) * 1_000_000)),
+                  "limit": "1000"}
+        if market_id is not None:
+            params["market"] = str(int(market_id))
+        payload = self._get("/v1/fills", params)
+        rows = payload.get("fills") if isinstance(payload, dict) else payload
+        return rows if isinstance(rows, list) else []
+
+    def _fills_cached(self) -> list[dict]:
+        """最近 7 天成交的 5 秒短缓存：poll_order 逐单匹配时共用，
+        避免每个订单各拉一次（/v1/fills 按 IP 计权重）。"""
+        now = time.monotonic()
+        if self._fills_rows is None or now - self._fills_ts > 5.0:
+            self._fills_rows = self.fills(time.time() - 7 * 86400)
+            self._fills_ts = now
+        return self._fills_rows
+
     def poll_order(self, order_id: str) -> Order | None:
-        """S2：Arcus 在 Parallax 参考实现里没有单订单终态查询接口
-        （只有 /v1/openOrders 按市场列 OPEN 单），故这里只能返回
-        挂单中的订单；不在挂单中返回 None，成交发现由策略层走
-        「挂单消失 + 持仓差」对账式口径（见 grid/rotation 的实现），
-        不臆造不存在的终态接口。"""
+        """订单终态查询：先查挂单；在挂单中直接返回。已不在挂单
+        中时，用 /v1/fills 按订单号（或 cid:clientId）逐单匹配
+        成交（Parallax 有此通道——旧注释称「没有单订单终态查询」
+        只对了一半：单订单端点确实没有，但逐单成交匹配是有的，
+        旧表述已修正）；匹配到成交即返回终态（filled_qty 为该单
+        累计成交量、price 为成交均价，部分成交后被撤的单也按
+        实际成交量定案）；匹配不到才返回 None，策略层退回
+        「挂单消失 + 持仓差」对账式口径兜底。"""
         if self._paper is not None:
             return self._delegate().poll_order(order_id)
         for o in self.open_orders():
             if o.order_id == str(order_id):
                 return o
-        return None
+        try:
+            rows = self._fills_cached()
+        except Exception:  # noqa: BLE001 — 成交接口失败退回对账式
+            return None
+        hit = ax.match_fills(rows, str(order_id))
+        if hit is None:
+            return None
+        filled_qty, avg_px, _fee, _pnl, side_s, _n = hit
+        plain = str(order_id)[4:] if str(order_id).startswith("cid:") \
+            else str(order_id)
+        market_id = self._order_market.get(plain)
+        symbol = ""
+        if market_id is not None:
+            for m in self._load_markets().values():
+                if m["arcus_market_id"] == market_id:
+                    symbol = m["asset"]
+                    break
+        return Order(order_id=str(order_id), symbol=symbol,
+                     side=Side.BUY if side_s == "buy" else Side.SELL,
+                     qty=filled_qty, price=avg_px,
+                     filled_qty=filled_qty, status="filled")
 
     def set_leverage(self, symbol: str, leverage: int) -> bool:
         """设置某市场杠杆为全仓（旧式签名）。接口外附加能力，供预检/策略用。"""

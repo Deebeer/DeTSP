@@ -73,8 +73,11 @@ class PaperVenue(VenueAdapter):
         self._match(symbol)
 
     def set_funding(self, symbol: str, rate: float,
-                    interval_seconds: float = 3600.0) -> None:
-        self._funding[symbol] = (rate, interval_seconds)
+                    interval_seconds: float = 3600.0,
+                    rate_kind: str = "predicted") -> None:
+        # paper 注入的费率默认按统一「下期预测」口径（与 live 修复
+        # 后的选向口径一致）；测试异口径拦截时可显式传其他 kind
+        self._funding[symbol] = (rate, interval_seconds, rate_kind)
 
     def markets(self) -> list[Market]:
         return [
@@ -197,5 +200,12 @@ class PaperVenue(VenueAdapter):
         return {"equity": self._equity, "available": max(self._equity - used, 0.0)}
 
     def funding(self, symbol: str) -> FundingInfo:
-        rate, interval = self._funding.get(symbol, (0.0, 3600.0))
-        return FundingInfo(symbol=symbol, rate=rate, interval_seconds=interval)
+        rate, interval, kind = self._funding.get(
+            symbol, (0.0, 3600.0, "predicted"))
+        return FundingInfo(symbol=symbol, rate=rate,
+                           interval_seconds=interval, rate_kind=kind)
+
+    def funding_snapshot(self) -> list[FundingInfo]:
+        return [FundingInfo(symbol=s, rate=r, interval_seconds=iv,
+                            rate_kind=k)
+                for s, (r, iv, k) in self._funding.items()]

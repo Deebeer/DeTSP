@@ -22,6 +22,7 @@ Executor 再兜底：place 过程中任何未被明确分类的异常先对账�
 from __future__ import annotations
 
 import contextlib
+import time
 from dataclasses import dataclass, field
 
 from .ledger import Fill, Ledger
@@ -121,6 +122,27 @@ class ExecResult:
     position: Position | None = None  # status=unknown 时附对账持仓
 
 
+# 市价单成交发现的最长等待（秒）：异步结算场所（Lighter）的成交
+# 通常数秒内落地，180 秒足够覆盖慢结算；超时按持仓差定案
+PENDING_FILL_TTL_SECONDS = 180.0
+
+
+@dataclass
+class _PendingFill:
+    """一笔回执未终结的市价单，等待成交发现补记账（审查 M2）。"""
+
+    order_id: str
+    strategy: str
+    venue_id: str
+    symbol: str
+    side: Side
+    qty: float            # 请求量
+    recorded: float       # 已记账量（place 时回执已记的部分）
+    baseline_qty: float   # 下单前该 (venue,symbol) 的带符号持仓量
+    ref_price: float      # 记账参考价（下单时的对手价）
+    deadline: float       # 定案截止（epoch 秒）
+
+
 class Executor:
     def __init__(
         self,
@@ -137,6 +159,7 @@ class Executor:
         self.kill_switch = kill_switch or KillSwitch()
         self.caps = caps or Caps()
         self.min_corridor_pct = min_corridor_pct
+        self._pending_fills: dict[str, _PendingFill] = {}
 
     # ----- 基础查询 -----
     def venue(self, venue_id: str) -> VenueAdapter:
@@ -230,6 +253,113 @@ class Executor:
             strategy=strategy, side=side.value, qty=qty, price=price,
             fee=0.0, order_id=order_id))
 
+    # ----- 市价单成交发现（审查 M2）-----
+    def has_pending_fill(self, venue_id: str, symbol: str) -> bool:
+        """该 (场所, 币种) 是否有市价单尚待成交发现定案——对冲
+        调平在上一笔调整未结算时不叠加新调整（防异步结算下按
+        旧持仓重复调平）。"""
+        return any(pf.venue_id == venue_id and pf.symbol == symbol
+                   for pf in self._pending_fills.values())
+
+    def poll_pending_fills(self, now: float | None = None) -> list[str]:
+        """推进待发现的市价单：能 poll 到终态就按终态量补记；
+        poll 不可得且订单已不在挂单中时，用「持仓 − 下单前基线」
+        的差额推断成交量（按请求量封顶）；定案后注销订单登记。
+
+        引擎每 tick 调用一次。返回本轮定案的订单号列表。
+        归因口径：同一 (venue,symbol) 同时只有归属任务自己的单，
+        多笔待发现按登记顺序逐笔以各自基线推断、各自封顶。
+        """
+        now = time.time() if now is None else now
+        settled: list[str] = []
+        for oid, pf in list(self._pending_fills.items()):
+            adapter = self.venues[pf.venue_id]
+            order = None
+            try:
+                order = adapter.poll_order(oid)
+            except Exception:  # noqa: BLE001 — 查询失败按不可得处理
+                order = None
+            total: float | None = None
+            if order is not None:
+                if order.status == "open":
+                    if order.filled_qty > pf.recorded:
+                        self._record_pending_inc(pf, order.filled_qty)
+                    if now < pf.deadline:
+                        continue
+                    total = pf.recorded  # 超时仍 open：按已知量定案
+                else:
+                    total = order.filled_qty
+            if total is None:
+                try:
+                    open_ids = {o.order_id
+                                for o in adapter.open_orders(pf.symbol)}
+                except Exception:  # noqa: BLE001 — 挂单查询失败：继续等
+                    continue
+                if oid in open_ids and now < pf.deadline:
+                    continue
+                pos = self.position(pf.venue_id, pf.symbol)
+                cur = pos.qty if pos else 0.0
+                delta = (cur - pf.baseline_qty) * pf.side.sign
+                inferred = min(max(delta, 0.0), pf.qty)
+                if inferred <= pf.recorded and now < pf.deadline \
+                        and oid not in open_ids:
+                    # 已不在挂单中又无成交证据：可能只是结算延迟，
+                    # 宽限期内继续等，过期再按推断量定案
+                    continue
+                total = inferred
+            if total > pf.recorded:
+                self._record_pending_inc(pf, total)
+            self.registry.unregister_order(oid)
+            del self._pending_fills[oid]
+            settled.append(oid)
+        return settled
+
+    def _record_pending_inc(self, pf: _PendingFill, total_filled: float) -> None:
+        inc = total_filled - pf.recorded
+        if inc <= 1e-12:
+            return
+        adapter = self.venues[pf.venue_id]
+        self.ledger.record(Fill(
+            venue=pf.venue_id, account=adapter.account, symbol=pf.symbol,
+            strategy=pf.strategy, side=pf.side.value, qty=inc,
+            price=pf.ref_price, fee=0.0, order_id=pf.order_id))
+        pf.recorded = total_filled
+
+    # ----- 削腿：带滑点保护的限价只减仓单（对照审查 M2）-----
+    def trim_excess(self, strategy: str, venue_id: str, symbol: str,
+                    side: Side, qty: float,
+                    max_slippage_bps: float) -> ExecResult:
+        """削掉多余的一截仓位（delta 修正专用通道）。
+
+        对照 entropy-arb 的 _hedge 口径：不用无保护市价单，改用
+        reduce-only 限价单——卖单限价 = bid×(1−滑点上限)、买单 =
+        ask×(1+滑点上限)，盘口在保护范围内立即成交，跳变时宁可
+        本轮不成交（挂单留待后续对账再处理），不吃异常滑点。
+        已有本策略的在途削腿单（同 venue/symbol 的 reduce-only
+        挂单，或同向且量不小于本次的挂单）时不重复下单。
+        """
+        if qty <= 0:
+            return ExecResult(status="rejected", detail="削腿量为 0")
+        adapter = self.venues[venue_id]
+        try:
+            for o in adapter.open_orders(symbol):
+                if not self.registry.owns_order(o.order_id, strategy):
+                    continue
+                if o.reduce_only or (o.side is side and o.qty >= qty * 0.999):
+                    return ExecResult(status="open", order=o,
+                                      detail="已有在途削腿单，本轮跳过")
+        except Exception:  # noqa: BLE001 — 挂单查询失败不挡削腿本身
+            pass
+        book = adapter.book(symbol)
+        slip = max(max_slippage_bps, 0.0) / 10_000
+        if side is Side.SELL:
+            price = book.bid * (1 - slip)
+        else:
+            price = book.ask * (1 + slip)
+        req = OrderRequest(symbol=symbol, side=side, qty=qty, price=price,
+                           reduce_only=True)
+        return self.place(strategy, venue_id, req, intent="close")
+
     # ----- 下单 -----
     def place(self, strategy: str, venue_id: str, req: OrderRequest, *,
               intent: str = "open",
@@ -263,10 +393,22 @@ class Executor:
                 if not within_cap(new_notional, self.caps.venue.get(venue_id, 0.0)):
                     return ExecResult(status="rejected",
                                       detail=f"超过场所仓位上限 {venue_id}")
-                if not within_cap(new_notional,
-                                  self.caps.strategy.get(strategy, 0.0)):
-                    return ExecResult(status="rejected",
-                                      detail=f"超过策略仓位上限 {strategy}")
+                # 策略层口径（审查 M5 统一）：该任务全部腿的持仓
+                # 名义之和——双腿策略不再是「单腿口径可达 2 倍」。
+                # 其余腿名义按持仓均价计（position.notional 口径）。
+                strat_cap = self.caps.strategy.get(strategy, 0.0)
+                if strat_cap > 0:
+                    others = 0.0
+                    for k in self.registry.keys_of(strategy):
+                        if k == key:
+                            continue
+                        p = self.position(k.venue, k.symbol)
+                        if p is not None:
+                            others += p.notional
+                    if not within_cap(others + new_notional, strat_cap):
+                        return ExecResult(
+                            status="rejected",
+                            detail=f"超过策略仓位上限 {strategy}（全部腿合计口径）")
                 if self.caps.global_ > 0:
                     after = self._total_notional() + \
                         (new_notional - abs(cur_qty) * ref_price)
@@ -327,6 +469,18 @@ class Executor:
             status = "partial"
         else:
             status = "open"
+        if req.price is None and status == "open" and order.order_id:
+            # 市价单回执未终结（如 Lighter 异步结算：回执恒 open /
+            # filled=0）：登记待发现，成交由 poll_pending_fills 经
+            # poll 终态或持仓差对账补记账本（审查 M2）；在此之前
+            # 订单登记保留，定案后才注销，避免登记只增不减。
+            self._pending_fills[order.order_id] = _PendingFill(
+                order_id=order.order_id, strategy=strategy,
+                venue_id=venue_id, symbol=req.symbol, side=req.side,
+                qty=req.qty, recorded=filled, baseline_qty=cur_qty,
+                ref_price=fill_price if filled > 0 else
+                (book.ask if req.side is Side.BUY else book.bid),
+                deadline=time.time() + PENDING_FILL_TTL_SECONDS)
         return ExecResult(status=status, order=order, filled_qty=filled,
                           fill_price=fill_price)
 

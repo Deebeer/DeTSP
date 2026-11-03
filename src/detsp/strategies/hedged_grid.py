@@ -36,6 +36,15 @@ class HedgedGridParams:
     # 小于它时不对冲，避免为碎量频繁下单磨损
     max_unhedged_seconds: float = 0.0  # 裸露超时（秒）：残差超死区
     # 持续超过此时长 → 报警并绕过对冲所最小下单量强制对冲；0=禁用
+    max_residual_seconds: float = 0.0  # 残差强制对冲时限（秒）：残差
+    # 超死区但低于对冲所最小下单量时，持续超过此时长也强制对冲
+    # （自查 L1）；与 max_unhedged_seconds 的区别是它只针对
+    # 「量不够最小下单量」这一类残差，0=禁用（保持等累积）
+    skip_band_frac: float = 0.25    # 贴价跳档带宽（格距的比例）：
+    # 初始铺单跳过距现价小于该比例×格距的档位（WGALL skipBand，
+    # 防止现价附近的档位被行情噪声反复触发磨损）
+    fee_bps_per_side: float = 5.0   # 单边手续费估算（bps）：启动
+    # 经济性检查用——格距毛利 ≤ 往返手续费时告警（WGALL 口径）
     takeover_position: bool = False    # 启动发现网格腿已有持仓时是否
     # 接管；默认 False = 登记为未托管、不铺单，等人工处理
 
@@ -59,6 +68,14 @@ class HedgedGridParams:
             raise ValueError("hedge_deadband_qty 不能为负")
         if self.max_unhedged_seconds < 0:
             raise ValueError("max_unhedged_seconds 不能为负")
+        if self.max_residual_seconds < 0:
+            raise ValueError("max_residual_seconds 不能为负")
+        if not 0 <= self.skip_band_frac < 1:
+            raise ValueError("skip_band_frac 须在 [0, 1)")
+        if self.fee_bps_per_side < 0:
+            raise ValueError("fee_bps_per_side 不能为负")
+        if self.leverage_grid <= 0 or self.leverage_hedge <= 0:
+            raise ValueError("leverage_grid / leverage_hedge 必须大于 0")
 
 
 # ═══════════ 网格纯函数（档位/铺单计划，沿用已验证的网格语义） ═══════════
@@ -104,10 +121,16 @@ def plan_initial_orders(p: HedgedGridParams,
     - long_short：现价下方挂买、上方挂卖，均为开仓单
     - long：只在现价下方铺买（开仓）；止盈卖单在成交后动态挂
     - short：只在现价上方铺卖（开仓）；止盈买单在成交后动态挂
+    - 贴价跳档（WGALL skipBand）：距现价 < skip_band_frac×格距
+      的档位不挂——现价附近的档位最容易被噪声反复触发，先跳过，
+      等成交后的反向单机制自然把档位铺开
     """
     levels = grid_levels(p)
+    band = p.skip_band_frac * grid_step(p)
     out: list[PlannedOrder] = []
     for lv in levels:
+        if abs(lv - current_price) < band:
+            continue  # 贴价跳档（含现价恰在档位上：原逻辑本就不挂）
         if lv < current_price and p.mode in ("long_short", "long"):
             out.append(PlannedOrder(price=lv, side=Side.BUY,
                                     qty=p.qty_per_grid))
@@ -118,18 +141,21 @@ def plan_initial_orders(p: HedgedGridParams,
 
 
 def counter_order(p: HedgedGridParams, filled_price: float,
-                  filled_side: Side) -> PlannedOrder:
+                  filled_side: Side, qty: float | None = None) -> PlannedOrder:
     """成交后相邻格的反向单：买成交→上一格挂卖，卖成交→下一格挂买。
 
+    数量按实际成交量镜像（WGALL 口径）：部分成交只挂已成部分
+    的反向单，qty=None 时用整格量（保持纯函数旧调用兼容）。
     long 模式的卖单、short 模式的买单是止盈，只减仓（reduce_only）。
     """
     step = grid_step(p)
+    q = p.qty_per_grid if qty is None else qty
     if filled_side is Side.BUY:
         return PlannedOrder(price=filled_price + step, side=Side.SELL,
-                            qty=p.qty_per_grid,
+                            qty=q,
                             reduce_only=(p.mode == "long"))
     return PlannedOrder(price=filled_price - step, side=Side.BUY,
-                        qty=p.qty_per_grid,
+                        qty=q,
                         reduce_only=(p.mode == "short"))
 
 
@@ -197,6 +223,12 @@ class HedgedGridStrategy:
         self._orders: dict[str, PlannedOrder] = {}   # 网格腿自有挂单
         self._recovery_orders: set[str] = set()
         self._pos_baseline: dict[str, float] = {}    # 对账式成交发现基线
+        self._recorded: dict[str, float] = {}        # 每单已记账量
+        # （增量记账口径，自查 M3：place 回执/poll 中间态/终态/对账
+        # 四路都只记增量，互不重复）
+        self._cancel_events: list[float] = []        # 撤单风暴统计
+        # （WGALL 口径：60 秒内自有单被撤/被拒 ≥5 次 → 暂停补单）
+        self._pause_until = -1e18                    # 暂停铺单截止时刻
         self._refill_requested = False
         self._unhedged_since: float | None = None    # 残差超死区起始时刻
         self.hedge_forced_count = 0                  # 裸露超时强制对冲次数
@@ -245,6 +277,35 @@ class HedgedGridStrategy:
                 raise RuntimeError(
                     f"中性网格名义估算 {est:,.0f} USD 超过{label}上限 "
                     f"{cap:,.0f} USD，拒绝启动（caps 硬校验）")
+        # 启动行情与保证金预检（WGALL 口径，对照补齐）：
+        price = self.executor.venue(p.grid_venue).book(p.symbol).mid
+        if not (p.lower_price * 0.5 <= price <= p.upper_price * 2.0):
+            raise RuntimeError(
+                f"启动价格 sanity 失败：现价 {price} 远离网格区间 "
+                f"[{p.lower_price}, {p.upper_price}]（允许范围 "
+                f"[{p.lower_price * 0.5}, {p.upper_price * 2.0}]），"
+                f"拒绝启动——多半是标的或区间配错")
+        for vid, lev in ((p.grid_venue, p.leverage_grid),
+                         (p.hedge_venue, p.leverage_hedge)):
+            need = single / lev
+            avail = float(self.executor.venue(vid).balance().get(
+                "available", 0.0))
+            if need > avail:
+                raise RuntimeError(
+                    f"保证金预检失败：{vid} 单腿估算名义 {single:,.0f} "
+                    f"USD ÷ 杠杆 {lev} 需保证金 {need:,.0f}，超过可用 "
+                    f"{avail:,.0f}，拒绝启动")
+            if avail > 0 and need > 0.8 * avail:
+                self.recovery_notes.append(
+                    f"保证金预检告警：{vid} 所需保证金 {need:,.0f} 已超"
+                    f"过可用 {avail:,.0f} 的 80%，成交推进后可能不足")
+        mid = (p.lower_price + p.upper_price) / 2
+        if grid_step(p) <= mid * 2 * p.fee_bps_per_side / 10_000:
+            self.recovery_notes.append(
+                f"经济性告警：格距 {grid_step(p)} 不大于往返手续费估算 "
+                f"{mid * 2 * p.fee_bps_per_side / 10_000:.4f}"
+                f"（单边 {p.fee_bps_per_side} bps），每格毛利将被手续"
+                f"费吃掉，请调大区间/格数或核对 fee_bps_per_side")
         self.executor.claim(self.owner, p.grid_venue, p.symbol)
         self.executor.claim(self.owner, p.hedge_venue, p.symbol)
         # 启动对账：先撤双腿该币种的遗留挂单（非本进程登记的），
@@ -277,9 +338,8 @@ class HedgedGridStrategy:
                 f"将在 tick 中调平到 0")
         self.started = True
         self.stopped = False
-        price = self.executor.venue(p.grid_venue).book(p.symbol).mid
         for po in plan_initial_orders(p, price):
-            self._place(po)
+            self._place(po, now=now)
 
     def stop(self, close: bool = True) -> None:
         """停止：撤双腿自有挂单 + 平双腿持仓（面板停止与停机共用）。"""
@@ -291,14 +351,20 @@ class HedgedGridStrategy:
         self._orders.clear()
         self._recovery_orders.clear()
         self._pos_baseline.clear()
+        self._recorded.clear()
         if close:
             self.executor.close_position(self.owner, p.grid_venue, p.symbol)
             self.executor.close_position(self.owner, p.hedge_venue, p.symbol)
         self.stopped = True
-        if self.executor.position(p.grid_venue, p.symbol) is None and \
-                self.executor.position(p.hedge_venue, p.symbol) is None:
-            self.executor.release(self.owner, p.grid_venue, p.symbol)
-            self.executor.release(self.owner, p.hedge_venue, p.symbol)
+        if close:
+            # 归属显式释放（自查 L4）：不依赖 position() 恰好返回
+            # None——某些场所平仓后仍返回零量持仓行，旧逻辑会
+            # 因此漏释放、归属被永久占用。平仓已执行即释放
+            for vid in (p.grid_venue, p.hedge_venue):
+                try:
+                    self.executor.release(self.owner, vid, p.symbol)
+                except Exception:  # noqa: BLE001 — 未 claim 时不挡停机
+                    pass
 
     def request_refill(self) -> None:
         """人工补格触发：下一 tick 只补一次空缺层级。"""
@@ -308,8 +374,23 @@ class HedgedGridStrategy:
     def _level_taken(self, price: float) -> bool:
         return any(abs(po.price - price) < 1e-9 for po in self._orders.values())
 
-    def _place(self, po: PlannedOrder, recovery: bool = False) -> None:
+    def _note_cancel_storm(self, now: float) -> None:
+        """撤单风暴统计（WGALL 口径）：60 秒内自有单被撤/被拒
+        ≥5 次 → 暂停开仓类铺单 60 秒（reduce-only 回收单不拦，
+        它是降风险动作）。"""
+        self._cancel_events = [t for t in self._cancel_events
+                               if now - t <= 60.0]
+        self._cancel_events.append(now)
+        if len(self._cancel_events) >= 5:
+            self._pause_until = now + 60.0
+            self.last_error = ("撤单风暴保护：60 秒内自有单被撤/被拒 "
+                               "≥5 次，暂停铺单 60 秒")
+
+    def _place(self, po: PlannedOrder, recovery: bool = False,
+               now: float = 0.0) -> None:
         p = self.params
+        if not po.reduce_only and now < self._pause_until:
+            return  # 撤单风暴暂停期内不开新仓类单
         req = OrderRequest(symbol=p.symbol, side=po.side, qty=po.qty,
                            price=po.price, reduce_only=po.reduce_only,
                            post_only=True)
@@ -325,52 +406,131 @@ class HedgedGridStrategy:
             res = self.executor.place(self.owner, p.grid_venue, req,
                                       intent="open", corridor_pct=corridor)
         if res.order is None:
-            self.last_error = res.detail or res.status
+            if res.status == "unknown":
+                # 下单结果未知（自查 M1）：订单可能已挂上。用合成
+                # 号登记待确认单，_process_fills 先在挂单列表里按
+                # 方向/价格/数量认领真实号，认领不到再走对账式
+                # 发现——不因没拿到回执就当没下过（会漏成交）或
+                # 重复补单（会双倍敞口）
+                oid = f"unknown:{p.grid_venue}:{po.price}:{po.side.value}"
+                self._orders[oid] = po
+                self._pos_baseline[oid] = baseline
+                self._recorded[oid] = 0.0
+                if recovery:
+                    self._recovery_orders.add(oid)
+                self.last_error = ("网格下单结果未知，已登记待确认单"
+                                   "等待认领/对账定案")
+            else:
+                self.last_error = res.detail or res.status
             return
         if res.status == "filled":
-            self._on_fill(po)
+            self._on_fill(po, res.filled_qty or po.qty, now)
             return
         self._orders[res.order.order_id] = po
         self._pos_baseline[res.order.order_id] = baseline
+        # place 回执已记账的量（如即时部分成交）登记为已记，
+        # 后续 poll/对账只记增量（自查 M3）
+        self._recorded[res.order.order_id] = res.filled_qty
         if recovery:
             self._recovery_orders.add(res.order.order_id)
 
-    def _on_fill(self, po: PlannedOrder) -> None:
+    def _on_fill(self, po: PlannedOrder, filled_qty: float,
+                 now: float = 0.0) -> None:
         if self.recovering:
             return  # 回收单成交：阶梯维护在 tick 里做
-        counter = counter_order(self.params, po.price, po.side)
+        # 反向单数量按实际成交量镜像（WGALL 口径）：部分成交
+        # 只挂已成部分的反向单，不按整格量超挂
+        counter = counter_order(self.params, po.price, po.side,
+                                qty=filled_qty)
         if not (self.params.lower_price - 1e-9 <= counter.price
                 <= self.params.upper_price + 1e-9):
             return  # 反向单越出区间不再挂
         if self._level_taken(counter.price):
             return
-        self._place(counter)
+        self._place(counter, now=now)
 
-    def _process_fills(self) -> None:
+    def _record_inc(self, oid: str, po: PlannedOrder, total: float,
+                    price: float) -> None:
+        """增量记账（自查 M3）：total 为该单累计成交量，只记
+        超过已记账的部分——place 回执、poll 中间/终态、对账推断
+        三路共用同一口径，互不重复计数。"""
+        inc = total - self._recorded.get(oid, 0.0)
+        if inc > 1e-9:
+            self.executor.record_fill(
+                self.owner, self.params.grid_venue, self.params.symbol,
+                po.side, inc, price, order_id=oid)
+            self._recorded[oid] = self._recorded.get(oid, 0.0) + inc
+
+    def _drop_order(self, oid: str) -> None:
+        self._orders.pop(oid, None)
+        self._recovery_orders.discard(oid)
+        self._pos_baseline.pop(oid, None)
+        self._recorded.pop(oid, None)
+
+    def _adopt_unknown(self, oid: str, po: PlannedOrder) -> str | None:
+        """待确认单认领：在挂单列表里按方向/价格/数量找本策略
+        刚挂的那张单，找到就把跟踪键换成真实订单号。"""
+        venue = self.executor.venue(self.params.grid_venue)
+        try:
+            orders = venue.open_orders(self.params.symbol)
+        except Exception:  # noqa: BLE001 — 查询失败下轮再认领
+            return None
+        for o in orders:
+            if o.side != po.side:
+                continue
+            if o.price is None or abs(o.price - po.price) > 1e-9:
+                continue
+            if abs(o.qty - po.qty) > max(1e-9, po.qty * 1e-6):
+                continue
+            self._orders[o.order_id] = self._orders.pop(oid)
+            if oid in self._pos_baseline:
+                self._pos_baseline[o.order_id] = \
+                    self._pos_baseline.pop(oid)
+            if oid in self._recorded:
+                self._recorded[o.order_id] = self._recorded.pop(oid)
+            if oid in self._recovery_orders:
+                self._recovery_orders.discard(oid)
+                self._recovery_orders.add(o.order_id)
+            return o.order_id
+        return None
+
+    def _process_fills(self, now: float = 0.0) -> None:
         venue = self.executor.venue(self.params.grid_venue)
         for oid, po in list(self._orders.items()):
+            if oid.startswith("unknown:"):
+                adopted = self._adopt_unknown(oid, po)
+                if adopted is not None:
+                    oid = adopted
+                # 认领不到也继续走 poll/对账：poll 对合成号返回
+                # None → 对账式按持仓差定案（没挂上则差为 0 丢弃）
             o = venue.poll_order(oid)
             if o is None:
                 # 对账式发现：场所给不出终态时，「挂单消失 + 持仓差」
                 # 推断成交（与原网格同一口径）
-                self._reconcile_missing(oid, po)
+                self._reconcile_missing(oid, po, now)
                 continue
-            if o.status == "filled":
-                del self._orders[oid]
-                self._recovery_orders.discard(oid)
-                self._pos_baseline.pop(oid, None)
-                self.executor.record_fill(
-                    self.owner, self.params.grid_venue, self.params.symbol,
-                    po.side, o.filled_qty,
-                    o.price if o.price is not None else po.price,
-                    order_id=oid)
-                self._on_fill(po)
+            px = o.price if o.price is not None else po.price
+            if o.status == "open":
+                # 中间态部分成交：只记增量，不提前挂反向单
+                if o.filled_qty > self._recorded.get(oid, 0.0):
+                    self._record_inc(oid, po, o.filled_qty, px)
+            elif o.status == "filled":
+                final = o.filled_qty if o.filled_qty > 0 else po.qty
+                self._record_inc(oid, po, final, px)
+                self._drop_order(oid)
+                self._on_fill(po, final, now)
             elif o.status in ("canceled", "rejected"):
-                del self._orders[oid]
-                self._recovery_orders.discard(oid)
-                self._pos_baseline.pop(oid, None)
+                # 带部分成交的撤单：已成部分照样记账 + 挂反向单
+                if o.filled_qty > 1e-9:
+                    self._record_inc(oid, po, o.filled_qty, px)
+                    self._drop_order(oid)
+                    self._on_fill(po, o.filled_qty, now)
+                else:
+                    self._drop_order(oid)
+                self._note_cancel_storm(now)
 
-    def _reconcile_missing(self, oid: str, po: PlannedOrder) -> None:
+    def _reconcile_missing(self, oid: str, po: PlannedOrder,
+                           now: float = 0.0) -> None:
         venue = self.executor.venue(self.params.grid_venue)
         try:
             open_ids = {o.order_id for o in venue.open_orders(self.params.symbol)}
@@ -379,26 +539,29 @@ class HedgedGridStrategy:
         if oid in open_ids:
             return
         baseline = self._pos_baseline.get(oid)
-        del self._orders[oid]
-        self._recovery_orders.discard(oid)
-        self._pos_baseline.pop(oid, None)
         if baseline is None:
+            self._drop_order(oid)
             return
         delta = (self._grid_pos() - baseline) * po.side.sign
-        if delta <= 1e-9:
-            return  # 无成交痕迹：订单已撤/失效
-        filled = min(delta, po.qty)
-        self.executor.record_fill(
-            self.owner, self.params.grid_venue, self.params.symbol,
-            po.side, filled, po.price, order_id=oid)
-        self._on_fill(po)
+        filled_total = min(max(delta, 0.0), po.qty)
+        if filled_total > 1e-9:
+            self._record_inc(oid, po, filled_total, po.price)
+            self._drop_order(oid)
+            self._on_fill(po, filled_total, now)
+        else:
+            self._drop_order(oid)  # 无成交痕迹：订单已撤/失效
 
     # ----- 对冲腿调平 -----
     def _sync_hedge(self, now: float) -> None:
         """对冲腿目标 = −网格净持仓；差额超死区时市价调平。
 
         残差达不到对冲所最小下单量时等累积；裸露持续超过
-        max_unhedged_seconds 时报警并强制对冲（绕过最小量）。
+        max_unhedged_seconds 时报警并强制对冲（绕过最小量）；
+        残差低于最小量但持续超过 max_residual_seconds 时同样
+        强制对冲（自查 L1，独立开关）。
+        两所价格偏离 >3% 时本 tick 跳过（疑似行情异常或同名
+        不同标的，不拿坏价格调平）；上一笔调平单尚待结算定案
+        时不叠加新调平（防按旧持仓重复下单）。
         """
         p = self.params
         grid_qty = self._grid_pos()
@@ -414,8 +577,29 @@ class HedgedGridStrategy:
         delta = plan_hedge_adjustment(grid_qty, hedge_qty,
                                       p.hedge_deadband_qty,
                                       self._hedge_min_qty(), force=force)
+        if delta == 0.0 and p.max_residual_seconds > 0 and \
+                now - self._unhedged_since >= p.max_residual_seconds:
+            # 残差超死区但低于最小下单量、持续超时：强制对冲
+            delta = plan_hedge_adjustment(grid_qty, hedge_qty,
+                                          p.hedge_deadband_qty,
+                                          self._hedge_min_qty(), force=True)
+            if delta != 0.0:
+                force = True
         if delta == 0.0:
             return  # 未达最小量且未到强制时限：等残差累积
+        if self.executor.has_pending_fill(p.hedge_venue, p.symbol):
+            return  # 上一笔调平单未结算定案：不按旧持仓叠加下单
+        try:
+            g_mid = self.executor.venue(p.grid_venue).book(p.symbol).mid
+            h_mid = self.executor.venue(p.hedge_venue).book(p.symbol).mid
+        except Exception:  # noqa: BLE001 — 行情不可得：本 tick 不调平
+            return
+        if g_mid > 0 and h_mid > 0 and abs(g_mid / h_mid - 1.0) > 0.03:
+            self.last_error = (
+                f"对冲调平跳过：两所价格偏离 "
+                f"{abs(g_mid / h_mid - 1.0):.2%} 超过 3%"
+                f"（疑似行情异常/同名不同标的）")
+            return
         side = Side.BUY if delta > 0 else Side.SELL
         resulting = hedge_qty + delta
         if abs(resulting) > abs(hedge_qty):
@@ -453,8 +637,60 @@ class HedgedGridStrategy:
             if not po.reduce_only:
                 if self.executor.cancel(self.owner, self.params.grid_venue, oid):
                     del self._orders[oid]
+                    self._recorded.pop(oid, None)
+                    self._pos_baseline.pop(oid, None)
 
-    def _maintain_recovery(self, price: float) -> None:
+    def _recovery_rungs(self, price: float) -> list[float]:
+        """回收阶梯落点（WGALL `_placeRecoveryLadder` 口径）：
+
+        现价在区间外时，档位先落在「现价 ↔ 被破边界」之间
+        （区间外、被破边界外侧一格起），价格小幅反弹/回落、
+        尚未回到区间内就开始分批减仓；再沿价格返回方向逐格
+        延伸，直到能覆盖全部剩余持仓（DeTSP 的总量封顶口径，
+        REVIEW2 对照中记为改进项）。档位与网格同格距、同
+        层级对齐（以 lower_price 为原点延伸）。
+        """
+        import math
+        p = self.params
+        step = grid_step(p)
+        pos_qty = self._grid_pos()
+        rungs: list[float] = []
+        cap = p.grid_count * 2 + 2
+        if pos_qty > 0:
+            # 多头卖出回收：档位自下而上。自现价上方第一格起；
+            # 现价冲出上界时先铺上边界↔现价之间的档位（回落
+            # 必经之路），再向上延伸
+            if price > p.upper_price:
+                lv = p.upper_price
+                while lv < price and len(rungs) < cap:
+                    rungs.append(round(lv, 10))
+                    lv += step
+                start = lv
+            else:
+                start = p.lower_price + (
+                    math.floor((price - p.lower_price) / step) + 1) * step
+            lv = start
+            while len(rungs) < cap:
+                rungs.append(round(lv, 10))
+                lv += step
+        elif pos_qty < 0:
+            # 空头买入回收：与多头对称，自上而下
+            if price < p.lower_price:
+                lv = p.lower_price
+                while lv > price and len(rungs) < cap:
+                    rungs.append(round(lv, 10))
+                    lv -= step
+                start = lv
+            else:
+                start = p.lower_price + (
+                    math.ceil((price - p.lower_price) / step) - 1) * step
+            lv = start
+            while len(rungs) < cap:
+                rungs.append(round(lv, 10))
+                lv -= step
+        return rungs
+
+    def _maintain_recovery(self, price: float, now: float = 0.0) -> None:
         p = self.params
         pos_qty = self._grid_pos()
         if pos_qty == 0:
@@ -463,7 +699,9 @@ class HedgedGridStrategy:
             self._recovery_orders.clear()
             self.recovering = False
             self.stopped = True
-            if self.executor.position(p.hedge_venue, p.symbol) is None:
+            if self._pos(p.hedge_venue) == 0:
+                # 按数量判零而不是 position() 返回 None（自查 L4
+                # 同一口径：零量持仓行不算还有持仓）
                 self.executor.release(self.owner, p.grid_venue, p.symbol)
                 self.executor.release(self.owner, p.hedge_venue, p.symbol)
             return
@@ -473,32 +711,31 @@ class HedgedGridStrategy:
         remaining = abs(pos_qty) - open_recovery_qty
         if remaining <= 1e-12:
             return
-        levels = grid_levels(p)
-        if pos_qty > 0:  # 多头：上方层级挂卖回收
-            cands = [lv for lv in levels if lv > price]
-            side = Side.SELL
-        else:            # 空头：下方层级挂买回收
-            cands = [lv for lv in levels if lv < price]
-            side = Side.BUY
-        for lv in cands:
+        # 阶梯落在现价↔边界之间（_recovery_rungs）；方向只由
+        # 持仓符号决定：多头挂卖回收、空头挂买回收
+        side = Side.SELL if pos_qty > 0 else Side.BUY
+        for lv in self._recovery_rungs(price):
             if remaining <= 1e-12:
                 break
             if self._level_taken(lv):
                 continue
             q = min(p.qty_per_grid, remaining)
             self._place(PlannedOrder(price=lv, side=side, qty=q,
-                                     reduce_only=True), recovery=True)
+                                     reduce_only=True), recovery=True,
+                        now=now)
             remaining -= q
 
-    def _exit_recovery(self, price: float) -> None:
+    def _exit_recovery(self, price: float, now: float = 0.0) -> None:
         for oid in list(self._recovery_orders):
             if self.executor.cancel(self.owner, self.params.grid_venue, oid):
                 self._orders.pop(oid, None)
+                self._recorded.pop(oid, None)
+                self._pos_baseline.pop(oid, None)
         self._recovery_orders.clear()
         self.recovering = False
         for po in plan_initial_orders(self.params, price):
             if not self._level_taken(po.price):
-                self._place(po)
+                self._place(po, now=now)
 
     # ----- 主循环 -----
     def tick(self, now: float = 0.0, allow_open: bool = True) -> None:
@@ -511,7 +748,7 @@ class HedgedGridStrategy:
             # 未托管持仓被接管前，网格腿与对冲腿都不自动动作
             return
         p = self.params
-        self._process_fills()
+        self._process_fills(now)
         if self.stopped:
             return
         # 对冲调平紧跟成交处理：先把方向残差消掉再谈其他
@@ -543,10 +780,10 @@ class HedgedGridStrategy:
                 return
             if not self.recovering:
                 self._enter_recovery()
-            self._maintain_recovery(price)
+            self._maintain_recovery(price, now)
             return
         if self.recovering:
-            self._exit_recovery(price)
+            self._exit_recovery(price, now)
             return
         if self._refill_requested:
             self._refill_requested = False
@@ -554,7 +791,4 @@ class HedgedGridStrategy:
                 return
             for po in plan_initial_orders(p, price):
                 if not self._level_taken(po.price):
-                    self._place(po)
-
-    def decide(self, ctx) -> list:
-        return []
+                    self._place(po, now=now)

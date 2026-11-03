@@ -10,6 +10,11 @@ perp-dex-tools（非商业许可，个人自用，见 NOTICE）的 hedge
 强平距离改用 Executor 公共口径带 mmr、不可评估按危险处理（H7/M5）；
 maker 部分成交保留跟踪、终局按最终量对冲（M2）；poll 不可得时
 「挂单消失+持仓差」对账式发现（S2）；启动按已有持仓对账初始化（S3）。
+审查修复（2026-11-04，三批全修）：选向先过费率合理性+口径闸门
+（H1/H2）；taker 开仓/加仓/maker 对冲腿设结算宽限期，宽限内不做
+单腿定性（G1）；maker 下单 unknown 登记待确认单并后续认领（M1）；
+idle 阶段发现仓位按 open 接管；不平衡削腿改带滑点上限的限价单
+（对照 M2）；骨架 decide 已删除（R1）。
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ from dataclasses import dataclass
 from ..core.risk import (
     basis_ok,
     detect_single_leg,
-    funding_hourly_rate,
+    evaluate_funding_pair,
     should_force_close,
 )
 from ..core.venue import OrderRequest, Side
@@ -50,6 +55,11 @@ class RotationParams:
     # --max-position（主所 maker 逐笔建仓到上限），此处按 DeTSP 的
     # 双腿 taker 口径重组（maker 首轮之后的加仓档统一走 taker）
     accumulate_interval_seconds: float = 60.0  # 逐步建仓的加仓间隔
+    settle_grace_seconds: float = 10.0  # 开仓结算宽限期（秒）：市价单
+    # 异步结算的场所成交数秒后才反映在持仓上，宽限期内不对刚开的
+    # 仓做单腿定性，期满按真实持仓定案（审查 G1）
+    max_slippage_bps: float = 20.0      # 削腿（不平衡修正）的滑点
+    # 保护上限（bps）：带滑点上限的限价单，超限本轮不削（对照 M2）
 
     def __post_init__(self) -> None:
         if self.venue_a == self.venue_b:
@@ -58,6 +68,10 @@ class RotationParams:
             raise ValueError("notional_usd 必须大于 0")
         if self.max_position_qty < 0:
             raise ValueError("max_position_qty 不能为负（0=禁用）")
+        if self.settle_grace_seconds < 0:
+            raise ValueError("settle_grace_seconds 不能为负")
+        if self.max_slippage_bps < 0:
+            raise ValueError("max_slippage_bps 不能为负")
 
 
 def choose_direction(funding_a: float, funding_b: float) -> tuple[str, str]:
@@ -159,6 +173,10 @@ class RotationHedgeStrategy:
         self._maker_recorded = 0.0   # 下单时 Executor 已记账的量
         self._maker_pos_before = 0.0  # S2：挂单前该腿持仓（对账基线）
         self._maker_sign = 1.0       # maker 腿方向符号（多 +1 / 空 -1）
+        self._maker_price = 0.0      # maker 挂单价（unknown 认领用）
+        self._pending_open: dict | None = None  # taker 开仓/加仓/
+        # maker 对冲腿的待确认状态（结算宽限）：{"long_leg",
+        # "until", "mode": "round"/"add"}，见 _resolve_pending
         self._round_qty = 0.0        # 本轮单档数量（逐步建仓的步长）
         self._last_add_at = -1e18    # 最近一次加仓时间（逐步建仓间隔）
         self.last_error: str = ""
@@ -199,6 +217,7 @@ class RotationHedgeStrategy:
         if self.executor is None:
             return
         self._ensure_claims()
+        self._pending_open = None
         if self._maker_oid is not None:
             try:
                 self.executor.cancel(self.owner,
@@ -246,9 +265,14 @@ class RotationHedgeStrategy:
             return False
         if detect_single_leg({"a": qa, "b": qb}):
             if qa != 0 and qb != 0 and qa * qb < 0:
-                # 双腿反向但数量不平：削掉较大腿多出的部分
+                # 双腿反向但数量不平：用带滑点上限的限价单削掉
+                # 较大腿多出的部分（对照 M2，不再无保护市价削）
                 big, small = ("a", "b") if abs(qa) > abs(qb) else ("b", "a")
-                self._close_leg(big, qty=abs(legs[big]) - abs(legs[small]))
+                side = Side.SELL if legs[big] > 0 else Side.BUY
+                self.executor.trim_excess(
+                    self.owner, self._venue_id(big), self.params.symbol,
+                    side, abs(legs[big]) - abs(legs[small]),
+                    max_slippage_bps=self.params.max_slippage_bps)
                 return True
             if qa != 0 and qb != 0:
                 # 双腿同向 = 方向错乱，全平
@@ -299,13 +323,16 @@ class RotationHedgeStrategy:
         worst_est = min(self._est_corridor("a"), self._est_corridor("b"))
         if worst_est < self.min_corridor_pct:
             return  # 杠杆太高，估算强平距离不足
-        # H3：资金费先统一换算到每小时口径再选向/算 edge——
-        # HL/Arcus 是每小时费率、Lighter 是 8 小时费率，直接比原始
-        # rate 会系统性选错方向
+        # 费率选向闸门（审查 H1/H2）：两腿先过合理性（单期
+        # |费率|>5% 判数据错误）与口径一致检查，再统一换算到
+        # 每小时口径选向——闸门不过拒绝开仓并记原因，不拿错误
+        # 或不同口径的费率（H3：原始值周期不同）选方向
         info_a = ex.venue(p.venue_a).funding(p.symbol)
         info_b = ex.venue(p.venue_b).funding(p.symbol)
-        fa = funding_hourly_rate(info_a.rate, info_a.interval_seconds)
-        fb = funding_hourly_rate(info_b.rate, info_b.interval_seconds)
+        ok, reason, fa, fb = evaluate_funding_pair(info_a, info_b)
+        if not ok:
+            self.last_error = reason
+            return
         long_leg, short_leg = choose_direction(fa, fb)
         bal = {leg: ex.venue(self._venue_id(leg)).balance().get("available", 0.0)
                for leg in ("a", "b")}
@@ -331,7 +358,10 @@ class RotationHedgeStrategy:
             self._place_maker(maker_leg, long_leg, qty, now)
             return
 
-        # 双 taker：先下一腿，失败/未知立即按对账结果处理，不留裸腿
+        # 双 taker：先下一腿；下单后立即回读确认双腿成形（快速
+        # 路径，同步结算场所行为不变）；未确认（异步结算/结果
+        # 未知）进入结算宽限期，期满按真实持仓定案（审查 G1），
+        # 不再立即按「只成一腿」平掉可能只是还没结算的仓位
         legs_order = [long_leg, short_leg]
         results = {}
         for leg in legs_order:
@@ -343,15 +373,53 @@ class RotationHedgeStrategy:
             if res.status in ("rejected", "unknown"):
                 break
         legs_now = self._legs_qty()
-        if any(abs(q) > 0 for q in legs_now.values()):
-            if detect_single_leg(legs_now) or \
-                    results.get(legs_order[-1]) is None or \
-                    results[legs_order[-1]].status in ("rejected", "unknown"):
-                # 只成一腿或第二腿结果不明：按真实持仓把已成腿平掉
-                self._close_both(now)
-                return
+        if self._confirm_legs(legs_now):
             self._post_open(now)
-        # 两腿都没成：留在 idle，下一 tick 再看
+            return
+        if any(r.status == "unknown" for r in results.values()) or \
+                any(abs(q) > 0 for q in legs_now.values()) or \
+                len(results) == 2:
+            self._enter_pending(long_leg, now, "round")
+        # 第一腿被明确拒绝且无任何成交：留在 idle，下一 tick 再看
+
+    # ----- 结算宽限（审查 G1）-----
+    def _confirm_legs(self, legs: dict[str, float]) -> bool:
+        """双腿是否已成形：都非零、反向、不平衡在容差内。"""
+        qa, qb = legs["a"], legs["b"]
+        if qa == 0 or qb == 0 or qa * qb > 0:
+            return False
+        return not detect_single_leg(legs)
+
+    def _enter_pending(self, long_leg: str, now: float,
+                       mode: str) -> None:
+        self._pending_open = {
+            "long_leg": long_leg,
+            "until": now + self.params.settle_grace_seconds,
+            "mode": mode,
+        }
+        self.phase = "opening"
+
+    def _resolve_pending(self, now: float) -> None:
+        """宽限期内定案：双腿补齐 → 按 mode 收尾（round=新开仓
+        复核；add=加仓复核不重置计时）；宽限未到 → 继续等；
+        到期仍未成形 → 有仓按真实持仓双平回冷却，无仓回 idle。"""
+        pend = self._pending_open
+        if pend is None:
+            return
+        legs = self._legs_qty()
+        if self._confirm_legs(legs):
+            self._pending_open = None
+            self._post_open(now, reset_timer=(pend["mode"] == "round"))
+            return
+        if now < pend["until"]:
+            return
+        self._pending_open = None
+        if any(abs(q) > 0 for q in legs.values()):
+            self._close_both(now)
+            self.last_error = ("开仓结算宽限期到期仍未双腿成形，"
+                               "已按真实持仓平掉残腿")
+        else:
+            self.phase = "idle"
 
     def _place_maker(self, maker_leg: str, long_leg: str, qty: float,
                      now: float) -> None:
@@ -364,6 +432,7 @@ class RotationHedgeStrategy:
         pos = self.executor.position(venue_id, p.symbol)
         self._maker_pos_before = pos.qty if pos else 0.0
         self._maker_sign = 1.0 if is_long else -1.0
+        self._maker_price = price
         req = OrderRequest(symbol=p.symbol,
                            side=Side.BUY if is_long else Side.SELL,
                            qty=qty, price=price, post_only=True)
@@ -380,6 +449,18 @@ class RotationHedgeStrategy:
             self._maker_recorded = res.filled_qty
         elif res.status == "filled":
             self._hedge_after_maker(maker_leg, long_leg, qty, now)
+        elif res.status == "unknown":
+            # 下单结果未知（审查 M1）：订单可能已挂上。用合成号
+            # 登记待确认单，后续 _tick_opening 先在挂单列表里按
+            # 方向/价格/数量认领真实订单号，认领不到再按持仓差
+            # 定案——绝不因「没拿到回执」就重复挂第二张
+            self.phase = "opening"
+            self._maker_oid = f"unknown:{venue_id}"
+            self._maker_leg = maker_leg
+            self._maker_qty = qty
+            self._maker_started = now
+            self._maker_partial = 0.0
+            self._maker_recorded = 0.0
 
     def _hedge_after_maker(self, maker_leg: str, long_leg: str, qty: float,
                            now: float) -> None:
@@ -387,18 +468,23 @@ class RotationHedgeStrategy:
         side = Side.BUY if other == long_leg else Side.SELL
         req = OrderRequest(symbol=self.params.symbol, side=side, qty=qty,
                            price=None)
-        self.executor.place(self.owner, self._venue_id(other), req,
-                            intent="open",
-                            corridor_pct=self._est_corridor(other))
-        legs_now = self._legs_qty()
-        if detect_single_leg(legs_now):
-            # 对冲腿没跟上：平掉 maker 腿，不留裸腿
-            self._close_both(now)
-            return
+        res = self.executor.place(self.owner, self._venue_id(other), req,
+                                  intent="open",
+                                  corridor_pct=self._est_corridor(other))
         self._maker_oid = None
         self._maker_partial = 0.0
         self._maker_recorded = 0.0
-        self._post_open(now)
+        legs_now = self._legs_qty()
+        if self._confirm_legs(legs_now):
+            self._post_open(now)
+            return
+        if res.status == "rejected":
+            # 对冲腿被明确拒绝（根本没下出）：平掉 maker 腿，不留裸腿
+            self._close_both(now)
+            return
+        # 对冲腿已下出但持仓尚未成形（异步结算/结果未知）：进
+        # 结算宽限期定案，不立即平掉 maker 腿（审查 G1）
+        self._enter_pending(long_leg, now, "round")
 
     def _post_open(self, now: float, reset_timer: bool = True) -> None:
         """开仓后复核：用真实持仓重算强平距离，不合格立即双平。
@@ -460,20 +546,26 @@ class RotationHedgeStrategy:
         worst_est = min(self._est_corridor("a"), self._est_corridor("b"))
         if worst_est < self.min_corridor_pct:
             return True  # 强平距离估算不足：不加仓
+        results = {}
         for leg in (long_leg, short_leg):
             side = Side.BUY if leg == long_leg else Side.SELL
             req = OrderRequest(symbol=p.symbol, side=side, qty=step,
                                price=None)
             res = ex.place(self.owner, self._venue_id(leg), req,
                            intent="open", corridor_pct=worst_est)
+            results[leg] = res
             if res.status in ("rejected", "unknown"):
                 break
         legs_now = self._legs_qty()
-        if detect_single_leg(legs_now):
-            # 加仓只成一腿：按真实持仓双平，不留裸腿
-            self._close_both(now)
+        if self._confirm_legs(legs_now):
+            self._post_open(now, reset_timer=False)
             return True
-        self._post_open(now, reset_timer=False)
+        if any(r.status == "unknown" for r in results.values()) or \
+                len(results) == 2:
+            # 加仓单已下出但未成形：结算宽限期定案（审查 G1）
+            self._enter_pending(long_leg, now, "add")
+            return True
+        # 第一档被明确拒绝：本 tick 不加仓，下个间隔再试
         return True
 
     def _maker_final_filled(self) -> float | None:
@@ -526,6 +618,31 @@ class RotationHedgeStrategy:
             long_leg = "b" if self._maker_leg == "a" else "a"
         self._hedge_after_maker(self._maker_leg, long_leg, filled, now)
 
+    def _adopt_unknown_maker(self) -> bool:
+        """unknown 待确认单认领（审查 M1）：在挂单列表里按方向/
+        价格/数量找本策略刚挂的那张单，找到换成真实订单号。"""
+        venue = self.executor.venue(self._venue_id(self._maker_leg))
+        try:
+            orders = venue.open_orders(self.params.symbol)
+        except Exception:  # noqa: BLE001 — 查询失败下轮再认领
+            return False
+        want_side = Side.BUY if self._maker_sign > 0 else Side.SELL
+        for o in orders:
+            if o.side != want_side:
+                continue
+            if abs(o.qty - self._maker_qty) > \
+                    max(1e-9, self._maker_qty * 1e-6):
+                continue
+            if self._maker_price > 0 and o.price is not None and \
+                    abs(o.price - self._maker_price) > \
+                    self._maker_price * 1e-6 + 1e-12:
+                continue
+            self._maker_oid = o.order_id
+            if o.filled_qty > self._maker_partial:
+                self._maker_partial = o.filled_qty
+            return True
+        return False
+
     def _tick_opening(self, now: float) -> None:
         """maker 挂单等待阶段（M2 重做）：
 
@@ -537,6 +654,20 @@ class RotationHedgeStrategy:
         """
         venue_id = self._venue_id(self._maker_leg)
         venue = self.executor.venue(venue_id)
+        if self._maker_oid is not None and \
+                self._maker_oid.startswith("unknown:"):
+            # 待确认单（审查 M1）：先认领真实订单号；认领窗口
+            # （30 秒）内继续等；窗口过后认领不到按持仓差定案
+            # （多半根本没挂上，差为 0）
+            if not self._adopt_unknown_maker():
+                if now - self._maker_started <= 30.0:
+                    return
+                pos = self.executor.position(venue_id, self.params.symbol)
+                cur = pos.qty if pos else 0.0
+                delta = (cur - self._maker_pos_before) * self._maker_sign
+                self._finalize_maker(
+                    min(max(delta, 0.0), self._maker_qty), now)
+                return
         o = venue.poll_order(self._maker_oid)
         if o is not None:
             if o.status == "open":
@@ -568,6 +699,16 @@ class RotationHedgeStrategy:
         if self.executor is None or self.stopped:
             return
         self._ensure_claims()
+
+        # taker 待确认（结算宽限期）先于一切定性检查：宽限内
+        # 不跑孤腿检查，期满由 _resolve_pending 按真实持仓定案
+        if self._pending_open is not None:
+            if not allow_open:
+                self._pending_open = None
+                self._close_both(now)
+                return
+            self._resolve_pending(now)
+            return
 
         # maker 等成交阶段先于孤腿检查：maker 刚成交、对冲腿未下时
         # 本来就是单腿，若先跑安全检查会把 maker 腿误平掉
@@ -612,9 +753,17 @@ class RotationHedgeStrategy:
         if self.phase == "cooldown" and in_cooldown(
                 self.closed_at, now, self.params.cooldown_seconds):
             return
-        if not has_position:
-            self.phase = "idle"
-            self._open_round(now)
-
-    def decide(self, ctx) -> list:
-        return []
+        if has_position:
+            # 非 open 阶段发现仓位（外部仓位、平仓残留或进程
+            # 重启遗漏）：按 open 接管并补 opened_at / hold_drawn，
+            # 让持有计时与安全检查都有据可依（审查 G1 附带项：
+            # idle 且有仓按 open 接管）
+            self.phase = "open"
+            self.opened_at = now
+            self.hold_drawn = draw_hold_seconds(self.params, self.rng)
+            self.recovery_notes.append(
+                f"tick 对账：非 open 阶段发现持仓 a={legs['a']} "
+                f"b={legs['b']}，按 open 阶段接管")
+            return
+        self.phase = "idle"
+        self._open_round(now)

@@ -52,11 +52,3 @@ def test_order_ownership():
     assert not r.owns_order("o1", "rotation_hedge")
     with pytest.raises(ConflictError):
         r.register_order("o2", K, "rotation_hedge")
-
-
-def test_api_key_index_conflict():
-    r = OwnershipRegistry()
-    r.claim_api_key("lighter", "default", 5, "grid")
-    with pytest.raises(ConflictError):
-        r.claim_api_key("lighter", "default", 5, "rotation_hedge")
-    r.claim_api_key("lighter", "default", 6, "rotation_hedge")  # 不同 index 可以

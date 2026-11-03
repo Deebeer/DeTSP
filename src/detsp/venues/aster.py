@@ -179,12 +179,30 @@ class AsterVenue(SkeletonVenue):
             return super().funding(symbol)
         data = self._request("GET", "/fapi/v1/premiumIndex",
                              {"symbol": to_pair(symbol)})
-        # lastFundingRate 是上一期已结算费率（官方无当期预测字段）；
+        # 口径判断（审查 H2）：premiumIndex 只有 lastFundingRate，
+        # 无下期预测字段——它就是上一期已结算费率，如实标注
+        # rate_kind="last_settled"；选向逻辑会因口径不一致拒绝与
+        # 预测/当期口径的场所相减开仓，不拿过期费率选方向。
         # Aster 结算周期 8 小时（H3 口径标注）
         return FundingInfo(symbol=symbol,
                            rate=float(data.get("lastFundingRate") or 0),
                            next_ts=float(data.get("nextFundingTime") or 0) / 1000,
-                           interval_seconds=28800)
+                           interval_seconds=28800,
+                           rate_kind="last_settled")
+
+    def funding_snapshot(self) -> list[FundingInfo]:
+        if self._paper is not None:
+            return super().funding_snapshot()
+        rows = self._request("GET", "/fapi/v1/premiumIndex", {})
+        out: list[FundingInfo] = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            out.append(FundingInfo(
+                symbol=to_base(str(row.get("symbol") or "")),
+                rate=float(row.get("lastFundingRate") or 0),
+                interval_seconds=28800, rate_kind="last_settled"))
+        return out
 
     def balance(self) -> dict:
         if self._paper is not None:

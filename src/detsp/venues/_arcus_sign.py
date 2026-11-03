@@ -370,6 +370,51 @@ def order_ref(order_id: str | None, client_id: str | None) -> str | None:
     return None
 
 
+def match_fills(rows, ref: str | None):
+    """按订单号（或 cid:clientId）把 /v1/fills 里属于这张单的成交
+    加总（移植 Parallax arcus.py 的 match_fills）。
+
+    返回 (数量, 均价, 手续费, 已实现盈亏, 方向, 条数)；对不上
+    返回 None。fee 为正 = 付出；返回的盈亏不含手续费（Arcus 的
+    closedPnl 本身已扣费，这里加回去，避免手续费被扣两遍）。
+    """
+    if not rows or not ref:
+        return None
+    by_client = ref.startswith("cid:")
+    target = ref[4:] if by_client else ref
+    quantity = notional = fees = pnl = 0.0
+    matched = 0
+    side: str | None = None
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        key = str(row.get("clientId") if by_client else row.get("orderId")
+                  or "")
+        if key != target:
+            continue
+        trade = str(row.get("tradeId") or "")
+        if trade:
+            if trade in seen:
+                continue
+            seen.add(trade)
+        price = abs(_num(row.get("price")) or 0.0)
+        size = abs(_num(row.get("size")) or 0.0)
+        if price <= 0 or size <= 0:
+            continue
+        matched += 1
+        quantity += size
+        notional += price * size
+        fee = _num(row.get("fee")) or 0.0
+        fees += fee
+        pnl += (_num(row.get("closedPnl")) or 0.0) + fee
+        side = {"BUY": "buy", "SELL": "sell"}.get(
+            str(row.get("side") or "").upper(), side)
+    if quantity <= 0:
+        return None
+    return quantity, notional / quantity, fees, pnl, side, matched
+
+
 def _num(value) -> float | None:
     if value is None or value == "":
         return None

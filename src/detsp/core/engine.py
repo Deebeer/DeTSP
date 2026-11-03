@@ -1,17 +1,22 @@
-"""策略调度引擎。
+"""策略调度引擎（执行模式）。
 
-两种用法：
-- 骨架模式（第一批）：run_once(ctx) 收集各策略 decide() 的 Action，
-  只做归属校验，不执行。
-- 执行模式（第三批）：Engine.from_config(...) 按 config.yaml 的 tasks
-  组装 Executor 与四策略运行时，tick(now) 逐任务调度。
+Engine.from_config(...) 按 config.yaml 的 tasks 组装 Executor 与
+四策略运行时，tick(now) 逐任务调度：先串行执行面板命令队列，
+再推进市价单成交发现，最后逐任务 tick。
 
 执行模式规则：
 - 安全动作优先：KillSwitch 触发时任务以 allow_open=False 运行
   （撤单/平仓/孤腿处理照常，开仓一律禁止）。
-- 单任务异常只隔离该任务并计数；连续错误达阈值触发全局停机。
+- 单任务异常只隔离该任务并计数；连续错误达阈值触发全局停机，
+  且引擎立即调用该任务的 stop() 收尾（撤单 + 平仓），不让它的
+  持仓脱离自动管理（审查 G2；原仓 Parallax 调度器同口径）。
+- 停机信号在 tick 中途触发导致的 RiskHaltError 是安全动作的
+  正常结果，不计入任务错误计数（审查 L3）。
 - 归属冲突（ConflictError）在任务启动 claim 时就会暴露，
   该任务被隔离，其他任务不受影响。
+
+（旧「骨架模式」run_once/decide 已按审查 R1 删除：无任何调用方，
+其描述的快照式流程与实际执行路径不符，只会误导读者。）
 """
 
 from __future__ import annotations
@@ -21,37 +26,11 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
 
 from .execution import Caps, Executor
 from .ledger import Ledger
-from .registry import Key, OwnershipRegistry
-from .risk import ErrorCounter, KillSwitch
-
-
-@dataclass
-class Action:
-    """策略产出的意图动作（骨架模式）。"""
-
-    kind: str            # place / cancel / close 等
-    key: Key
-    payload: dict = field(default_factory=dict)
-
-
-@dataclass
-class Context:
-    """一轮决策的上下文快照（行情/持仓由调度方填充）。"""
-
-    ts: float = 0.0
-    books: dict = field(default_factory=dict)      # {(venue, symbol): Book}
-    positions: dict = field(default_factory=dict)  # {Key: Position}
-
-
-class Strategy(Protocol):
-    name: str
-
-    def decide(self, ctx: Context) -> list[Action]:
-        ...
+from .registry import OwnershipRegistry
+from .risk import ErrorCounter, KillSwitch, RiskHaltError
 
 
 @dataclass
@@ -132,7 +111,6 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg) -> Task:
 class Engine:
     registry: OwnershipRegistry = field(default_factory=OwnershipRegistry)
     kill_switch: KillSwitch = field(default_factory=KillSwitch)
-    strategies: list[Strategy] = field(default_factory=list)
     errors: dict[str, str] = field(default_factory=dict)
     executor: Executor | None = None
     tasks: list[Task] = field(default_factory=list)
@@ -177,26 +155,6 @@ class Engine:
                 return n
             fn()
             n += 1
-
-    # ----- 骨架模式（第一批兼容） -----
-    def add_strategy(self, strategy: Strategy) -> None:
-        self.strategies.append(strategy)
-
-    def run_once(self, ctx: Context) -> list[Action]:
-        """跑一轮骨架决策。全局停机时不开新仓：直接返回空动作。"""
-        if self.kill_switch.halted:
-            return []
-        actions: list[Action] = []
-        for s in self.strategies:
-            try:
-                acts = s.decide(ctx)
-            except Exception as e:  # 单任务隔离
-                self.errors[s.name] = str(e)
-                continue
-            for a in acts:
-                self.registry.claim(a.key, s.name)
-                actions.append(a)
-        return actions
 
     # ----- 执行模式 -----
     @classmethod
@@ -244,9 +202,15 @@ class Engine:
         return engine
 
     def tick(self, now: float | None = None) -> None:
-        """跑一轮执行调度：先执行面板命令队列（M4），再逐任务 tick，
-        异常隔离 + 错误计数 + 停机联动。"""
+        """跑一轮执行调度：面板命令队列 → 市价单成交发现 → 逐任务
+        tick，异常隔离 + 错误计数 + 停机联动。"""
         self.process_commands()
+        if self.executor is not None:
+            # 异步结算场所的市价单成交补记账本（审查 M2）
+            try:
+                self.executor.poll_pending_fills()
+            except Exception:  # noqa: BLE001 — 发现失败不挡任务调度
+                pass
         now = time.time() if now is None else now
         allow_open = not self.kill_switch.halted
         for task in self.tasks:
@@ -255,11 +219,27 @@ class Engine:
             try:
                 task.runtime.tick(now, allow_open=allow_open)
                 task.errors.record_success()
+            except RiskHaltError as e:
+                # 停机在 tick 中途被触发（如面板线程直接 halt）时，
+                # 开仓被风控拒绝是安全机制的正常结果，不是任务
+                # 出错，不计错误数（审查 L3）
+                task.last_error = f"停机拦截（不计错误）：{e}"
             except Exception as e:  # 单任务隔离
                 task.last_error = str(e)
                 self.errors[task.name] = str(e)
                 if task.errors.record_error():
-                    # 同一任务连续错误达阈值：停用该任务并触发全局停机
+                    # 同一任务连续错误达阈值：停用该任务并触发全局
+                    # 停机；同时立即调用其 stop() 收尾（撤单+平仓），
+                    # 不让持仓脱离自动管理（审查 G2）
                     task.disabled = True
                     self.kill_switch.halt(
                         f"任务 {task.name} 连续错误达阈值：{e}")
+                    try:
+                        task.runtime.stop()
+                        self.events.append(
+                            f"[{task.name}] 连续错误达阈值被停用，"
+                            f"引擎已调用 stop() 收尾（撤单 + 平仓）")
+                    except Exception as stop_err:  # noqa: BLE001
+                        self.events.append(
+                            f"[{task.name}] 被停用后 stop() 收尾失败："
+                            f"{stop_err}，请立即人工处理其持仓")

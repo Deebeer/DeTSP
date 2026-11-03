@@ -4,9 +4,11 @@
 - 中枢 midline 取录制溢价（分钟均值）的中位数——跨所溢价很少以 0 为
   中心，中枢测错就是系统性亏钱，所以必须实测且定期重测。
 - 对每个候选入场带 band，统计历史上会触发的分钟数：
-  卖 base：sell_edge_mean − 双边费 > midline + band
-  买 base：buy_edge_mean − 双边费 > band − midline
-  （buy_edge 是 base 溢价的镜像口径，费前；此处统一扣费后比较。）
+  卖 base：sell_edge_max − 双边费 > midline + band
+  买 base：buy_edge_max − 双边费 > band − midline
+  （触发计数用分钟内**最大值**列，与原仓 analyzer 一致：实盘
+  策略是 tick 级判断的，一分钟内只要有一刻越线就会触发，用
+  分钟均值统计会系统性低估触发次数、把带定得过窄。）
 - 建议值 = 能达到最少触发次数（--min-fires）的最小 band；
   都达不到则取最大候选并提示数据不足。
 
@@ -55,12 +57,17 @@ def analyze_rows(rows: list[dict], fees_bps: float = 0.0,
     midline = statistics.median(premiums)
     sell_fires, buy_fires = [], []
     for band in candidates:
+        # 触发计数用分钟最大值列（与原仓一致）：策略是 tick 级
+        # 触发的，均值列会低估触发次数。旧录制文件若只有 mean
+        # 列，按 mean 兜底（新录制恒有 max 列）
         sell_fires.append(sum(
             1 for r in rows
-            if r["sell_edge_mean_bps"] - fees_bps > midline + band))
+            if r.get("sell_edge_max_bps", r["sell_edge_mean_bps"])
+            - fees_bps > midline + band))
         buy_fires.append(sum(
             1 for r in rows
-            if r["buy_edge_mean_bps"] - fees_bps > band - midline))
+            if r.get("buy_edge_max_bps", r["buy_edge_mean_bps"])
+            - fees_bps > band - midline))
     table = [{"band": b, "sell_fires": s, "buy_fires": y}
              for b, s, y in zip(candidates, sell_fires, buy_fires)]
     sorted_p = sorted(premiums)

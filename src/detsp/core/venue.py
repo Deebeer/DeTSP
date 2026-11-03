@@ -90,11 +90,15 @@ class Position:
 @dataclass
 class FundingInfo:
     symbol: str
-    rate: float                # 当期资金费率（多头支付为正的约定）
+    rate: float                # 资金费率（多头支付为正的约定）
     next_ts: float = 0.0
     interval_seconds: float = 3600.0  # 结算周期（秒）：HL/Arcus=3600、
     # Lighter/Aster=28800。跨场所比较费率前必须统一换算（H3），
     # 直接比原始 rate 会差出数倍量级
+    rate_kind: str = "unknown"  # 费率取值口径（审查 H2）：predicted=
+    # 下期预测 / current=当期 / last_settled=上期已结算 / unknown=未标注。
+    # 选向逻辑只在两腿口径一致时才相减选向（见 core.risk 的
+    # evaluate_funding_pair）；各 live 适配必须如实标注。
 
 
 class VenueAdapter(ABC):
@@ -158,3 +162,9 @@ class VenueAdapter(ABC):
     @abstractmethod
     def funding(self, symbol: str) -> FundingInfo:
         """资金费信息。"""
+
+    def funding_snapshot(self) -> list[FundingInfo]:
+        """全市场资金费快照（费率周期自检用，见 core.risk 的
+        detect_period_anomaly）。默认不支持，返回空表；能一次拿到
+        全市场费率的场所（HL/Lighter/Arcus/Aster）覆盖实现。"""
+        return []

@@ -27,7 +27,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..core.risk import basis_ok, detect_single_leg, funding_hourly_rate
+from ..core.risk import (
+    basis_ok,
+    detect_single_leg,
+    evaluate_funding_pair,
+    funding_hourly_rate,
+)
 from ..core.venue import OrderRequest, Side
 
 _EPS = 1e-12
@@ -50,6 +55,11 @@ class CarryParams:
     max_hold_seconds: float = 0.0       # 最长持有（秒），0=不限
     reopen: bool = True                 # 平仓后优势恢复是否自动重开
     cooldown_seconds: float = 300.0     # 平仓后的重开冷却
+    settle_grace_seconds: float = 10.0  # 开仓结算宽限期（秒）：市价
+    # 单异步结算的场所（Lighter）成交要数秒后才反映在持仓上，宽限
+    # 期内不对刚开的仓做单腿定性，期满复核再定性（审查 G1）
+    max_slippage_bps: float = 20.0      # 削腿（delta 修正）的滑点
+    # 保护上限（bps）：带滑点上限的限价单执行，超限本轮不削（对照 M2）
 
     def __post_init__(self) -> None:
         if self.venue_a == self.venue_b:
@@ -68,6 +78,10 @@ class CarryParams:
             raise ValueError("check_seconds 必须大于 0")
         if self.max_hold_seconds < 0 or self.cooldown_seconds < 0:
             raise ValueError("max_hold_seconds / cooldown_seconds 不能为负")
+        if self.settle_grace_seconds < 0:
+            raise ValueError("settle_grace_seconds 不能为负")
+        if self.max_slippage_bps < 0:
+            raise ValueError("max_slippage_bps 不能为负")
 
 
 # ═══════════ 纯函数：资金费优势 ═══════════
@@ -113,8 +127,10 @@ class FundingCarryStrategy:
     cooldown（冷却结束且 reopen=True 才允许再入场）。
     - 检查节奏：资金费判断只在 check_seconds 周期到时做；安全
       检查（孤腿/强平距离）每 tick 都做，安全永远优先
-    - 开仓：双腿 taker 等量，先下一腿、失败或结果未知立即按
-      真实持仓把已成腿平掉，不留裸腿（与轮换对冲同一口径）
+    - 开仓：双腿 taker 等量；下单后先立即回读确认双腿成形，
+      未确认（异步结算/结果未知）进入结算宽限期，宽限内不做
+      单腿定性，期满按真实持仓定案——成形则接管、残腿则平掉
+      （审查 G1；同步结算的场所走快速路径，行为不变）
     - 退出：优势连续 exit_confirm_checks 次低于退出门槛才双平；
       max_hold_seconds 到期也双平；平仓后进冷却
     """
@@ -140,6 +156,8 @@ class FundingCarryStrategy:
         self._last_check = -1e18
         self._below_exit_count = 0
         self._opened_once = False    # reopen=False 时用过即止的标记
+        self._pending_open: dict | None = None  # 开仓待确认（结算
+        # 宽限期内）：{"long_leg", "until"}，见 _resolve_pending
         self.last_error: str = ""
         self.recovery_notes: list[str] = []  # 启动对账事件
 
@@ -172,6 +190,26 @@ class FundingCarryStrategy:
             out.append(funding_hourly_rate(info.rate, info.interval_seconds))
         return out[0], out[1]
 
+    def _gate_rates(self) -> tuple[bool, str, float, float]:
+        """费率选向闸门（审查 H1/H2）：两腿先过合理性与口径一致
+        检查，再换算到每小时。返回 (可否选向, 原因, 每小时 a, 每小时 b)。
+        闸门不过时调用方必须拒绝开仓/跳过本轮优势判断——拿错误
+        或不同口径的费率选向会系统性选反方向。"""
+        ex = self.executor
+        infos = [ex.venue(self._venue_id(leg)).funding(self.params.symbol)
+                 for leg in ("a", "b")]
+        return evaluate_funding_pair(infos[0], infos[1])
+
+    def _trim_to_match(self, big: str, small: str,
+                         legs: dict[str, float]) -> None:
+        """把 big 腿多余的一截用带滑点上限的限价单削掉（对照 M2：
+        delta 修正不再用无保护市价单）。"""
+        side = Side.SELL if legs[big] > 0 else Side.BUY
+        self.executor.trim_excess(
+            self.owner, self._venue_id(big), self.params.symbol, side,
+            abs(legs[big]) - abs(legs[small]),
+            max_slippage_bps=self.params.max_slippage_bps)
+
     def _close_both(self) -> None:
         for leg in ("a", "b"):
             self.executor.close_position(self.owner, self._venue_id(leg),
@@ -199,9 +237,7 @@ class FundingCarryStrategy:
         if qa != 0 and qb != 0 and qa * qb < 0 and abs(abs(qa) - abs(qb)) > _EPS:
             big = "a" if abs(qa) > abs(qb) else "b"
             excess = abs(legs[big]) - abs(legs["b" if big == "a" else "a"])
-            self.executor.close_position(
-                self.owner, self._venue_id(big), self.params.symbol,
-                qty=excess)
+            self._trim_to_match(big, "b" if big == "a" else "a", legs)
             self.recovery_notes.append(
                 f"启动对账：双腿不等量（a={qa} b={qb}），已削掉 "
                 f"{big} 腿多余的 {excess} 后接管")
@@ -267,9 +303,7 @@ class FundingCarryStrategy:
             if qa != 0 and qb != 0 and qa * qb < 0:
                 big = "a" if abs(qa) > abs(qb) else "b"
                 small = "b" if big == "a" else "a"
-                self.executor.close_position(
-                    self.owner, self._venue_id(big), self.params.symbol,
-                    qty=abs(legs[big]) - abs(legs[small]))
+                self._trim_to_match(big, small, legs)
                 return True
             # 孤腿或同向错乱：平掉残留，回冷却
             self._close_both()
@@ -328,20 +362,68 @@ class FundingCarryStrategy:
             if res.status in ("rejected", "unknown"):
                 break
         legs_now = self._legs_qty()
-        if any(abs(q) > 0 for q in legs_now.values()):
-            if detect_single_leg(legs_now) or \
-                    results.get(short_leg) is None or \
-                    results[short_leg].status in ("rejected", "unknown"):
-                # 只成一腿或第二腿结果不明：按真实持仓双平，不留裸腿
-                self._close_both()
-                self.last_error = "开仓只成一腿，已按真实持仓平掉"
-                return
-            self.long_leg = long_leg
-            self.opened_at = now
-            self._below_exit_count = 0
-            self._opened_once = True
-            self.phase = "open"
-        # 两腿都没成：留在 flat，下一检查周期再看
+        if self._confirm_open(long_leg, legs_now):
+            self._finalize_open(long_leg, now)
+            return
+        if any(results[l].status == "unknown" for l in results) or \
+                any(abs(q) > 0 for q in legs_now.values()) or \
+                (results.get(short_leg) is not None
+                 and results[short_leg].status != "rejected"
+                 and len(results) == 2):
+            # 已下出的单结果未确认：市价单异步结算（Lighter 成交
+            # 要数秒后才反映在持仓）不能立即按「只成一腿」定性
+            # 平仓——进入结算宽限期，期满按真实持仓再定性（G1）。
+            # 宽限期内 _resolve_pending 每 tick 复核，双腿补齐
+            # 即定案 open；期满仍单腿才按真实持仓收尾。
+            self._pending_open = {
+                "long_leg": long_leg,
+                "until": now + self.params.settle_grace_seconds,
+            }
+            self.phase = "opening"
+            return
+        # 两腿都没成（第一腿被拒，没下出任何单）：留在 flat
+
+    def _confirm_open(self, long_leg: str,
+                      legs: dict[str, float]) -> bool:
+        """双腿是否已按预期成形：反向、等量（容差内）、多腿在
+        long_leg 一侧。"""
+        qa, qb = legs["a"], legs["b"]
+        if qa == 0 or qb == 0 or qa * qb > 0:
+            return False
+        if detect_single_leg(legs):
+            return False
+        # 反向且等量后，多腿符号由 long_leg 决定：多 a 则 qa>0
+        return legs[long_leg] > 0
+
+    def _finalize_open(self, long_leg: str, now: float) -> None:
+        self.long_leg = long_leg
+        self.opened_at = now
+        self._below_exit_count = 0
+        self._opened_once = True
+        self._pending_open = None
+        self.phase = "open"
+
+    def _resolve_pending(self, now: float) -> None:
+        """结算宽限期内的开仓定案（审查 G1）：双腿补齐 → open；
+        宽限未到 → 继续等；宽限到期仍未成形 → 有仓按真实持仓
+        收尾（平掉残腿回冷却），无仓回 flat。"""
+        pend = self._pending_open
+        if pend is None:
+            return
+        legs = self._legs_qty()
+        if self._confirm_open(pend["long_leg"], legs):
+            self._finalize_open(pend["long_leg"], now)
+            return
+        if now < pend["until"]:
+            return
+        self._pending_open = None
+        if any(abs(q) > 0 for q in legs.values()):
+            self._close_both()
+            self._enter_cooldown(now)
+            self.last_error = ("开仓结算宽限期到期仍未双腿成形，"
+                               "已按真实持仓平掉残腿")
+        else:
+            self.phase = "flat"
 
     # ----- 主循环 -----
     def tick(self, now: float = 0.0, allow_open: bool = True) -> None:
@@ -358,6 +440,12 @@ class FundingCarryStrategy:
                 self._enter_cooldown(now)
             return
 
+        if self.phase == "opening":
+            # 开仓待确认：结算宽限期内只做定案复核，不做孤腿
+            # 定性/削腿（审查 G1）；宽限最长 settle_grace_seconds
+            self._resolve_pending(now)
+            return
+
         if self._safety(now):
             return
 
@@ -370,7 +458,11 @@ class FundingCarryStrategy:
             if now - self._last_check < p.check_seconds:
                 return
             self._last_check = now
-            ha, hb = self._hourly_rates()
+            ok, reason, ha, hb = self._gate_rates()
+            if not ok:
+                # 费率数据不可信时不按它做退出判断，下一周期再看
+                self.last_error = reason
+                return
             edge = current_edge_bps_per_hour(self.long_leg, ha, hb)
             if edge < p.exit_edge_bps_per_hour:
                 self._below_exit_count += 1
@@ -392,10 +484,12 @@ class FundingCarryStrategy:
         if now - self._last_check < p.check_seconds:
             return
         self._last_check = now
-        ha, hb = self._hourly_rates()
+        ok, reason, ha, hb = self._gate_rates()
+        if not ok:
+            # 费率闸门不过（单期费率异常或两腿口径不一致）：
+            # 拒绝开仓并记原因（审查 H1/H2）
+            self.last_error = reason
+            return
         long_leg, edge = best_carry_direction(ha, hb)
         if edge >= p.min_entry_edge_bps_per_hour:
             self._open_pair(long_leg, now)
-
-    def decide(self, ctx) -> list:
-        return []

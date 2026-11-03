@@ -1,5 +1,7 @@
 # DeTSP 对照审查报告（第二轮：对照四个原仓库）
 
+> 修复状态：本报告的全部条目已于 2026-11-04 三批全修，逐条销账见 [审查汇总.md](审查汇总.md) 末尾「修复记录」。
+
 审查日期：2026-11-03　审查方式：原仓源码与 DeTSP 逐项对照（只审不改）+ 实跑测试
 原仓来源（本次重新克隆核查）：ZAIJIN88/WGALL-ZJ005（解压 ZIP，Node.js）、ZAIJIN88/Arcus-Entropy-Lighter-（Parallax Hedge Lighter 版 v1.5.1 与 Entropy 版）、your-quantguy/perp-dex-tools、your-quantguy/entropy-arb
 与第一轮的关系：第一轮 REVIEW.md 是自查（代码↔文档↔逻辑闭环）；本轮只报对照才看得出的问题。与自查同源的新证据单独注明，不重复计数。

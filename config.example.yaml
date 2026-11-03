@@ -8,7 +8,8 @@
 #   再用 tools 分析实测得出，猜测值会直接亏钱；
 # - 启用任何任务前先 paper 跑通、再过实盘预检。
 # caps 是三层名义金额上限（USD），<=0 或不写 = 不限；强烈建议
-# 实盘时至少设置 global_usd 与各策略上限。
+# 实盘时至少设置 global_usd 与各策略上限。strategies 层的口径
+# 是「该任务全部腿的名义合计」，不是单条腿。
 
 engine:
   cycle_seconds: 20
@@ -56,6 +57,9 @@ tasks: []
 #      leverage_hedge: <杠杆，与账户实际设置一致>
 #      hedge_deadband_qty: 0      # 对冲死区（币）：净残差小于它不对冲
 #      max_unhedged_seconds: 0    # 裸露超时强制对冲（秒），0=禁用
+#      max_residual_seconds: 0    # 残差低于对冲所最小量时的强制对冲时限（秒），0=禁用（等累积）
+#      skip_band_frac: 0.25       # 贴价跳档：距现价小于该比例×格距的档位初始不挂
+#      fee_bps_per_side: 5        # 单边手续费估算（bps）：启动经济性检查用（格距≤往返费告警）
 #      takeover_position: false   # 启动发现网格腿已有持仓时是否接管
 #      # ⚠ 风险：对冲腿每次调平都付 taker 手续费与滑点，网格步长
 #      # 太密时磨损会吃掉网格利润；死区太小也会频繁调平。
@@ -75,6 +79,10 @@ tasks: []
 #      # 但可能不成交）；平仓永远走 taker 保证退出
 #      maker_offset_ticks: 0      # maker 挂价向盘口内侧偏移 tick 数
 #      maker_timeout_seconds: 30  # maker 开仓单超时撤单放弃本轮
+#      persist_seconds: 0.3       # 信号须持续此时长才触发（防单 tick 幻影溢价）
+#      reconcile_seconds: 15      # 与场所持仓对账周期
+#      settle_grace_seconds: 20   # 开仓结算宽限期：宽限内对账不削腿（防异步结算误削），建议 ≥ 对账周期
+#      max_slippage_bps: 20       # delta 修正（削腿）的滑点保护上限（bps），超限本轮不削
 #      leverage_base: <杠杆，与账户实际设置一致>
 #      leverage_hedge: <杠杆，与账户实际设置一致>
 #  - name: <任务名，如 hedge-arcus-lighter>
@@ -85,6 +93,15 @@ tasks: []
 #      venue_b: <venue_id>
 #      notional_usd: <单边金额>
 #      hold_seconds: <持有时长>
+#      hold_min_seconds: 0        # 可选：与 hold_max_seconds 配合，>0 时每轮在区间内随机抽持有时长
+#      hold_max_seconds: 0
+#      notional_min_usd: 0        # 可选：与 notional_max_usd 配合，>0 时每轮在区间内随机抽金额
+#      notional_max_usd: 0
+#      cooldown_seconds: 60       # 平仓后的冷却
+#      arcus_maker: false         # 可选：任一腿是 Arcus 时该腿走 maker 挂单开仓（另一腿 taker 对冲）
+#      maker_wait_seconds: 120    # maker 挂单最长等待（秒），超时撤单按最终量对冲
+#      settle_grace_seconds: 10   # 开仓结算宽限期：宽限内不做单腿定性（防异步结算误平）
+#      max_slippage_bps: 20       # 双腿不平时削腿的滑点保护上限（bps），超限本轮不削
 #      leverage_a: <杠杆，与账户实际设置一致>
 #      leverage_b: <杠杆，与账户实际设置一致>
 #      max_position_qty: 0        # 可选：>0 时逐步建仓到该数量（币）后转平仓循环，0=禁用
@@ -104,6 +121,8 @@ tasks: []
 #      max_hold_seconds: 0        # 最长持有（秒），0=不限
 #      reopen: true               # 平仓后优势恢复是否自动重开
 #      cooldown_seconds: 300      # 平仓后的重开冷却
+#      settle_grace_seconds: 10   # 开仓结算宽限期：宽限内不做孤腿定性（防异步结算误平）
+#      max_slippage_bps: 20       # 双腿不等量时削腿的滑点保护上限（bps），超限本轮不削
 #      # ⚠ 风险：资金费差会反转——费率符号翻转后组合从净收变净付，
 #      # 退出靠迟滞确认，确认期间仍在付费；两所强平价不对称时
 #      # 单腿先爆会留下裸腿（系统会按孤腿口径立即平掉剩余腿）。

@@ -52,6 +52,9 @@ class DryRunVenue(VenueAdapter):
     def funding(self, symbol: str) -> FundingInfo:
         return self._live.funding(symbol)
 
+    def funding_snapshot(self) -> list[FundingInfo]:
+        return self._live.funding_snapshot()
+
     def balance(self) -> dict:
         # 权益读实盘账户（只读不下单）；实盘读失败时回退模拟权益
         try:

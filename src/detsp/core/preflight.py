@@ -257,6 +257,42 @@ def _check_account(rep: PreflightReport, venue_id: str, venue) -> None:
         rep.add(venue_id, "账户快照", FAIL, f"balance() 失败：{e}")
 
 
+def _check_funding(rep: PreflightReport, venue_id: str, venue) -> None:
+    """资金费专项：周期自检（对照 L5）+ 符号约定抽查提示（自查 L5）。
+
+    - 周期自检：venue 能给全市场费率快照时，用地板价年化反查
+      结算周期假设；检出异常按失败处理（费率整倍数错误会让
+      carry/轮换系统性选反方向，不许带病切实盘）。
+    - 符号约定：全系统约定「费率为正 = 多头付费」，各所原生符号
+      无法离线实证，只能在首次小额实盘时与官网逐所核对——这里
+      固定给出提示项，避免被遗忘（已做防御、仍待实证）。
+    """
+    if venue.mode != "live":
+        rep.add(venue_id, "费率周期自检", SKIP, "paper 模式跳过")
+        rep.add(venue_id, "费率符号抽查", SKIP, "paper 模式跳过")
+        return
+    try:
+        rows = venue.funding_snapshot()
+    except Exception as e:  # noqa: BLE001
+        rep.add(venue_id, "费率周期自检", SKIP, f"快照获取失败：{e}")
+        rows = None
+    if rows is not None:
+        if not rows:
+            rep.add(venue_id, "费率周期自检", SKIP,
+                    "该所无全市场费率快照，跳过（周期口径待实盘核对）")
+        else:
+            from .risk import detect_period_anomaly
+            anomaly = detect_period_anomaly(rows)
+            if anomaly:
+                rep.add(venue_id, "费率周期自检", FAIL, anomaly)
+            else:
+                rep.add(venue_id, "费率周期自检", PASS,
+                        f"{len(rows)} 个市场地板价年化无异常")
+    rep.add(venue_id, "费率符号抽查", SKIP,
+            "待实证项：系统约定「费率正=多头付费」，首次小额实盘前"
+            "必须逐所与交易所官网显示的资金费方向核对（尤其 Lighter）")
+
+
 def run_preflight(app_config: AppConfig, venues: dict) -> PreflightReport:
     rep = PreflightReport()
     secrets = app_config.secrets or {}
@@ -270,6 +306,7 @@ def run_preflight(app_config: AppConfig, venues: dict) -> PreflightReport:
         _check_clock(rep, vid, venue)
         _check_markets_and_rules(rep, vid, venue)
         _check_account(rep, vid, venue)
+        _check_funding(rep, vid, venue)
     return rep
 
 

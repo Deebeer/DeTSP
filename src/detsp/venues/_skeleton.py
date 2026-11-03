@@ -66,3 +66,8 @@ class SkeletonVenue(VenueAdapter):
 
     def funding(self, symbol: str) -> FundingInfo:
         return self._delegate().funding(symbol)
+
+    def funding_snapshot(self) -> list[FundingInfo]:
+        if self._paper is not None:
+            return self._paper.funding_snapshot()
+        return []

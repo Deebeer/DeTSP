@@ -1,5 +1,7 @@
 # DeTSP 独立审查报告（策略层重写后）
 
+> 修复状态：本报告的全部条目已于 2026-11-04 三批全修，逐条销账见 [审查汇总.md](审查汇总.md) 末尾「修复记录」。
+
 审查日期：2026-11-03　审查方式：独立代码审阅（只审不改）+ 实跑测试
 范围：`src/detsp/` 全部源码、tests/、config.example.yaml、README / DESIGN / 使用说明 / NOTICE / AUDIT.md
 背景：策略层刚推倒重写，现四策略为 hedged_grid（中性网格）、premium_arb（溢价套利，含 maker/taker 开关）、rotation_hedge（轮换对冲）、funding_carry（资金费 carry）；旧 grid / volume_loop 已删。

@@ -50,6 +50,12 @@ class PremiumParams:
     reconcile_seconds: float = 15.0  # 与场所持仓对账周期
     leverage_base: float = 1.0  # 两腿杠杆（开仓强平距离估算用；
     leverage_hedge: float = 1.0  # 交易所不由本程序设置杠杆，须与账户实际一致）
+    settle_grace_seconds: float = 20.0  # 开仓结算宽限期（秒）：taker
+    # 双腿下出后，异步结算的腿要数秒才反映在持仓上，宽限期内定期
+    # 对账不做 delta 削腿，期满再修正（审查 G1；默认 20 秒覆盖
+    # Lighter 结算延迟，须 ≥ 对账周期才不被对账抢先）
+    max_slippage_bps: float = 20.0      # delta 修正的滑点保护上限
+    # （bps）：带滑点上限的 reduce-only 限价单，超限本轮不削（对照 M2）
 
     def __post_init__(self) -> None:
         if self.upper_bps <= 0 or self.lower_bps <= 0:
@@ -62,6 +68,30 @@ class PremiumParams:
             raise ValueError("maker_offset_ticks 不能为负")
         if self.maker_timeout_seconds <= 0:
             raise ValueError("maker_timeout_seconds 必须大于 0")
+        # M4 补齐（审查 M4）：此前只校验带宽与模式，配置笔误
+        # （两腿同所、杠杆 0、负费率等）要到运行时才暴露
+        if bool(self.base_venue) != bool(self.hedge_venue):
+            raise ValueError("base_venue / hedge_venue 必须成对填写")
+        if self.base_venue and self.base_venue == self.hedge_venue:
+            raise ValueError("base_venue 与 hedge_venue 不能是同一场所")
+        if not self.symbol:
+            raise ValueError("symbol 必填")
+        if self.persist_seconds < 0:
+            raise ValueError("persist_seconds 不能为负")
+        if self.leverage_base <= 0 or self.leverage_hedge <= 0:
+            raise ValueError("leverage_base / leverage_hedge 必须大于 0")
+        if self.max_position_usd <= 0:
+            raise ValueError("max_position_usd 必须大于 0")
+        if self.max_order_notional_usd <= 0:
+            raise ValueError("max_order_notional_usd 必须大于 0")
+        if self.reconcile_seconds <= 0:
+            raise ValueError("reconcile_seconds 必须大于 0")
+        if self.base_taker_fee_bps < 0 or self.hedge_taker_fee_bps < 0:
+            raise ValueError("taker 费率不能为负")
+        if self.settle_grace_seconds < 0:
+            raise ValueError("settle_grace_seconds 不能为负")
+        if self.max_slippage_bps < 0:
+            raise ValueError("max_slippage_bps 不能为负")
 
     @property
     def total_fee_bps(self) -> float:
@@ -181,7 +211,10 @@ class PremiumArbStrategy:
       maker 主腿（见模块头注），减仓/平仓仍双腿 taker
     - 仓位：单笔切片 max_order_notional_usd，总仓 max_position_usd
     - 对账：每 reconcile_seconds 与场所真实持仓核对；净 delta 不平
-      立即以 reduce-only 市价单修正（只减多出的那条腿）
+      以带滑点上限的 reduce-only 限价单修正（只减多出的那条腿）；
+      taker 双腿刚下出后的结算宽限期内不对账削腿（异步结算的腿
+      还没显形，削腿会把已成腿误削，审查 G1）
+    - maker 待成交期间强平距离监控与等待并行，不整 tick 跳过（L2）
     - 停机信号（allow_open=False）/ 面板 stop：撤自有挂单 + 双腿全平
     """
 
@@ -198,6 +231,8 @@ class PremiumArbStrategy:
         self._armed: dict[str, float] = {}   # 信号 -> 首次出现时间
         self._last_reconcile = -1e18
         self._maker: _MakerOpen | None = None
+        self._settle_until = -1e18   # 结算宽限截止（G1）：此时间前
+        # 定期对账不做 delta 削腿
         self.stopped = False
         self.last_error: str = ""
         self.recovery_notes: list[str] = []  # 启动对账事件
@@ -205,6 +240,8 @@ class PremiumArbStrategy:
     def start(self, now: float = 0.0) -> None:
         if self.executor is None:
             raise RuntimeError("PremiumArbStrategy 未注入 executor（骨架模式）")
+        if not self.params.base_venue or not self.params.hedge_venue:
+            raise RuntimeError("premium_arb 任务必须配置 base_venue / hedge_venue")
         self._ensure_claims()
         self.stopped = False
         # 启动恢复对账：已有持仓不假设是本进程开的——记录事件，
@@ -245,9 +282,16 @@ class PremiumArbStrategy:
         pos = self.executor.position(venue_id, self.params.symbol)
         return pos.qty if pos else 0.0
 
-    def _fix_delta(self) -> None:
-        """净 delta 修正：多出的腿用 reduce-only 市价单削回与另一腿等量。"""
+    def _fix_delta(self, now: float | None = None) -> None:
+        """净 delta 修正：多出的腿用带滑点上限的 reduce-only 限价
+        单削回与另一腿等量（对照 M2，不再无保护市价削）。
+
+        结算宽限期内（taker 双腿刚下出、异步结算的腿还没反映到
+        持仓上）跳过：此时读到的不平是假象，削腿会误伤已成腿
+        （审查 G1）；宽限期满后的第一次对账再修正。"""
         p = self.params
+        if now is not None and now < self._settle_until:
+            return
         legs = {p.base_venue: self._pos_qty(p.base_venue),
                 p.hedge_venue: self._pos_qty(p.hedge_venue)}
         delta = net_delta(legs)
@@ -260,9 +304,8 @@ class PremiumArbStrategy:
         if excess <= 1e-12:
             return
         side = Side.SELL if legs[big] > 0 else Side.BUY
-        req = OrderRequest(symbol=p.symbol, side=side, qty=excess,
-                           price=None, reduce_only=True)
-        self.executor.place(self.owner, big, req, intent="close")
+        self.executor.trim_excess(self.owner, big, p.symbol, side, excess,
+                                  max_slippage_bps=p.max_slippage_bps)
 
     def _signal_with_surcharge(self, base_book, hedge_book) -> str | None:
         """可成交信号 + 库存阶梯：同向加仓时门槛上浮 surcharge。"""
@@ -300,9 +343,13 @@ class PremiumArbStrategy:
                 p.leverage_hedge, ex.market_mmr(p.hedge_venue, p.symbol)),
         )
 
-    def _fire_taker(self, signal: str, qty: float) -> None:
+    def _fire_taker(self, signal: str, qty: float, now: float) -> None:
         """双腿 taker 开平（taker 模式的开仓，以及任何模式的减仓/
-        反向平仓——退出必须确定成交，不用 maker）。"""
+        反向平仓——退出必须确定成交，不用 maker）。
+
+        下出后设结算宽限期：双腿成交量可能暂时不等（异步结算），
+        不立即对账削腿，宽限期满后的定期对账再修正净 delta（G1）。
+        同步结算的场所两腿即时等量，宽限只是延迟一次空对账。"""
         p = self.params
         ex = self.executor
         if signal == "sell_base":
@@ -316,9 +363,8 @@ class PremiumArbStrategy:
                  corridor_pct=corr_base)
         ex.place(self.owner, p.hedge_venue, hedge_req, intent="open",
                  corridor_pct=corr_hedge)
-        # 双腿成交量可能不等（部分成交）：立即按对账结果修正净 delta
-        self._fix_delta()
-        self._last_reconcile = -1e18  # 下一 tick 先对账确认
+        self._settle_until = now + p.settle_grace_seconds
+        self._last_reconcile = -1e18  # 宽限期满后下一 tick 先对账确认
 
     def _fire(self, signal: str, now: float) -> None:
         p = self.params
@@ -337,7 +383,7 @@ class PremiumArbStrategy:
         if p.execution_mode == "maker" and not closing:
             self._place_maker_open(signal, qty, now)
         else:
-            self._fire_taker(signal, qty)
+            self._fire_taker(signal, qty, now)
 
     # ----- maker 主腿开仓 -----
     def _base_tick(self) -> float:
@@ -360,12 +406,21 @@ class PremiumArbStrategy:
                            price=price, post_only=True)
         res = ex.place(self.owner, p.base_venue, req, intent="open",
                        corridor_pct=corr_base)
-        if res.order is None:
-            self.last_error = f"maker 开仓单下单失败：{res.detail or res.status}"
-            return
         if res.status == "filled":
             filled = res.filled_qty if res.filled_qty > 0 else qty
-            self._hedge_after_maker(signal, filled)
+            self._hedge_after_maker(signal, filled, now)
+            return
+        if res.status == "unknown":
+            # 下单结果未知（审查 M1）：订单可能已挂上。用合成号
+            # 登记待确认单，_tick_maker 先在挂单列表里按方向/
+            # 价格/数量认领真实订单号，不重复挂第二张
+            self._maker = _MakerOpen(
+                order_id=f"unknown:{p.base_venue}", signal=signal,
+                side=side, qty=qty, price=price, started=now,
+                baseline=baseline, recorded=0.0, partial=0.0)
+            return
+        if res.order is None:
+            self.last_error = f"maker 开仓单下单失败：{res.detail or res.status}"
             return
         # open / partial：登记归属后跟踪，等终态或超时按最终量收尾
         self._maker = _MakerOpen(
@@ -373,8 +428,12 @@ class PremiumArbStrategy:
             qty=qty, price=price, started=now, baseline=baseline,
             recorded=res.filled_qty, partial=res.filled_qty)
 
-    def _hedge_after_maker(self, signal: str, filled_qty: float) -> None:
-        """maker 主腿已成交 filled_qty：对冲腿 taker 立即跟上等量。"""
+    def _hedge_after_maker(self, signal: str, filled_qty: float,
+                           now: float) -> None:
+        """maker 主腿已成交 filled_qty：对冲腿 taker 立即跟上等量。
+
+        对冲腿下出后同样设结算宽限期：它异步结算时持仓暂时
+        只有主腿，不让定期对账把主腿误削（审查 G1）。"""
         if filled_qty <= 1e-12:
             return
         p = self.params
@@ -384,7 +443,7 @@ class PremiumArbStrategy:
             self.owner, p.hedge_venue,
             OrderRequest(p.symbol, hedge_side, filled_qty, price=None),
             intent="open", corridor_pct=corr_hedge)
-        self._fix_delta()
+        self._settle_until = now + p.settle_grace_seconds
         self._last_reconcile = -1e18
 
     def _maker_final_filled(self, mk: _MakerOpen) -> float | None:
@@ -392,7 +451,10 @@ class PremiumArbStrategy:
         「持仓 − 挂单前基线」对账推断。订单仍在挂单中返回 None。"""
         p = self.params
         venue = self.executor.venue(p.base_venue)
-        o = venue.poll_order(mk.order_id)
+        # 合成号（unknown 待确认单）不查 poll：它不是交易所订单号，
+        # 部分场所 poll 未知号会抛错；认领在 _tick_maker 里先做
+        o = None if mk.order_id.startswith("unknown:") \
+            else venue.poll_order(mk.order_id)
         if o is not None:
             if o.status == "open":
                 return None
@@ -407,7 +469,8 @@ class PremiumArbStrategy:
         delta = (cur - mk.baseline) * mk.side.sign
         return min(max(delta, 0.0), mk.qty)
 
-    def _finalize_maker(self, mk: _MakerOpen, filled: float) -> None:
+    def _finalize_maker(self, mk: _MakerOpen, filled: float,
+                        now: float) -> None:
         """maker 终局：补记未记账成交量，再按最终量对冲收尾。
 
         filled=0（超时未成/被拒）= 放弃本轮，不下任何对冲单；
@@ -421,7 +484,29 @@ class PremiumArbStrategy:
                 self.owner, self.params.base_venue, self.params.symbol,
                 mk.side, inc, mk.price, order_id=mk.order_id)
         if filled > 1e-9:
-            self._hedge_after_maker(mk.signal, filled)
+            self._hedge_after_maker(mk.signal, filled, now)
+
+    def _adopt_unknown_maker(self, mk: _MakerOpen) -> bool:
+        """unknown 待确认单认领（审查 M1）：在挂单列表里按方向/
+        价格/数量找本策略刚挂的那张单，找到换成真实订单号。"""
+        p = self.params
+        try:
+            orders = self.executor.venue(p.base_venue).open_orders(p.symbol)
+        except Exception:  # noqa: BLE001 — 查询失败下轮再认领
+            return False
+        for o in orders:
+            if o.side != mk.side:
+                continue
+            if abs(o.qty - mk.qty) > max(1e-9, mk.qty * 1e-6):
+                continue
+            if mk.price > 0 and o.price is not None and \
+                    abs(o.price - mk.price) > mk.price * 1e-6 + 1e-12:
+                continue
+            mk.order_id = o.order_id
+            if o.filled_qty > mk.partial:
+                mk.partial = o.filled_qty
+            return True
+        return False
 
     def _tick_maker(self, now: float) -> None:
         """maker 开仓单跟踪：全成→对冲；终态带部分量→按最终量
@@ -431,6 +516,16 @@ class PremiumArbStrategy:
             return
         p = self.params
         venue = self.executor.venue(p.base_venue)
+        if mk.order_id.startswith("unknown:"):
+            # 待确认单（审查 M1）：先认领真实订单号；认领窗口
+            # （30 秒）内继续等；窗口过后认领不到按持仓差定案
+            if not self._adopt_unknown_maker(mk):
+                if now - mk.started <= 30.0:
+                    return
+                final = self._maker_final_filled(mk)
+                if final is not None:
+                    self._finalize_maker(mk, final, now)
+                return
         o = venue.poll_order(mk.order_id)
         if o is not None:
             if o.status == "open":
@@ -438,15 +533,15 @@ class PremiumArbStrategy:
                     mk.partial = o.filled_qty
             elif o.status == "filled":
                 self._finalize_maker(
-                    mk, o.filled_qty if o.filled_qty > 0 else mk.qty)
+                    mk, o.filled_qty if o.filled_qty > 0 else mk.qty, now)
                 return
             elif o.status in ("canceled", "rejected"):
-                self._finalize_maker(mk, o.filled_qty)
+                self._finalize_maker(mk, o.filled_qty, now)
                 return
         else:
             final = self._maker_final_filled(mk)
             if final is not None:
-                self._finalize_maker(mk, final)
+                self._finalize_maker(mk, final, now)
                 return
         if now - mk.started >= p.maker_timeout_seconds:
             self.executor.cancel(self.owner, p.base_venue, mk.order_id)
@@ -456,7 +551,31 @@ class PremiumArbStrategy:
                 # 再不行留到下一 tick（订单已撤，终局必现）
                 final = mk.partial if mk.partial > 0 else None
             if final is not None:
-                self._finalize_maker(mk, final)
+                self._finalize_maker(mk, final, now)
+
+    # ----- 强平距离监控 -----
+    def _corridor_guard(self, base_book, hedge_book) -> str:
+        """持仓强平距离监控（公共口径）：返回 "ok" / "block"
+        （不可评估，暂停开仓）/ "flattened"（已跌破门槛并双平）。"""
+        p = self.params
+        ex = self.executor
+        blocked = False
+        for vid, bk in ((p.base_venue, base_book),
+                        (p.hedge_venue, hedge_book)):
+            has, corr = ex.position_corridor(vid, p.symbol, bk.mid)
+            if not has:
+                continue
+            if corr is None:
+                blocked = True
+                self.last_error = (f"{vid} 强平距离不可评估"
+                                   f"（无强平价且杠杆未知），暂停开仓")
+                continue
+            if corr < ex.min_corridor_pct:
+                self.last_error = (f"{vid} 强平距离 {corr:.2f}% 跌破门槛 "
+                                   f"{ex.min_corridor_pct}%，双腿平仓")
+                self._flatten()
+                return "flattened"
+        return "block" if blocked else "ok"
 
     # ----- 主循环 -----
     def tick(self, now: float = 0.0, allow_open: bool = True) -> None:
@@ -472,38 +591,30 @@ class PremiumArbStrategy:
             self._flatten()
             return
 
-        # maker 开仓单未收尾前先于信号处理：它收尾时会对冲腿跟上，
-        # 期间净 delta 暂时不平是预期状态，不让定期对账误削主腿
-        if self._maker is not None:
-            self._tick_maker(now)
-            return
-
-        # 定期对账：净 delta 不平立即修正（安全动作，先于开仓信号）
-        if now - self._last_reconcile >= p.reconcile_seconds:
-            self._last_reconcile = now
-            self._fix_delta()
-
         base_book = ex.venue(p.base_venue).book(p.symbol)
         hedge_book = ex.venue(p.hedge_venue).book(p.symbol)
 
-        # 持仓强平距离监控（公共口径）：任一腿跌破门槛 → 双平；
-        # 不可评估 → 本 tick 不开新仓（不放行）
-        block_fire = False
-        for vid, bk in ((p.base_venue, base_book), (p.hedge_venue, hedge_book)):
-            has, corr = ex.position_corridor(vid, p.symbol, bk.mid)
-            if not has:
-                continue
-            if corr is None:
-                block_fire = True
-                self.last_error = (f"{vid} 强平距离不可评估"
-                                   f"（无强平价且杠杆未知），暂停开仓")
-            elif corr < ex.min_corridor_pct:
-                self.last_error = (f"{vid} 强平距离 {corr:.2f}% 跌破门槛 "
-                                   f"{ex.min_corridor_pct}%，双腿平仓")
-                ex.close_position(self.owner, p.base_venue, p.symbol)
-                ex.close_position(self.owner, p.hedge_venue, p.symbol)
-                self._armed.clear()
-                return
+        # maker 开仓单未收尾前先处理它的跟踪：它收尾时会对冲腿
+        # 跟上，期间净 delta 暂时不平是预期状态，不让定期对账
+        # 误削主腿；但强平距离监控与等待/收尾并行执行，不整
+        # tick 跳过（自查 L2）——已有持仓跌破门槛照样双平。
+        # 信号处理仍等下一 tick（保持原有节奏语义）
+        if self._maker is not None:
+            self._tick_maker(now)
+            self._corridor_guard(base_book, hedge_book)
+            return
+
+        # 定期对账：净 delta 不平立即修正（安全动作，先于开仓
+        # 信号）；结算宽限期内 _fix_delta 自行跳过（G1）
+        if now - self._last_reconcile >= p.reconcile_seconds:
+            self._last_reconcile = now
+            self._fix_delta(now)
+
+        guard = self._corridor_guard(base_book, hedge_book)
+        if guard == "flattened":
+            self._armed.clear()
+            return
+        block_fire = guard == "block"
 
         signal = self._signal_with_surcharge(base_book, hedge_book)
         if signal is None or block_fire:
@@ -513,6 +624,3 @@ class PremiumArbStrategy:
         if now - since >= p.persist_seconds:
             self._armed.clear()
             self._fire(signal, now)
-
-    def decide(self, ctx) -> list:
-        return []

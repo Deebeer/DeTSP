@@ -250,10 +250,32 @@ class LighterVenue(SkeletonVenue):
             if str(row.get("exchange") or "").lower() != "lighter":
                 continue
             if int(row.get("market_id")) == m["market_id"]:
+                # 口径（审查 H2）：费率表给的是当期费率，无下期
+                # 预测字段，如实标注 rate_kind="current"；符号约定
+                # （正=多头付费）未经真实接口实证，见自查 L5
                 return FundingInfo(symbol=symbol, rate=float(row["rate"]),
                                    next_ts=time.time() + FUNDING_INTERVAL_SEC,
-                                   interval_seconds=FUNDING_INTERVAL_SEC)
+                                   interval_seconds=FUNDING_INTERVAL_SEC,
+                                   rate_kind="current")
         raise RuntimeError(f"{self.venue_id} 找不到 {symbol} 的资金费率")
+
+    def funding_snapshot(self) -> list[FundingInfo]:
+        if self._paper is not None:
+            return super().funding_snapshot()
+        data = self._get("/api/v1/funding-rates")
+        out: list[FundingInfo] = []
+        for row in data.get("funding_rates") or []:
+            if str(row.get("exchange") or "").lower() != "lighter":
+                continue
+            try:
+                sym = self._symbol_of(int(row.get("market_id")))
+            except Exception:  # noqa: BLE001 — 未知市场跳过
+                continue
+            out.append(FundingInfo(
+                symbol=sym, rate=float(row.get("rate") or 0),
+                interval_seconds=FUNDING_INTERVAL_SEC,
+                rate_kind="current"))
+        return out
 
     def _account_data(self) -> dict:
         if self._account_index is None:

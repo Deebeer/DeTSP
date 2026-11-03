@@ -170,18 +170,68 @@ class HyperliquidVenue(SkeletonVenue):
                     ask=float(asks[0]["px"]),
                     ts=float(snap.get("time") or 0) / 1000)
 
+    def _predicted_funding(self, coin: str) -> tuple[float, float] | None:
+        """下期预测费率：POST /info type=predictedFundings。
+
+        返回 (rate, next_ts)；接口不可用/无该币条目时返回 None，
+        调用方回退当期口径并如实标注 rate_kind（审查 H2）。
+        """
+        try:
+            data = self._get_info().post("/info",
+                                         {"type": "predictedFundings"})
+        except Exception:  # noqa: BLE001 — 预测接口失败不挡当期回退
+            return None
+        for entry in data or []:
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                continue
+            cname, venues = entry
+            if cname != coin:
+                continue
+            for vname, payload in venues or []:
+                if str(vname).lower() != "hyperliquid":
+                    continue
+                r = (payload or {}).get("fundingRate")
+                if r is None:
+                    return None
+                nts = float((payload or {}).get("nextFundingTime") or 0)
+                return float(r), nts / 1000 if nts > 1e10 else nts
+            return None
+        return None
+
     def funding(self, symbol: str) -> FundingInfo:
         if self._paper is not None:
             return super().funding(symbol)
-        meta, ctxs = self._get_info().meta_and_asset_ctxs(dex=self.dex)
         coin = self.coin(symbol)
+        pred = self._predicted_funding(coin)
+        if pred is not None:
+            rate, next_ts = pred
+            # HL 资金费按小时收取，预测值即下一期（每小时）费率
+            return FundingInfo(symbol=symbol, rate=rate,
+                               next_ts=next_ts or time.time() + 3600,
+                               interval_seconds=3600,
+                               rate_kind="predicted")
+        meta, ctxs = self._get_info().meta_and_asset_ctxs(dex=self.dex)
         for a, ctx in zip(meta.get("universe", []), ctxs):
             if a["name"] == coin:
-                # HL 资金费按小时收取，ctx.funding 即每小时费率
-                return FundingInfo(symbol=symbol, rate=float(ctx.get("funding") or 0),
+                # 回退口径：ctx.funding 是当期费率（非预测），如实标注
+                return FundingInfo(symbol=symbol,
+                                   rate=float(ctx.get("funding") or 0),
                                    next_ts=time.time() + 3600,
-                                   interval_seconds=3600)
+                                   interval_seconds=3600,
+                                   rate_kind="current")
         raise RuntimeError(f"{self.venue_id} 找不到市场 {symbol}")
+
+    def funding_snapshot(self) -> list[FundingInfo]:
+        if self._paper is not None:
+            return super().funding_snapshot()
+        meta, ctxs = self._get_info().meta_and_asset_ctxs(dex=self.dex)
+        out: list[FundingInfo] = []
+        for a, ctx in zip(meta.get("universe", []), ctxs):
+            out.append(FundingInfo(
+                symbol=self._plain(str(a.get("name") or "")),
+                rate=float(ctx.get("funding") or 0),
+                interval_seconds=3600, rate_kind="current"))
+        return out
 
     def balance(self) -> dict:
         if self._paper is not None:

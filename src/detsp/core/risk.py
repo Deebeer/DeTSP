@@ -94,6 +94,92 @@ def funding_hourly_rate(rate: float, interval_seconds: float) -> float:
     return rate * 3600.0 / interval_seconds
 
 
+# ── 资金费数据防呆（移植 Parallax funding.py 的三道防护）──────
+#
+# Parallax 文件头自述：费率是「最容易出错、也最致命的一块」。
+# 审查 H1/H2/L5 对照确认 DeTSP 此前只有归一换算一道，这里补齐：
+# 1. 合理性闸门：单期费率超 5% 几乎必然是单位解析错误 → 判数据
+#    错误、拒绝按它开仓（「宁可不开，不能按错的方向开」）；
+# 2. 取值口径一致性：下期预测 / 当期 / 上期已结算不是同一时点的
+#    量，混着相减会在变盘点选反——口径不一致时不选向；
+# 3. 周期自检（detect_period_anomaly）：用全市场地板价年化反查
+#    结算周期假设，防「8 小时当 1 小时」这类整倍数错误。
+
+# 单期费率合理上限（小数）：Lighter 协议硬顶 4%/8h、HL 每小时
+# 也远达不到 5%，超过即判单位解析错误（Parallax 同口径）
+SANE_RATE_PER_INTERVAL = 0.05
+
+# 地板价至少占这么多市场，才认为它确实是基准利率而非巧合
+_FLOOR_SHARE_THRESHOLD = 0.30
+# 地板价隐含年化超过这个数（%）就报警：真实基准利率通常 <10%
+_FLOOR_APR_WARN_PCT = 15.0
+_SECONDS_PER_YEAR = 365 * 24 * 3600
+
+
+def funding_rate_suspect(rate: float) -> bool:
+    """单期费率是否超出合理区间（疑似单位/解析错误）。"""
+    return abs(rate) > SANE_RATE_PER_INTERVAL
+
+
+def evaluate_funding_pair(info_a, info_b) -> tuple[bool, str, float, float]:
+    """开仓选向前的一对费率评估（carry 与轮换共用）。
+
+    返回 (可否选向, 原因, a 的每小时费率, b 的每小时费率)。
+    任一腿触发合理性闸门、或两腿取值口径（rate_kind）不一致，
+    都返回不可选向——调用方应拒绝开仓并记录原因，而不是拿
+    可疑/异口径数据选方向。
+    """
+    ha = funding_hourly_rate(info_a.rate, info_a.interval_seconds)
+    hb = funding_hourly_rate(info_b.rate, info_b.interval_seconds)
+    for label, info in (("a", info_a), ("b", info_b)):
+        if funding_rate_suspect(info.rate):
+            return False, (
+                f"{label} 腿单期费率 {info.rate * 100:.3f}% 超出合理区间 "
+                f"（>{SANE_RATE_PER_INTERVAL * 100:.0f}%），疑似单位解析"
+                f"有误，拒绝开仓"), ha, hb
+    ka = getattr(info_a, "rate_kind", "unknown") or "unknown"
+    kb = getattr(info_b, "rate_kind", "unknown") or "unknown"
+    if ka != kb:
+        return False, (
+            f"两腿费率取值口径不一致（a={ka}，b={kb}），"
+            f"不同时点的费率不能相减选向，拒绝开仓"), ha, hb
+    return True, "", ha, hb
+
+
+def detect_period_anomaly(rows: list) -> str | None:
+    """费率周期自检（移植 Parallax detect_period_anomaly）。
+
+    rows 是同一场所的全市场 FundingInfo 列表。经验事实：一个所
+    大多数市场在溢价接近零时会卡在同一个基准利率（地板价）上，
+    地板价的隐含年化必然温和；若算出几十个百分点，多半是结算
+    周期假设错了。返回告警文案，没问题返回 None。
+    """
+    usable = [r for r in rows if r.rate is not None]
+    if len(usable) < 10:
+        return None
+    counts: dict[float, int] = {}
+    for r in usable:
+        counts[r.rate] = counts.get(r.rate, 0) + 1
+    floor_rate, hits = max(counts.items(), key=lambda kv: kv[1])
+    if hits / len(usable) < _FLOOR_SHARE_THRESHOLD:
+        return None
+    if floor_rate == 0:
+        return None
+    sample = next(r for r in usable if r.rate == floor_rate)
+    if sample.interval_seconds <= 0:
+        return None
+    apr_pct = abs(floor_rate * (_SECONDS_PER_YEAR
+                                / sample.interval_seconds) * 100)
+    if apr_pct <= _FLOOR_APR_WARN_PCT:
+        return None
+    hours = sample.interval_seconds / 3600
+    return (
+        f"{hits}/{len(usable)} 个市场卡在同一个费率 {floor_rate:g} 上"
+        f"（疑似基准利率），按 {hours:g} 小时周期换算隐含年化 "
+        f"{apr_pct:.1f}%，高得不合常理——多半是结算周期假设错了，"
+        f"请核对该所的费率周期")
+
+
 def basis_ok(price_a: float, price_b: float, max_diff_pct: float = 3.0) -> bool:
     """价差闸门：两所中价相差超过 max_diff_pct 不开仓（防同名不同标的）。"""
     if price_a <= 0 or price_b <= 0:
