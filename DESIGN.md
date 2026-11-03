@@ -104,3 +104,22 @@ Lighter 两个部署共用 lighter.py：仅端点、chain id、账户与密钥�
   - WGALL-ZJ005（ZAIJIN88）：网格逻辑（Node 版逻辑移植到 Python，未复制 Node 代码）。
   - entropy-arb（your-quantguy）：Hyperliquid 家族与 Lighter 主网适配、溢价套利引擎、盘口录制/分析。
 - perp-dex-tools（your-quantguy）为非商业许可：本项目**仅参考其适配接口设计思想，未使用其任何代码**；Aster 适配为依据官方文档自写。
+
+## 12. 实现状态
+
+| 模块 | 状态 |
+|---|---|
+| core（配置/接口/登记/风控/账本/引擎骨架） | 已完成（第一批） |
+| venues/paper 通用模拟 | 已完成 |
+| venues/hl（Hyperliquid 本体 / Entropy / trade.xyz） | live 已完成（第二批）：基于官方 hyperliquid-python-sdk 0.24 的 Info/Exchange；签名/请求构造有 mock 单测，未做实盘小额验证 |
+| venues/lighter（主网 / Robinhood 链） | live 已完成（第二批）：REST 读 + lighter-sdk 1.1.2 签名下单；市价单异步结算，成交以持仓对账为准；未做实盘小额验证 |
+| venues/arcus | live 已完成（第二批）：Ed25519 签名（含载荷字节级单测）、精度、强平价复算、REST 下单/撤单/setLeverage；未做实盘小额验证 |
+| venues/aster | live 已完成（第二批）：依据官方 V1（Legacy）文档自写，HMAC-SHA256 签名有官方示例向量对拍；未做实盘小额验证 |
+| strategies（三策略决策骨架） | 决策函数已完成（第一批）；与 live 适配的执行编排在后续批次 |
+
+已知未核实/限制：
+- Aster：官方现主推 V3（EIP-712），本项目按既定方案实现 V1 HMAC；V1 密钥可用性以平台当前政策为准。exchangeInfo 不含最大杠杆（记 0=未知）；按 clientId 撤单未实现（官方 V1 撤单按 orderId+symbol，已实现）。
+- Arcus：按 clientId 撤单的 HTTP body 形状未在参考代码中出现（其只用 orderId 撤单），签名载荷已验证、body 按对称形式组装，上实盘前需小额验证。
+- Lighter：accountActiveOrders 需要认证令牌（已用 signer 生成）；市价单成交确认走对账，不做同步等待。
+- Hyperliquid：markets 的 price_step 用官方价格规则允许的最细小数位近似（HL 无统一 tick 概念）。
+

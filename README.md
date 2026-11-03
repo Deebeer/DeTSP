@@ -8,13 +8,16 @@
 
 ## 状态
 
-第一批：设计文档 + 项目骨架 + 核心层（配置/适配接口/归属登记/风控/账本/引擎骨架）+ 模拟适配 + 三策略决策骨架 + 单元测试。各交易所 live（实盘）签名下单尚未移植，当前只有 paper（模拟）可用。
+第二批：7 个交易所的 live（实盘）适配已全部实现——Hyperliquid 家族（本体/Entropy/trade.xyz，官方 SDK）、Lighter 主网/Robinhood 链（lighter-sdk 1.1.2）、Arcus（Ed25519 签名移植）、Aster（依据官方 V1 文档自写）。paper（模拟）保持可用。全部适配有 mock 单元测试（不联网），共 89 个测试通过；尚未做实盘小额验证，上实盘前务必按 DESIGN.md 第 12 节的未核实清单逐项小额验证。
+
+第一批：设计文档 + 项目骨架 + 核心层（配置/适配接口/归属登记/风控/账本/引擎骨架）+ 模拟适配 + 三策略决策骨架。
 
 ## 快速开始
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev]"        # 只要 paper/测试时这样即可
+pip install -e ".[live]"       # 实盘再加这个（官方 SDK 等）
 cp .env.example .env          # 填密钥（paper 模式可留空）
 python -m pytest              # 运行测试
 ```

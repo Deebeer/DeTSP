@@ -1,7 +1,8 @@
-"""实盘场所骨架基类（内部）：paper 委托模拟适配，live 暂未移植。
+"""场所基类（内部）：paper 委托模拟适配；live 由各子类覆盖全部接口。
 
-本批不写实盘签名代码：mode=live 时所有接口抛 NotImplementedError，
-并在子类 docstring 里注明移植来源，后续批次逐所落地。
+本类只负责 paper 委托与默认行为。各实盘场所（hl / lighter / arcus /
+aster）已覆盖全部接口走真实实现；未覆盖的方法在 live 下抛
+NotImplementedError，子类 docstring 注明实现/移植来源。
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from ..core.venue import (
 )
 from .paper import PaperVenue
 
-SOURCE_NOTE = "实盘未移植"
+SOURCE_NOTE = "该方法尚未实现 live"
 
 
 class SkeletonVenue(VenueAdapter):

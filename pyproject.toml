@@ -16,6 +16,17 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# 实盘依赖组：pip install -e ".[live]"
+# - hyperliquid-python-sdk 0.24：Entropy 实盘验证过的版本（见 entropy-arb 经验），含 HL 家族签名
+# - lighter-sdk 钉死 1.1.2：只有该版本带当前 Windows x64 签名器与 Robinhood 链
+#   端点配置（chain id 466324），范围版本可能装到没有签名器的构建（Parallax 经验）
+live = [
+  "hyperliquid-python-sdk>=0.24,<0.25",
+  "lighter-sdk==1.1.2",
+  "eth-account>=0.13",
+  "cryptography>=42",
+  "httpx>=0.27",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

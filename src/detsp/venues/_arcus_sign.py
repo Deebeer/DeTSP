@@ -1,0 +1,380 @@
+"""Arcus 纯逻辑：Ed25519 签名、精度对齐、强平价估算、回执解析。不碰网络。
+
+移植自 Parallax Hedge（MIT）的 arcus.py，签名格式与其经实盘验证的
+JS 实现逐字节一致。要点：
+- 下单签名是 Ed25519 签一段按键排序的紧凑 JSON（ordersign 载荷），
+  时间戳为纳秒整数且进程内严格递增；签名载荷里的 goodTil 是纳秒
+  （HTTP body 的 goodTilTime 是微秒字符串，×1000 的关系别搞反）。
+- 价格档位按 tickTiers 分段，不是全市场统一 tick。
+- /v1/positions 不返回强平价：按维持保证金率自己算（全仓按最坏情况：
+  账户其它仓位同向一起亏）。
+- 资金费每小时结算：fundingRate 本身就是每小时费率。
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import secrets
+import threading
+import time
+from dataclasses import dataclass
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
+from pathlib import Path
+from typing import Any
+
+ADDRESS_RE = re.compile(r"^0x[0-9a-f]{40}$")
+
+# 下单时间戳：纳秒，进程内严格递增（同一纳秒下两单会被当成重放）
+_ts_lock = threading.Lock()
+_last_ts_ns = 0
+
+
+def timestamp_ns() -> int:
+    global _last_ts_ns
+    with _ts_lock:
+        now = time.time_ns()
+        _last_ts_ns = now if now > _last_ts_ns else _last_ts_ns + 1
+        return _last_ts_ns
+
+
+def good_til_us(days: float = 40) -> int:
+    """GTT 到期（微秒）。IOC 也必须带这个字段；有效范围被限制为 32~180 天。"""
+    days = max(32.0, min(180.0, float(days)))
+    return int((time.time() + days * 86400) * 1_000_000)
+
+
+# ── 十进制工具 ─────────────────────────────────────────────
+
+def D(value: Any) -> Decimal:
+    try:
+        result = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"无效数字：{value!r}") from exc
+    if not result.is_finite():
+        raise ValueError(f"无效数字：{value!r}")
+    return result
+
+
+def fmt_decimal(value: Decimal) -> str:
+    """去掉多余的 0 与科学计数法——交易所只认普通十进制字符串。"""
+    text = format(value.normalize(), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def step_decimals(step: str | float) -> int | None:
+    """步长是 10 的整数次幂时返回小数位数，否则 None（这种市场不用）。"""
+    d = D(step)
+    if d <= 0:
+        return None
+    exponent = d.normalize().as_tuple()
+    if exponent.digits != (1,):
+        return None
+    return max(0, -int(exponent.exponent))
+
+
+def choose_tick(market: dict[str, Any], price: float) -> Decimal:
+    """按价格选 tick 档位。tickTiers 按 upToPrice 从小到大，最后一档无上限。"""
+    tiers = market.get("arcus_tick_tiers") or []
+    px = D(price)
+    for tier in tiers:
+        if not isinstance(tier, dict):
+            continue
+        up_to = tier.get("upToPrice")
+        tick = tier.get("tick")
+        if tick in (None, ""):
+            continue
+        if up_to in (None, "") or px <= D(up_to):
+            return D(tick)
+    return D(market.get("arcus_tick_size") or "0.01")
+
+
+def round_arcus_price(market: dict[str, Any], price: float, side: str) -> Decimal:
+    """限价对齐到 tick，方向朝更激进一侧（买往上、卖往下）。
+
+    四舍五入最多偏半格，当半格比滑点预算还宽时会把限价压到对手价之下
+    变成「报单成功、零成交」；按方向取整最多多付一格。
+    """
+    if side not in ("buy", "sell"):
+        raise ValueError(f"Arcus 限价对齐需要买卖方向，收到 {side!r}")
+    px = D(price)
+    if px <= 0:
+        raise ValueError("Arcus 限价必须大于 0")
+    tick = choose_tick(market, float(px))
+    rounding = ROUND_CEILING if side == "buy" else ROUND_FLOOR
+    aligned = (px / tick).to_integral_value(rounding=rounding) * tick
+    if aligned <= 0:
+        raise ValueError("Arcus 限价对齐后无效")
+    return aligned
+
+
+def align_arcus_quantity(market: dict[str, Any], quantity: float) -> Decimal:
+    """数量向下对齐到 stepSize（向上会超出保证金或反手）。"""
+    step = D(market.get("arcus_step_size") or "1")
+    q = D(quantity)
+    if q <= 0:
+        return Decimal(0)
+    return (q / step).to_integral_value(rounding=ROUND_FLOOR) * step
+
+
+def to_units(value: Decimal, unit: str | Decimal) -> int:
+    """价格/数量换成签名要的整数（ticks/quantums）。必须整除。"""
+    u = D(unit)
+    units = value / u
+    if units != units.to_integral_value():
+        raise ValueError(f"{value} 不是 {u} 的整数倍")
+    return int(units)
+
+# ── 签名 ──────────────────────────────────────────────────
+
+_TIF_CODE = {"GTT": 0, "FOK": 1, "IOC": 2, "ALO": 3}
+
+
+def build_place_payload(
+    *, address: str, account_index: int, client_id: str | None, timestamp: int,
+    good_til_us_value: int, market_id: int, price_ticks: int,
+    quantity_quantums: int, reduce_only: bool, side: str, time_in_force: str,
+) -> str:
+    """ordersign 下单载荷。键顺序与空格必须与交易所逐字节一致。
+
+    g 是【纳秒】（HTTP body 的 goodTilTime 是微秒，这里 ×1000）；
+    c（clientId）可选，给了要小写。
+    """
+    c = f',"c":{json.dumps(str(client_id).lower())}' if client_id else ""
+    return (
+        f'{{"ad":{json.dumps(str(address).lower())},"ai":{int(account_index)}{c},'
+        f'"ct":{int(timestamp)},"g":{int(good_til_us_value) * 1000},"m":{int(market_id)},'
+        f'"op":1,"p":{int(price_ticks)},"q":{int(quantity_quantums)},'
+        f'"r":{1 if reduce_only else 0},"s":{1 if str(side).upper() == "SELL" else 0},'
+        f'"t":{_TIF_CODE[str(time_in_force).upper()]},"v":1}}'
+    )
+
+
+def build_cancel_payload(
+    *, address: str, account_index: int, timestamp: int, market_id: int,
+    order_id: str | None = None, client_id: str | None = None,
+) -> str:
+    """撤单 ordersign 载荷（op=2）。orderId 与 clientId 必须且只能给一个。"""
+    if bool(order_id) == bool(client_id):
+        raise ValueError("Arcus 撤单必须且只能指定 orderId 或 clientId")
+    c = f',"c":{json.dumps(str(client_id).lower())}' if client_id else ""
+    i = f',"id":{json.dumps(str(order_id))}' if order_id else ""
+    return (
+        f'{{"ad":{json.dumps(str(address).lower())},"ai":{int(account_index)}{c},'
+        f'"ct":{int(timestamp)}{i},"m":{int(market_id)},"op":2,"v":1}}'
+    )
+
+
+def canonical_json(value: Any) -> str:
+    """旧式签名（setLeverage 等）用的规范 JSON：键排序、无空白。"""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def legacy_message(timestamp: int, action: str, body: dict[str, Any]) -> str:
+    return f"{int(timestamp)}{action}{canonical_json(body)}"
+
+
+_PKCS8_ED25519_PREFIX = bytes.fromhex("302e020100300506032b657004220420")
+
+
+def load_private_key(value: str = "", file: str = ""):
+    """Ed25519 私钥：64 位 seed hex、PKCS#8 PEM、PKCS#8 DER(hex/base64) 都认。"""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    import base64
+
+    raw = (value or "").strip()
+    if file:
+        path = Path(file)
+        if not path.exists():
+            raise ValueError(f"找不到 Arcus 私钥文件：{file}")
+        raw = path.read_text(encoding="utf-8").strip()
+    if not raw:
+        raise ValueError("缺少 Arcus Ed25519 API 私钥（ARCUS_API_PRIVATE_KEY）")
+    raw = raw.replace("\\n", "\n")
+    try:
+        if "PRIVATE KEY-----" in raw:
+            key = serialization.load_pem_private_key(raw.encode(), password=None)
+        else:
+            clean = re.sub(r"\s+", "", raw)
+            clean = clean[2:] if clean.lower().startswith("0x") else clean
+            if re.fullmatch(r"[0-9a-fA-F]{64}", clean):
+                return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(clean))
+            if re.fullmatch(r"[0-9a-fA-F]{128}", clean):
+                # 64 字节「seed + 公钥」导出：前 32 字节私钥，后 32 必须与之对应
+                key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(clean[:64]))
+                if public_key_hex(key) != clean[64:].lower():
+                    raise ValueError("128 位私钥的后半段和前半段推导出的公钥对不上")
+                return key
+            if re.fullmatch(r"[0-9a-fA-F]+", clean) and len(clean) % 2 == 0:
+                der = bytes.fromhex(clean)
+            else:
+                der = base64.b64decode(clean)
+            if len(der) == 48 and der.startswith(_PKCS8_ED25519_PREFIX):
+                return Ed25519PrivateKey.from_private_bytes(der[16:])
+            key = serialization.load_der_private_key(der, password=None)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(
+            "Arcus Ed25519 API 私钥格式无效：支持 64/128 位十六进制、"
+            "PKCS#8 PEM/DER(hex/base64) 或私钥文件") from exc
+    if not isinstance(key, Ed25519PrivateKey):
+        raise ValueError("Arcus API 私钥不是 Ed25519 密钥")
+    return key
+
+
+def public_key_hex(private_key) -> str:
+    from cryptography.hazmat.primitives import serialization
+
+    return private_key.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
+
+
+def sign_hex(private_key, message: str) -> str:
+    return private_key.sign(message.encode("utf-8")).hex()
+
+
+def new_client_id() -> str:
+    """clientId：小写字母数字，36 位内。带时间前缀便于排查先后。"""
+    return f"dt{int(time.time() * 1000):x}{secrets.token_hex(4)}"[:36]
+
+# ── 强平价 ────────────────────────────────────────────────
+
+def cross_distance(
+    *, equity: float | None, notional: float, mmf: float | None,
+    other_notional: float = 0.0, other_maintenance: float = 0.0,
+) -> float | None:
+    """全仓：价格往不利方向走多少（小数）会被强平。整个账户一起算，
+    且按最坏情况：账户里其它仓位也同向一起亏。
+
+    x = (E − N·mmf − Om) / (N + O + N·mmf + Om)
+    N=本仓名义额，O=其它仓名义额合计，Om=其它仓维持保证金合计。
+    """
+    if equity is None or notional <= 0 or not mmf or not 0 < mmf < 1:
+        return None
+    own_mm = notional * mmf
+    x = (equity - own_mm - other_maintenance) / (
+        notional + other_notional + own_mm + other_maintenance)
+    return x if x > 0 else 0.0
+
+
+def arcus_liquidation_price(
+    *, size: float, entry_price: float | None, mark_price: float | None,
+    margin_mode: str | None, margin_used: float | None, mmf: float | None,
+    account_equity: float | None = None, other_maintenance: float = 0.0,
+    other_notional: float = 0.0,
+) -> float | None:
+    """Arcus 不给强平价，按官方规则自己算；算不出来返回 None，不猜。
+
+    全仓：见 cross_distance。逐仓：仓位自身权益 = marginUsed + 浮盈亏，
+    令其等于 |s|·P·mmf 解 P。
+    """
+    if not size or not mmf or mmf <= 0 or mmf >= 1:
+        return None
+    s = float(size)
+    q = abs(s)
+    mode = str(margin_mode or "").upper()
+    if mode == "ISOLATED":
+        if not entry_price or entry_price <= 0 or margin_used is None or margin_used <= 0:
+            return None
+        if s > 0:
+            price = (s * entry_price - margin_used) / (s * (1 - mmf))
+        else:
+            price = (margin_used + q * entry_price) / (q * (1 + mmf))
+        return price if price > 0 else None
+    if not mark_price or mark_price <= 0:
+        return None
+    x = cross_distance(equity=account_equity, notional=q * mark_price, mmf=mmf,
+                       other_notional=other_notional,
+                       other_maintenance=other_maintenance)
+    if x is None:
+        return None
+    price = mark_price * (1 - x) if s > 0 else mark_price * (1 + x)
+    return price if price > 0 else None
+
+
+def account_exposure(payload, mmf_by_market: dict[int, float], *,
+                     exclude_market: int | None = None,
+                     default_mmf: float = 0.1):
+    """(权益, 其它仓名义额合计, 其它仓维持保证金合计)，强平价估算用。
+
+    payload 是 /v1/account 快照并带 _positions 行。不在已知市场里的仓位
+    不知道 MMF，按 10% 保守算。
+    """
+    if not isinstance(payload, dict):
+        return None, 0.0, 0.0
+    equity = _num(payload.get("equity"))
+    notional = maintenance = 0.0
+    for row in payload.get("_positions") or []:
+        try:
+            market_id = int(row.get("marketId"))
+        except (TypeError, ValueError):
+            continue
+        if exclude_market is not None and market_id == exclude_market:
+            continue
+        size = abs(_num(row.get("size")) or 0.0)
+        mark = _num(row.get("markPx")) or _num(row.get("averageEntryPrice")) or 0.0
+        if size <= 0 or mark <= 0:
+            continue
+        notional += size * mark
+        maintenance += size * mark * mmf_by_market.get(market_id, default_mmf)
+    return equity, notional, maintenance
+
+
+# ── 下单回执 ──────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class ArcusReceipt:
+    accepted: bool             # 交易所收下了（202，或 200 且非拒单）
+    order_id: str | None
+    client_id: str | None
+    status: str
+    filled: float | None       # 回执写明的成交量；202 时 None（要看仓位）
+    error: str | None
+
+
+def parse_order_response(http_status: int, data, client_id: str | None) -> ArcusReceipt:
+    """placeOrder 回执解析。202=网关已转撮合（成交看仓位）；
+    200=已有定论。IOC 没吃到对手价回 REJECTED+IOC_CANCELED，不是故障。"""
+    body = data if isinstance(data, dict) else {}
+    order_id = str(body.get("orderId") or "") or None
+    cid = str(body.get("clientId") or client_id or "") or None
+    status = str(body.get("status") or ("ACK" if http_status == 202 else "")).upper()
+    reason = body.get("rejectionReason") or body.get("error")
+    filled = _num(body.get("filledSize"))
+    if http_status == 202:
+        return ArcusReceipt(True, order_id, cid, status or "ACK", None, None)
+    if http_status != 200:
+        text = reason or body or f"HTTP {http_status}"
+        return ArcusReceipt(False, order_id, cid, status or "ERROR", 0.0,
+                            f"Arcus 拒单：{text}")
+    if status in ("REJECTED", "ERROR", "MARGIN_CANCELED"):
+        if str(reason or "").upper() == "IOC_CANCELED":
+            return ArcusReceipt(False, order_id, cid, status, 0.0,
+                                "Arcus IOC 未成交（没有吃到对手价）")
+        return ArcusReceipt(False, order_id, cid, status, 0.0,
+                            f"Arcus 拒单：{reason or status}")
+    if status == "CANCELED" and not (filled and filled > 0):
+        return ArcusReceipt(False, order_id, cid, status, 0.0,
+                            "Arcus IOC 未成交（已撤销）")
+    return ArcusReceipt(True, order_id, cid, status, filled, None)
+
+
+def order_ref(order_id: str | None, client_id: str | None) -> str | None:
+    """账本订单号：优先 orderId，没有用 cid:<clientId>。"""
+    if order_id:
+        return str(order_id)
+    if client_id:
+        return f"cid:{client_id}"
+    return None
+
+
+def _num(value) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result == result else None

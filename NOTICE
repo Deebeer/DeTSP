@@ -14,6 +14,18 @@ DeTSP 借鉴/移植了以下开源项目（均为 MIT 许可，保留其署名�
   Copyright (c) 2026 yourQuantGuy（MIT）
   借鉴：Hyperliquid 家族与 Lighter 主网适配、溢价套利引擎、盘口录制/分析。
 
+第二批各 venue 的实现来源明细：
+
+- venues/hl.py：基于 Hyperliquid 官方 SDK（hyperliquid-python-sdk），
+  适配设计参考 entropy-arb 的 venue_hl.py。
+- venues/lighter.py：基于 Lighter 官方 SDK（lighter-sdk 1.1.2），
+  读接口口径参考 entropy-arb 的 venue_lighter.py 与 Parallax Hedge。
+- venues/arcus.py + venues/_arcus_sign.py：移植 Parallax Hedge 的
+  arcus.py（签名/精度/强平价/回执解析）与 exchanges.py、execution.py
+  的 REST 读接口与签名下单流程。
+- venues/aster.py：依据 Aster 官方 API 文档（Futures V1 Legacy，
+  HMAC-SHA256）自写，未使用任何第三方项目的代码。
+
 未使用代码的项目：
 
 - perp-dex-tools — https://github.com/your-quantguy/perp-dex-tools
