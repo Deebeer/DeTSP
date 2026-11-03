@@ -28,7 +28,7 @@ LIGHTER_DEPLOYMENT = {"lighter": "mainnet", "lighter_rh": "robinhood"}
 
 MODES = ("paper", "live")
 
-_YAML_TOP_KEYS = {"engine", "risk", "venues", "tasks", "caps"}
+_YAML_TOP_KEYS = {"engine", "risk", "venues", "tasks", "caps", "watchlist"}
 _YAML_RISK_KEYS = {"min_corridor_pct", "close_corridor_pct", "max_consecutive_errors"}
 _YAML_CAPS_KEYS = {"global_usd", "venues", "strategies"}
 _TASK_KEYS = {"name", "strategy", "venue", "symbol", "venue_a", "venue_b",
@@ -91,6 +91,8 @@ class AppConfig:
     risk: RiskConfig = field(default_factory=RiskConfig)
     caps: CapsConfig = field(default_factory=CapsConfig)
     tasks: list[dict] = field(default_factory=list)
+    # 面板数据页的观察列表（币种，大写）；空 = 用 scanner 的默认表
+    watchlist: list[str] = field(default_factory=list)
     secrets: dict[str, str] = field(default_factory=dict, repr=False)
 
     def venue_mode(self, venue_id: str) -> str:
@@ -226,6 +228,15 @@ def build_config(env: dict[str, str] | None = None, yaml_data: dict | None = Non
         seen_keys |= used
         tasks.append(dict(t))
 
+    watchlist: list[str] = []
+    for i, s in enumerate(yaml_data.get("watchlist") or []):
+        sym = str(s or "").strip().upper()
+        if not sym:
+            raise ConfigError(f"watchlist[{i}] 不能为空")
+        if sym not in watchlist:
+            watchlist.append(sym)
+
     secrets = {k: v for k, v in env.items() if v}
     return AppConfig(dry_run=dry_run, cycle_seconds=cycle, venues=venues,
-                     risk=risk, caps=caps, tasks=tasks, secrets=secrets)
+                     risk=risk, caps=caps, tasks=tasks,
+                     watchlist=watchlist, secrets=secrets)

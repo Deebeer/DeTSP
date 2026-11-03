@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from ..core.engine import Engine, build_task, task_occupied_keys
 from ..core.ledger import Ledger
 from ..core.panel_tasks import save_panel_tasks
+from ..core.secret_fields import save_secrets, secrets_status
 from ..strategies.specs import PARAMS_CLASSES, strategy_specs, validate_params
 from .page import PAGE_HTML
 
@@ -59,6 +60,48 @@ class PanelState:
     panel_store_path: object = None
     # 与 config 任务重名被跳过的面板任务的错误（面板列表里标 error 用）
     panel_skip_errors: dict = field(default_factory=dict)
+    # 设置页：.env 文件路径（保存密钥写回此文件；None = 不可用）
+    env_path: object = None
+    # 数据页：公开行情扫描器（测试可注入假对象）
+    market_scanner: object = None
+
+    def _scanner(self):
+        """惰性创建扫描器：观察列表取 config 的 watchlist。"""
+        if self.market_scanner is None:
+            from ..core.market_scanner import MarketScanner
+
+            wl = getattr(self.app_config, "watchlist", None) or None
+            self.market_scanner = MarketScanner(watchlist=wl)
+        return self.market_scanner
+
+    # ----- 数据页（公开行情，只读）-----
+    def market_view(self, force: bool = False) -> dict:
+        return self._scanner().scan(force=force)
+
+    def market_candles(self, venue_id: str, symbol: str) -> dict:
+        return self._scanner().candles(venue_id, symbol)
+
+    # ----- 设置页（密钥：只报状态、只写不读值）-----
+    def secrets_view(self) -> dict:
+        if not self.env_path:
+            return {"groups": [], "error": "未配置 .env 路径，设置页不可用"}
+        return {"groups": secrets_status(self.env_path)}
+
+    def save_secrets_view(self, updates) -> dict:
+        if not self.env_path:
+            return {"ok": False, "error": "未配置 .env 路径，无法保存"}
+        if not isinstance(updates, dict):
+            return {"ok": False, "error": "请求体必须是 {字段名: 值} 对象"}
+        try:
+            changed = save_secrets(self.env_path, updates)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        if changed:
+            # 系统事件只记字段名，绝不记值
+            self._event(f"设置页保存密钥字段：{'、'.join(changed)}"
+                        f"（需重启程序生效）")
+        return {"ok": True, "changed": changed,
+                "note": "已保存到 .env，需重启程序生效"}
 
     # ----- 来源与持久化 -----
     def _source(self, name: str) -> str:
@@ -501,6 +544,17 @@ def make_handler(state: PanelState):
                 q = parse_qs(u.query)
                 limit = int(q.get("limit", ["50"])[0])
                 self._json({"fills": state.ledger.recent_fills(limit=limit)})
+            elif u.path == "/api/market":
+                q = parse_qs(u.query)
+                force = (q.get("force", ["0"])[0] == "1")
+                self._json(state.market_view(force=force))
+            elif u.path == "/api/market/candles":
+                q = parse_qs(u.query)
+                self._json(state.market_candles(
+                    q.get("venue", [""])[0], q.get("symbol", [""])[0]))
+            elif u.path == "/api/settings/secrets":
+                # 只返回已填/未填，绝不返回任何密钥值
+                self._json(state.secrets_view())
             else:
                 self._json({"error": "not found"}, 404)
 
@@ -566,6 +620,12 @@ def make_handler(state: PanelState):
                     return
                 res = state.close_position(body.get("venue_id"),
                                            body.get("symbol"))
+                self._json(res, 200 if res.get("ok") else 400)
+            elif parts == ["api", "settings", "secrets"]:
+                body = self._json_body()
+                if body is None:
+                    return
+                res = state.save_secrets_view(body)
                 self._json(res, 200 if res.get("ok") else 400)
             else:
                 self._json({"error": "not found"}, 404)

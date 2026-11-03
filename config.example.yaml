@@ -14,6 +14,11 @@
 engine:
   cycle_seconds: 20
 
+# 面板「数据」页的观察列表（币种）；不写时用默认
+# BTC / ETH / SOL / HYPE / AAPL / SNDK。注意 Entropy、trade.xyz
+# 只有股票类标的，加密币在那两所会显示无数据，属正常。
+# watchlist: [BTC, ETH, SOL, HYPE, AAPL, SNDK]
+
 risk:
   min_corridor_pct: 3.0     # 开仓门槛：估算强平距离低于此值不开仓
   close_corridor_pct: 1.5   # 平仓线：任一腿强平距离低于此值双腿同平

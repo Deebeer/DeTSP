@@ -97,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
         panel_cfgs_list = []
     state = PanelState(engine=engine, venues=venues, ledger=ledger,
                        app_config=app_config, task_cfgs=task_cfgs,
-                       panel_store_path=panel_path)
+                       panel_store_path=panel_path, env_path=args.env)
     for name, err in state.attach_panel_tasks(panel_cfgs_list).items():
         print(f"[DeTSP] 面板任务 {name} 加载失败（已隔离）：{err}", flush=True)
 

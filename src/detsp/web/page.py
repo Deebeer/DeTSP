@@ -1,7 +1,10 @@
 """面板单页 HTML（内嵌，无外部资源依赖）。
 
-页面分三区：总览（场所权益/持仓/挂单、今日成交量与手续费、未实现盈亏、
-KillSwitch 状态）、任务（新建/编辑/删除/启停）、账本（最近成交）。
+页面分五个标签：总览（场所权益/持仓/挂单、今日成交量与手续费、
+未实现盈亏、KillSwitch 状态）、任务（新建/编辑/删除/启停）、
+数据（公开行情扫描：7 所价格/资金费与按策略的机会排行，点策略
+卡看对应视图，排行行可一键预填新建任务）、账本（最近成交）、
+设置（密钥填写状态与写回 .env，只报已填/未填、绝不回显值）。
 任务表单由后端 /api/strategy-specs 的参数规格动态生成（与 config
 校验同一份规格，见 strategies/specs.py）；配置文件里的任务在面板
 只可启停，面板任务才可删改，界面上如实标注来源。
@@ -35,6 +38,21 @@ pre{background:#161c2b;padding:8px;overflow:auto;font-size:12px;margin:0}
 .fld input[type=number],.fld input[type=text],.fld select,#mName{width:100%;box-sizing:border-box;background:#0f1420;color:#e6e9ef;border:1px solid #2a3247;border-radius:4px;padding:5px 8px;margin-top:3px}
 #modal select{background:#0f1420;color:#e6e9ef;border:1px solid #2a3247;border-radius:4px;padding:5px 8px}
 #mErr{white-space:pre-wrap}
+.tabs{margin:14px 0 4px}
+.tabs button{background:#1a2133;margin-right:6px}
+.tabs button.on{background:#2456a6}
+.tabpage{display:none}.tabpage.on{display:block}
+.cards{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+.card{background:#1a2133;border:1px solid #2a3247;border-radius:6px;padding:10px 14px;cursor:pointer;min-width:150px}
+.card.on{border-color:#2456a6;background:#1d2a47}
+.card b{display:block;font-size:14px;margin-bottom:4px}
+.card span{font-size:12px;color:#9aa4b8}
+tr.best td{background:#1d2f1d}
+td.na{color:#5c6578}
+details{margin:6px 0}
+details summary{cursor:pointer;color:#9aa4b8;font-size:13px}
+details div{font-size:13px;padding:6px 4px;line-height:1.7}
+.sec input{background:#0f1420;color:#e6e9ef;border:1px solid #2a3247;border-radius:4px;padding:5px 8px;width:100%;box-sizing:border-box;margin-top:3px}
 </style>
 </head>
 <body>
@@ -43,6 +61,15 @@ pre{background:#161c2b;padding:8px;overflow:auto;font-size:12px;margin:0}
 token 校验（防跨站借道），但<b>不等于登录鉴权</b>：不要改绑公网地址、
 不要做端口映射。</p>
 
+<div class="tabs">
+<button data-tab="overview" class="on">总览</button>
+<button data-tab="tasks">任务</button>
+<button data-tab="market">数据</button>
+<button data-tab="fills">账本</button>
+<button data-tab="settings">设置</button>
+</div>
+
+<div class="tabpage on" id="tab-overview">
 <h2>总览</h2>
 <div id="killbox"></div>
 <p>今日成交量：<b id="tvol">-</b>　今日手续费：<b id="tfee">-</b>　
@@ -51,19 +78,69 @@ token 校验（防跨站借道），但<b>不等于登录鉴权</b>：不要改�
 <th>场所</th><th>模式</th><th>权益</th><th>可用</th><th>持仓</th><th>挂单数</th>
 </tr></thead><tbody></tbody></table>
 <div id="events"></div>
+</div>
 
+<div class="tabpage" id="tab-tasks">
 <h2>任务 <button id="newBtn">＋ 新建任务</button></h2>
 <p class="muted">来源为「面板」的任务可编辑/删除；来源为「配置文件」的任务只能启停，
-要改参数请改 config.yaml 后重启。场所的 paper/live 模式与密钥不在面板操作（安全边界）。</p>
+要改参数请改 config.yaml 后重启。场所的 paper/live 模式不在面板切换（安全边界）；
+不知道选什么标的，先去「数据」页看机会排行。</p>
 <table id="tasks"><thead><tr>
 <th>名称</th><th>策略</th><th>来源</th><th>状态</th><th>最近错误</th><th>参数</th><th>操作</th>
 </tr></thead><tbody></tbody></table>
+</div>
 
+<div class="tabpage" id="tab-market">
+<h2>数据（公开行情，不用密钥）</h2>
+<p class="muted">点一个策略，下面就是该策略要看的数据；排行按机会大小排，
+第一名标「当前最优」。每行可一键新建任务（场所/币种自动预填，参数仍要核对）。
+资金费已统一换算为每小时 bps；标「混口径」的组合只是参考——策略选向时
+会拒绝用不同时点口径的费率相减开仓。<br>
+数据时间：<b id="mktTime">-</b>　<button class="mini" id="mktRefresh">刷新</button>
+<span class="muted">（打开本页时每 30 秒自动刷新）</span></p>
+<div class="cards" id="stratCards"></div>
+<div id="view-spread" class="mktview">
+<h3>价差排行（溢价套利：在便宜的所买、贵的所卖）</h3>
+<table id="spreadTbl"><thead><tr>
+<th>币种</th><th>买入（低价所）</th><th>卖出（高价所）</th><th>价差 bps</th><th></th><th>操作</th>
+</tr></thead><tbody></tbody></table>
+</div>
+<div id="view-funding" class="mktview" style="display:none">
+<h3>资金费差排行（carry / 轮换对冲：多费率低的所、空费率高的所）</h3>
+<table id="fundTbl"><thead><tr>
+<th>币种</th><th>做多（低费率）</th><th>做空（高费率）</th><th>净费差 bps/小时</th><th>口径</th><th>操作</th>
+</tr></thead><tbody></tbody></table>
+</div>
+<div id="view-grid" class="mktview" style="display:none">
+<h3>中性网格：选币看 24 小时区间</h3>
+<p>币种 <select id="gridSym"></select>
+场所 <select id="gridVenue"><option value="hyperliquid">hyperliquid</option>
+<option value="entropy">entropy</option><option value="tradexyz">tradexyz</option></select>
+<button class="mini" id="gridGo">查看区间</button>
+<span class="muted">（K 线只有 Hyperliquid 家族有公开接口）</span></p>
+<div id="gridOut"></div>
+</div>
+<h3>全表（每币种 × 7 所：价格 / 资金费 bps·小时）</h3>
+<div id="mktMatrix"></div>
+</div>
+
+<div class="tabpage" id="tab-fills">
 <h2>账本（最近成交）</h2>
 <table id="fills"><thead><tr>
 <th>时间</th><th>场所</th><th>币种</th><th>策略</th><th>方向</th>
 <th>数量</th><th>价格</th><th>手续费</th><th>订单号</th>
 </tr></thead><tbody></tbody></table>
+</div>
+
+<div class="tabpage" id="tab-settings">
+<h2>设置（密钥）</h2>
+<p class="muted">这里只填/改交易所密钥：已填的只显示「已设置」，<b>绝不回显任何密钥值</b>；
+输入框留空 = 不修改。保存后写回 .env 文件，<b>需重启程序才生效</b>。
+只填 API 钱包/签名私钥，永远不要填主钱包私钥或助记词。</p>
+<div id="secGroups"></div>
+<p><button id="secSave">保存密钥设置</button>
+<span id="secMsg" class="ok"></span></p>
+</div>
 
 <div id="overlay"><div id="modal">
 <h3 id="mTitle">新建任务</h3>
@@ -130,16 +207,26 @@ out[f.name]=Number(v);
 return out;
 }
 
-function openModal(editName){
+function applyPrefill(params){
+if(!params) return;
+for(const k in params){
+const el=$('#mForm [data-f="'+k+'"]'); if(!el) continue;
+if(el.type==="checkbox") el.checked=!!params[k];
+else el.value=params[k];
+}
+}
+
+function openModal(editName, prefill){
 EDITING=editName||null;
 const t=editName?TASKS.find(x=>x.name===editName):null;
 $("#mTitle").textContent=t?("编辑任务："+t.name):"新建任务";
 $("#mNameRow").style.display=t?"none":"block";
 $("#mName").value="";
-const st=t?t.strategy:(SPECS[0]&&SPECS[0].strategy);
+const st=t?t.strategy:((prefill&&prefill.strategy)||(SPECS[0]&&SPECS[0].strategy));
 $("#mStrategy").value=st;
 $("#mStrategy").disabled=!!t;
 buildForm(st, t?(t.params.params||{}):null);
+if(prefill&&prefill.params) applyPrefill(prefill.params);
 $("#mErr").textContent="";
 $("#overlay").style.display="block";
 }
@@ -186,6 +273,12 @@ alert(r.ok?r.note:(r.error||"平仓失败"));
 refresh();
 }
 }
+else if(act==="newtask"){
+let pf=null;
+try{pf=JSON.parse(b.dataset.prefill||"null")}catch(e){}
+switchTab("tasks");
+openModal(null, pf);
+}
 });
 
 async function refresh(){
@@ -229,6 +322,114 @@ $("#fills tbody").innerHTML=fl.fills.map(f=>"<tr><td>"+new Date(f.ts*1000).toLoc
 "</td><td>"+esc(f.venue)+"</td><td>"+esc(f.symbol)+"</td><td>"+esc(f.strategy)+"</td><td>"+esc(f.side)+
 "</td><td>"+f.qty+"</td><td>"+f.price+"</td><td>"+f.fee+"</td><td>"+esc(f.order_id)+"</td></tr>").join("");
 }
+// ---------- 标签页 ----------
+let CURTAB="overview", MKT=null, MKTLOADED=false, SECLOADED=false;
+function switchTab(name){
+CURTAB=name;
+document.querySelectorAll(".tabs button").forEach(b=>b.classList.toggle("on",b.dataset.tab===name));
+document.querySelectorAll(".tabpage").forEach(p=>p.classList.toggle("on",p.id==="tab-"+name));
+if(name==="market"){loadMarket(false)}
+if(name==="settings"&&!SECLOADED){loadSecrets()}
+}
+document.querySelectorAll(".tabs button").forEach(b=>b.addEventListener("click",()=>switchTab(b.dataset.tab)));
+
+// ---------- 数据页 ----------
+const STRAT_VIEWS={premium_arb:"spread",funding_carry:"funding",rotation_hedge:"funding",hedged_grid:"grid"};
+const STRAT_CARDS=[
+["premium_arb","溢价套利","看价差排行：在便宜的所买、贵的所卖"],
+["funding_carry","资金费 carry","看资金费差排行：多低费率、空高费率"],
+["rotation_hedge","轮换对冲刷量","同看资金费差排行（选向口径相同）"],
+["hedged_grid","中性网格","选币看近 24 小时高低定区间"]];
+let CURVIEW="spread";
+function showView(v){
+CURVIEW=v;
+document.querySelectorAll(".mktview").forEach(x=>x.style.display="none");
+$("#view-"+v).style.display="block";
+document.querySelectorAll("#stratCards .card").forEach(c=>c.classList.toggle("on",STRAT_VIEWS[c.dataset.st]===v));
+}
+$("#stratCards").innerHTML=STRAT_CARDS.map(c=>'<div class="card" data-st="'+c[0]+'"><b>'+c[1]+'</b><span>'+c[2]+"</span></div>").join("");
+document.querySelectorAll("#stratCards .card").forEach(c=>c.addEventListener("click",()=>showView(STRAT_VIEWS[c.dataset.st])));
+function prefillBtn(strategy,params,label){
+const pf=esc(JSON.stringify({strategy:strategy,params:params}));
+return '<button class="mini" data-act="newtask" data-prefill="'+pf+'">'+(label||"用此标的新建任务")+"</button>";
+}
+const KIND_CN={predicted:"下期预测",current:"当期",last_settled:"上期已结算",unknown:"未知"};
+async function loadMarket(force){
+try{
+const d=await (await fetch("/api/market"+(force?"?force=1":""))).json();
+MKT=d; MKTLOADED=true;
+$("#mktTime").textContent=new Date(d.updated_at*1000).toLocaleString();
+const firstClean=d.funding_ranking.findIndex(r=>!r.mixed);
+$("#spreadTbl tbody").innerHTML=d.spread_ranking.map((r,i)=>
+'<tr'+(i===0?' class="best"':"")+'><td>'+esc(r.symbol)+"</td><td>"+esc(r.buy_venue)+"</td><td>"+esc(r.sell_venue)+
+"</td><td>"+fmt(r.spread_bps,2)+"</td><td>"+(i===0?"当前最优":"")+"</td><td>"+
+prefillBtn("premium_arb",{base_venue:r.buy_venue,hedge_venue:r.sell_venue,symbol:r.symbol})+"</td></tr>").join("")
+|| '<tr><td colspan="6" class="muted">暂无足够数据（至少要两个所有价格）</td></tr>';
+$("#fundTbl tbody").innerHTML=d.funding_ranking.map((r,i)=>
+'<tr'+(i===firstClean?' class="best"':"")+'><td>'+esc(r.symbol)+"</td><td>"+esc(r.long_venue)+"</td><td>"+esc(r.short_venue)+
+"</td><td>"+fmt(r.edge_bps_h,3)+"</td><td>"+(r.mixed?'<span class="bad">混口径（仅参考）</span>':esc(KIND_CN[r.rate_kind]||r.rate_kind))+
+"</td><td>"+(i===firstClean?"当前最优 ":"")+
+prefillBtn("funding_carry",{venue_a:r.long_venue,venue_b:r.short_venue,symbol:r.symbol},"建 carry")+" "+
+prefillBtn("rotation_hedge",{venue_a:r.long_venue,venue_b:r.short_venue,symbol:r.symbol},"建轮换对冲")+"</td></tr>").join("")
+|| '<tr><td colspan="6" class="muted">暂无足够数据</td></tr>';
+const vids=["arcus","lighter","lighter_rh","hyperliquid","entropy","tradexyz","aster"];
+$("#mktMatrix").innerHTML='<table><thead><tr><th>币种</th>'+vids.map(v=>"<th>"+v+"</th>").join("")+"<th>最大价差</th><th>最优费差</th></tr></thead><tbody>"+
+d.symbols.map(s=>"<tr><td><b>"+esc(s.symbol)+"</b></td>"+vids.map(v=>{
+const c=s.venues[v];
+if(!c)return '<td class="na">无数据</td>';
+return "<td>"+(c.price==null?"-":fmt(c.price,c.price<10?4:2))+"<br><span class='muted'>"+
+(c.funding_bps_h==null?"费率 -":fmt(c.funding_bps_h,3)+" bps/h · "+esc(KIND_CN[c.rate_kind]||c.rate_kind||""))+"</span></td>"}).join("")+
+"<td>"+(s.best_spread?fmt(s.best_spread.spread_bps,2)+" bps<br><span class='muted'>"+esc(s.best_spread.buy_venue)+" → "+esc(s.best_spread.sell_venue)+"</span>":"-")+"</td>"+
+"<td>"+(s.best_funding?fmt(s.best_funding.edge_bps_h,3)+" bps/h<br><span class='muted'>多 "+esc(s.best_funding.long_venue)+" / 空 "+esc(s.best_funding.short_venue)+(s.best_funding.mixed?" · 混口径":"")+"</span>":"-")+"</td></tr>").join("")+
+"</tbody></table>"+(Object.keys(d.venue_errors||{}).length?'<p class="bad">取数失败的场所：'+
+Object.entries(d.venue_errors).map(e=>esc(e[0])).join("、")+"（已标无数据，不影响其他场所）</p>":"");
+const gs=$("#gridSym");
+if(!gs.options.length){gs.innerHTML=d.watchlist.map(s=>'<option value="'+esc(s)+'">'+esc(s)+"</option>").join("")}
+}catch(e){$("#mktTime").textContent="加载失败："+e}
+}
+$("#mktRefresh").addEventListener("click",()=>loadMarket(true));
+$("#gridGo").addEventListener("click",async()=>{
+const v=$("#gridVenue").value,s=$("#gridSym").value;
+$("#gridOut").innerHTML="查询中…";
+const d=await (await fetch("/api/market/candles?venue="+encodeURIComponent(v)+"&symbol="+encodeURIComponent(s))).json();
+if(!d.ok){$("#gridOut").innerHTML='<p class="bad">'+esc(d.error||"不可用")+"</p>";return}
+$("#gridOut").innerHTML="<p>"+esc(s)+" 近 24 小时：最高 <b>"+fmt(d.high,d.high<10?4:2)+"</b>，最低 <b>"+fmt(d.low,d.low<10?4:2)+
+"</b>。建议网格区间（高低各扩 2%）：<b>"+fmt(d.suggested_lower,d.suggested_lower<10?4:2)+" ~ "+fmt(d.suggested_upper,d.suggested_upper<10?4:2)+"</b></p>"+
+prefillBtn("hedged_grid",{grid_venue:v,symbol:s,lower_price:d.suggested_lower,upper_price:d.suggested_upper});
+});
+setInterval(()=>{if(CURTAB==="market")loadMarket(false)},30000);
+
+// ---------- 设置页（密钥） ----------
+const GUIDES={
+hyperliquid:"<b>怎么获取</b>（入口：app.hyperliquid.xyz）：<br>1. 打开 Hyperliquid 网页端并连接钱包；<br>2. 右上角菜单 More → API（或直接打开 app.hyperliquid.xyz/API）；<br>3. 生成 API 钱包（agent wallet），页面会显示它的地址和私钥；<br>4. 主账户地址填你的钱包主地址，私钥填刚生成的 agent 钱包私钥——agent 只能交易、不能提现，泄露风险比主私钥小，但仍要保密。<br>Entropy、trade.xyz 是同一套基础设施的子所，共用这套密钥；trade.xyz 想用独立账户，再填下面两个 _XYZ 字段。",
+arcus:"<b>怎么获取</b>（入口：arcus.xyz，接口域名 api.arcus.xyz）：<br>1. 打开 Arcus 官网并登录/连接钱包；<br>2. 进账户的 API 设置页，创建 API 密钥，页面会给出公钥与私钥；<br>3. 私钥只显示一次，当场保存；<br>4. 地址填钱包地址，子账户序号填该 API 所属子账户的序号（主账户一般为 0）。",
+lighter:"<b>怎么获取</b>（入口：lighter.xyz）：<br>1. 打开 Lighter 官网并登录；<br>2. 进个人中心的 API 管理（API Keys），创建新的 API Key；<br>3. 记下三样：账户序号（Account Index）、API Key 序号（API Key Index）、私钥——私钥只显示一次。<br>主网与 Robinhood 链是两套独立账户，密钥不要混填。",
+lighter_rh:"<b>怎么获取</b>（入口：lighter.xyz 的 Robinhood 链 / rh.lighter.xyz）：<br>1. 在 Lighter 官网切换到 Robinhood 链（或打开 rh.lighter.xyz）并登录；<br>2. 同样在 API 管理里创建 API Key，记下账户序号、API Key 序号与私钥；<br>3. 这套密钥与主网完全独立，不要混填。",
+aster:"<b>怎么获取</b>（入口：asterdex.com）：<br>1. 打开 Aster 官网并登录；<br>2. 右上角头像 → API 管理，创建 API；<br>3. 保存 API Key 与 Secret Key——Secret 只显示一次，丢了只能删掉重建。"
+};
+async function loadSecrets(){
+const d=await (await fetch("/api/settings/secrets")).json();
+SECLOADED=true;
+if(d.error){$("#secGroups").innerHTML='<p class="bad">'+esc(d.error)+"</p>";return}
+$("#secGroups").innerHTML=d.groups.map(g=>
+'<fieldset class="sec" style="border:1px solid #2a3247;border-radius:4px;margin:10px 0"><legend>'+esc(g.title)+"</legend>"+
+(GUIDES[g.key]?'<details><summary>怎么获取？</summary><div>'+GUIDES[g.key]+"</div></details>":"")+
+g.fields.map(f=>'<label class="fld">'+esc(f.label)+
+(f.required===true?' <span class="bad">*</span>':"")+(f.required==="one_of"?' <span class="muted">(二选一必填)</span>':"")+
+' <span class="'+(f.filled?"ok":"bad")+'">'+(f.filled?"已设置":"未设置")+'</span>'+
+'<input type="'+(f.secret?"password":"text")+'" data-sec="'+esc(f.name)+'" autocomplete="off" placeholder="'+
+(f.filled?"已设置，留空不修改":"未设置，在此填写")+'"></label>').join("")+"</fieldset>").join("");
+}
+$("#secSave").addEventListener("click",async()=>{
+const updates={};
+document.querySelectorAll("[data-sec]").forEach(el=>{const v=el.value.trim();if(v)updates[el.dataset.sec]=v});
+if(!Object.keys(updates).length){$("#secMsg").textContent="没有要保存的新值（输入框都是空的）";return}
+const r=await postJson("/api/settings/secrets",updates);
+if(!r.ok){$("#secMsg").textContent="保存失败："+(r.error||"");return}
+$("#secMsg").textContent="已保存字段："+r.changed.join("、")+"。需重启程序生效。";
+loadSecrets();
+});
+
 loadSpecs().then(refresh); setInterval(refresh, 5000);
 </script>
 </body>

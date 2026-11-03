@@ -188,7 +188,9 @@ class HyperliquidVenue(SkeletonVenue):
             if cname != coin:
                 continue
             for vname, payload in venues or []:
-                if str(vname).lower() != "hyperliquid":
+                # 实测（2026-11-04 活接口）：场所名是 "HlPerp" 而非
+                # "Hyperliquid"，旧写法永不命中、预测口径从未生效
+                if str(vname).lower() not in ("hyperliquid", "hlperp"):
                     continue
                 r = (payload or {}).get("fundingRate")
                 if r is None:
