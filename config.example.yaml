@@ -17,3 +17,39 @@ venues:
   entropy:     { mode: paper }
   tradexyz:    { mode: paper }
   aster:       { mode: paper }
+
+# 任务列表：引擎按此组装策略（strategy 三选一，params 见各策略参数类）。
+# 同一 (场所, 账户, 币种) 只能被一个任务占用，冲突的任务会被拒绝启动。
+tasks:
+  - name: grid-btc-arcus
+    strategy: grid
+    venue: arcus
+    symbol: BTC
+    params:
+      lower: 55000
+      upper: 65000
+      grid_count: 10
+      qty_per_grid: 0.01
+      mode: neutral
+      out_of_range_action: close
+  - name: hedge-arcus-lighter
+    strategy: rotation_hedge
+    params:
+      symbol: ETH
+      venue_a: arcus
+      venue_b: lighter
+      notional_usd: 200
+      hold_seconds: 3600
+      leverage_a: 5
+      leverage_b: 5
+  - name: arb-sndk
+    strategy: premium_arb
+    params:
+      symbol: SNDK
+      base_venue: entropy
+      hedge_venue: lighter_rh
+      midline_bps: 5
+      upper_bps: 30
+      lower_bps: 30
+      max_position_usd: 1000
+      max_order_notional_usd: 500

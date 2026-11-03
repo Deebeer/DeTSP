@@ -110,12 +110,20 @@ Lighter 两个部署共用 lighter.py：仅端点、chain id、账户与密钥�
 | 模块 | 状态 |
 |---|---|
 | core（配置/接口/登记/风控/账本/引擎骨架） | 已完成（第一批） |
+| core/execution 统一执行层 | 已完成（第三批）：claim 归属校验、KillSwitch/强平距离/三层上限、成交记账、结果未知不重发先对账、部分成交按实际量 |
+| core/engine 执行调度 | 已完成（第三批）：按 config.yaml 的 tasks 组装三策略，单任务异常隔离、连续错误停用并触发全局停机、安全动作优先（停机时 allow_open=False 照常撤单/平仓） |
 | venues/paper 通用模拟 | 已完成 |
 | venues/hl（Hyperliquid 本体 / Entropy / trade.xyz） | live 已完成（第二批）：基于官方 hyperliquid-python-sdk 0.24 的 Info/Exchange；签名/请求构造有 mock 单测，未做实盘小额验证 |
 | venues/lighter（主网 / Robinhood 链） | live 已完成（第二批）：REST 读 + lighter-sdk 1.1.2 签名下单；市价单异步结算，成交以持仓对账为准；未做实盘小额验证 |
 | venues/arcus | live 已完成（第二批）：Ed25519 签名（含载荷字节级单测）、精度、强平价复算、REST 下单/撤单/setLeverage；未做实盘小额验证 |
 | venues/aster | live 已完成（第二批）：依据官方 V1（Legacy）文档自写，HMAC-SHA256 签名有官方示例向量对拍；未做实盘小额验证 |
-| strategies（三策略决策骨架） | 决策函数已完成（第一批）；与 live 适配的执行编排在后续批次 |
+| strategies（三策略） | 执行状态机已完成（第三批，paper 端到端集成测试覆盖）：网格铺单/成交补单/区间外 close 与 recover/人工补格；轮换对冲双 taker 与 maker+对冲、到期轮换、孤腿平、开仓后复核；溢价套利双腿 taker、持续门、库存阶梯、对账与净 delta 修正。尚未做实盘小额验证 |
+| venues/paper | 第三批增强：限价单挂单撮合（改价穿价成交）、poll_order 终态查询、资金费/杠杆可设 |
+
+第三批已知限制：
+- Book 无深度数据：溢价套利切片名义直接取 max_order_notional_usd（slice_notional 的深度参数以此代入），实盘接深度后再改。
+- 网格/轮换对冲的成交发现依赖 poll_order：paper 为完整终态查询；live 适配默认实现只查挂单列表，实盘运行时挂单消失需结合持仓对账判断（执行层对账已具备，live 轮询细节待实盘验证批）。
+- KillSwitch 语义：触发后各任务撤单并平仓停机（不只是禁止开仓）。
 
 已知未核实/限制：
 - Aster：官方现主推 V3（EIP-712），本项目按既定方案实现 V1 HMAC；V1 密钥可用性以平台当前政策为准。exchangeInfo 不含最大杠杆（记 0=未知）；按 clientId 撤单未实现（官方 V1 撤单按 orderId+symbol，已实现）。

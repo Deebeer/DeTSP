@@ -40,6 +40,40 @@ def should_force_close(corridor_pct: float, open_corridor_pct: float, close_pct:
     return corridor_pct < close_pct or corridor_pct < open_corridor_pct / 2
 
 
+def estimate_liq_price(entry_price: float, leverage: float, side: Side,
+                       maint_margin_rate: float = 0.0) -> float:
+    """按杠杆估算强平价（交易所不给 liq_price 时用）。
+
+    强平距离比例 ≈ 1/杠杆 − 维持保证金率；多头强平价在入场价下方，
+    空头在上方。杠杆<=1 时多头强平价<=0（不会强平）。
+    """
+    if entry_price <= 0:
+        raise ValueError("entry_price 必须大于 0")
+    lev = max(leverage, 1e-9)
+    dist = max(1.0 / lev - maint_margin_rate, 0.0)
+    if side is Side.BUY:
+        return entry_price * (1 - dist)
+    return entry_price * (1 + dist)
+
+
+def position_corridor_pct(current_price: float, pos: Position,
+                          maint_margin_rate: float = 0.0) -> float | None:
+    """持仓的强平距离（%）：优先用交易所给的 liq_price，否则按杠杆估算。
+
+    空仓返回 None。方向由持仓数量符号决定（多头看跌破，空头看涨破）。
+    """
+    if pos.qty == 0:
+        return None
+    side = Side.BUY if pos.qty > 0 else Side.SELL
+    liq = pos.liq_price
+    if liq is None:
+        if pos.entry_price <= 0:
+            return None
+        liq = estimate_liq_price(pos.entry_price, pos.leverage, side,
+                                 maint_margin_rate)
+    return liquidation_corridor_pct(current_price, liq, side)
+
+
 def basis_ok(price_a: float, price_b: float, max_diff_pct: float = 3.0) -> bool:
     """价差闸门：两所中价相差超过 max_diff_pct 不开仓（防同名不同标的）。"""
     if price_a <= 0 or price_b <= 0:

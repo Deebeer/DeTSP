@@ -11,6 +11,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..core.risk import net_delta
+from ..core.venue import OrderRequest, Side
+
 
 @dataclass
 class PremiumParams:
@@ -23,6 +26,11 @@ class PremiumParams:
     max_order_notional_usd: float = 500.0
     take_fraction: float = 0.5  # 吃对手盘深度的比例
     persist_seconds: float = 0.3
+    # 执行层字段（默认值不影响纯函数测试）
+    symbol: str = "BTC"
+    base_venue: str = ""        # 基准腿 venue_id（如 entropy）
+    hedge_venue: str = ""       # 对冲腿 venue_id（如 lighter）
+    reconcile_seconds: float = 15.0  # 与场所持仓对账周期
 
     def __post_init__(self) -> None:
         if self.upper_bps <= 0 or self.lower_bps <= 0:
@@ -112,10 +120,133 @@ def inventory_surcharge_bps(position_usd: float, p: PremiumParams,
 
 
 class PremiumArbStrategy:
+    """溢价套利执行状态机（移植 entropy-arb engine 的执行规则）。
+
+    - 信号：executable_signal（可成交价、扣双边费）+ 库存阶梯附加门槛；
+      信号须持续 persist_seconds 才触发（防单 tick 幻影溢价）
+    - 执行：双腿 taker 先后紧贴发出（同步引擎内等价于并发），
+      单笔切片按 max_order_notional_usd，仓位受 max_position_usd 约束
+    - 对账：每 reconcile_seconds 与场所真实持仓核对；净 delta 不平
+      立即以 reduce-only 市价单修正（只减多出的那条腿）
+    - 反向穿越溢价带即反向成交：净仓位自然被削减/翻转，完成往返
+    - 停机信号（allow_open=False）：双腿全平停机
+    """
+
     name = "premium_arb"
 
-    def __init__(self, params: PremiumParams) -> None:
+    def __init__(self, params: PremiumParams, executor=None) -> None:
         self.params = params
+        self.executor = executor
+        self._claimed = False
+        self._armed: dict[str, float] = {}   # 信号 -> 首次出现时间
+        self._last_reconcile = -1e18
+        self.last_error: str = ""
+
+    def start(self, now: float = 0.0) -> None:
+        if self.executor is None:
+            raise RuntimeError("PremiumArbStrategy 未注入 executor（骨架模式）")
+        self._ensure_claims()
+
+    def _ensure_claims(self) -> None:
+        if not self._claimed:
+            p = self.params
+            self.executor.claim(self.name, p.base_venue, p.symbol)
+            self.executor.claim(self.name, p.hedge_venue, p.symbol)
+            self._claimed = True
+
+    def _pos_qty(self, venue_id: str) -> float:
+        pos = self.executor.position(venue_id, self.params.symbol)
+        return pos.qty if pos else 0.0
+
+    def _fix_delta(self) -> None:
+        """净 delta 修正：多出的腿用 reduce-only 市价单削回与另一腿等量。"""
+        p = self.params
+        legs = {p.base_venue: self._pos_qty(p.base_venue),
+                p.hedge_venue: self._pos_qty(p.hedge_venue)}
+        delta = net_delta(legs)
+        if delta == 0:
+            return
+        # 净多头过剩：卖出多出的量；净空头过剩：买回。落在绝对值较大的腿上
+        big = max(legs, key=lambda v: abs(legs[v]))
+        excess = abs(legs[big]) - abs(legs[p.hedge_venue if big == p.base_venue
+                                       else p.base_venue])
+        if excess <= 1e-12:
+            return
+        side = Side.SELL if legs[big] > 0 else Side.BUY
+        req = OrderRequest(symbol=p.symbol, side=side, qty=excess,
+                           price=None, reduce_only=True)
+        self.executor.place(self.name, big, req, intent="close")
+
+    def _signal_with_surcharge(self, base_book, hedge_book) -> str | None:
+        """可成交信号 + 库存阶梯：同向加仓时门槛上浮 surcharge。"""
+        p = self.params
+        base_pos_usd = self._pos_qty(p.base_venue) * base_book.mid
+        sell_edge = executable_sell_edge_bps(base_book.bid, hedge_book.ask, p)
+        if sell_edge >= sell_threshold_bps(p) + (
+                inventory_surcharge_bps(base_pos_usd, p)
+                if base_pos_usd < 0 else 0.0):
+            return "sell_base"
+        buy_edge = executable_buy_edge_bps(base_book.ask, hedge_book.bid, p)
+        if buy_edge >= (p.lower_bps - p.midline_bps) + (
+                inventory_surcharge_bps(base_pos_usd, p)
+                if base_pos_usd > 0 else 0.0):
+            return "buy_base"
+        return None
+
+    def _fire(self, signal: str) -> None:
+        p = self.params
+        ex = self.executor
+        base_book = ex.venue(p.base_venue).book(p.symbol)
+        # 切片：Book 无深度数据，用单笔上限作为切片名义（见 DESIGN 限制）
+        notional = slice_notional(p.max_order_notional_usd / max(p.take_fraction, 1e-9), p)
+        qty = notional / base_book.mid
+        # 仓位上限：加仓后 base 腿名义不超过 max_position_usd（减仓不受限）
+        base_qty = self._pos_qty(p.base_venue)
+        if signal == "sell_base":
+            base_req = OrderRequest(p.symbol, Side.SELL, qty, price=None)
+            hedge_req = OrderRequest(p.symbol, Side.BUY, qty, price=None)
+            adds = base_qty <= 0
+        else:
+            base_req = OrderRequest(p.symbol, Side.BUY, qty, price=None)
+            hedge_req = OrderRequest(p.symbol, Side.SELL, qty, price=None)
+            adds = base_qty >= 0
+        if adds and abs(base_qty * base_book.mid) + notional > p.max_position_usd:
+            return
+        ex.place(self.name, p.base_venue, base_req, intent="open")
+        ex.place(self.name, p.hedge_venue, hedge_req, intent="open")
+        # 双腿成交量可能不等（部分成交）：立即按对账结果修正净 delta
+        self._fix_delta()
+        self._last_reconcile = -1e18  # 下一 tick 先对账确认
+
+    def tick(self, now: float = 0.0, allow_open: bool = True) -> None:
+        if self.executor is None:
+            return
+        self._ensure_claims()
+        p = self.params
+        ex = self.executor
+
+        if not allow_open:
+            # 停机：双腿全平
+            ex.close_position(self.name, p.base_venue, p.symbol)
+            ex.close_position(self.name, p.hedge_venue, p.symbol)
+            self._armed.clear()
+            return
+
+        # 定期对账：净 delta 不平立即修正（安全动作，先于开仓信号）
+        if now - self._last_reconcile >= p.reconcile_seconds:
+            self._last_reconcile = now
+            self._fix_delta()
+
+        base_book = ex.venue(p.base_venue).book(p.symbol)
+        hedge_book = ex.venue(p.hedge_venue).book(p.symbol)
+        signal = self._signal_with_surcharge(base_book, hedge_book)
+        if signal is None:
+            self._armed.clear()
+            return
+        since = self._armed.setdefault(signal, now)
+        if now - since >= p.persist_seconds:
+            self._armed.clear()
+            self._fire(signal)
 
     def decide(self, ctx) -> list:
         return []

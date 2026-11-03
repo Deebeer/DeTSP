@@ -8,7 +8,9 @@
 
 ## 状态
 
-第二批：7 个交易所的 live（实盘）适配已全部实现——Hyperliquid 家族（本体/Entropy/trade.xyz，官方 SDK）、Lighter 主网/Robinhood 链（lighter-sdk 1.1.2）、Arcus（Ed25519 签名移植）、Aster（依据官方 V1 文档自写）。paper（模拟）保持可用。全部适配有 mock 单元测试（不联网），共 89 个测试通过；尚未做实盘小额验证，上实盘前务必按 DESIGN.md 第 12 节的未核实清单逐项小额验证。
+第三批：三策略已从决策骨架接通为可执行状态机，统一在引擎内运行——新增 core/execution.py 统一执行层（归属校验、风控门槛、结果未知不重发先对账），config.yaml 新增 tasks 任务组装；网格（铺单/补单/区间外 close 与 recover/人工补格）、轮换对冲（双 taker 与 maker+对冲/到期轮换/孤腿平/开仓后复核）、溢价套利（双腿 taker/持续门/对账与净 delta 修正）均有 paper 端到端集成测试，共 110 个测试通过；尚未做实盘小额验证。
+
+第二批：7 个交易所的 live（实盘）适配已全部实现——Hyperliquid 家族（本体/Entropy/trade.xyz，官方 SDK）、Lighter 主网/Robinhood 链（lighter-sdk 1.1.2）、Arcus（Ed25519 签名移植）、Aster（依据官方 V1 文档自写）。paper（模拟）保持可用。全部适配有 mock 单元测试（不联网）；尚未做实盘小额验证，上实盘前务必按 DESIGN.md 第 12 节的未核实清单逐项小额验证。
 
 第一批：设计文档 + 项目骨架 + 核心层（配置/适配接口/归属登记/风控/账本/引擎骨架）+ 模拟适配 + 三策略决策骨架。
 

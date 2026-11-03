@@ -28,8 +28,11 @@ LIGHTER_DEPLOYMENT = {"lighter": "mainnet", "lighter_rh": "robinhood"}
 
 MODES = ("paper", "live")
 
-_YAML_TOP_KEYS = {"engine", "risk", "venues"}
+_YAML_TOP_KEYS = {"engine", "risk", "venues", "tasks"}
 _YAML_RISK_KEYS = {"min_corridor_pct", "close_corridor_pct", "max_consecutive_errors"}
+_TASK_KEYS = {"name", "strategy", "venue", "symbol", "venue_a", "venue_b",
+              "base_venue", "hedge_venue", "params"}
+_TASK_STRATEGIES = ("grid", "rotation_hedge", "premium_arb")
 
 
 class ConfigError(ValueError):
@@ -71,6 +74,7 @@ class AppConfig:
     cycle_seconds: float = 20.0
     venues: dict[str, VenueConfig] = field(default_factory=dict)
     risk: RiskConfig = field(default_factory=RiskConfig)
+    tasks: list[dict] = field(default_factory=list)
     secrets: dict[str, str] = field(default_factory=dict, repr=False)
 
     def venue_mode(self, venue_id: str) -> str:
@@ -133,5 +137,21 @@ def build_config(env: dict[str, str] | None = None, yaml_data: dict | None = Non
     if cycle <= 0:
         raise ConfigError("engine.cycle_seconds 必须大于 0")
 
+    tasks: list[dict] = []
+    for i, t in enumerate(yaml_data.get("tasks") or []):
+        if not isinstance(t, dict):
+            raise ConfigError(f"tasks[{i}] 必须是映射")
+        unknown = set(t) - _TASK_KEYS
+        if unknown:
+            raise ConfigError(f"tasks[{i}] 含未知键：{sorted(unknown)}")
+        if t.get("strategy") not in _TASK_STRATEGIES:
+            raise ConfigError(
+                f"tasks[{i}].strategy 非法：{t.get('strategy')}，"
+                f"合法值：{_TASK_STRATEGIES}")
+        if "params" in t and not isinstance(t["params"], dict):
+            raise ConfigError(f"tasks[{i}].params 必须是映射")
+        tasks.append(dict(t))
+
     secrets = {k: v for k, v in env.items() if v}
-    return AppConfig(dry_run=dry_run, cycle_seconds=cycle, venues=venues, risk=risk, secrets=secrets)
+    return AppConfig(dry_run=dry_run, cycle_seconds=cycle, venues=venues,
+                     risk=risk, tasks=tasks, secrets=secrets)

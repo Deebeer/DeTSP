@@ -66,6 +66,7 @@ class Order:
     price: float | None
     filled_qty: float = 0.0
     status: str = "open"       # open / filled / canceled / rejected
+    reduce_only: bool = False
 
 
 @dataclass
@@ -118,6 +119,17 @@ class VenueAdapter(ABC):
             if self.cancel_order(o.order_id):
                 n += 1
         return n
+
+    def poll_order(self, order_id: str) -> Order | None:
+        """查询单个订单的最新状态（策略检测成交用）。
+
+        默认实现只查挂单列表：不在挂单中返回 None（含义由调用方结合
+        持仓对账判断）。paper 适配会覆盖为含终态订单的完整查询。
+        """
+        for o in self.open_orders():
+            if o.order_id == order_id:
+                return o
+        return None
 
     @abstractmethod
     def open_orders(self, symbol: str | None = None) -> list[Order]:
