@@ -148,7 +148,10 @@ class PaperVenue(VenueAdapter):
 
     def place_order(self, req: OrderRequest) -> Order:
         book = self.book(req.symbol)
-        oid = f"paper-{next(self._seq)}"
+        # 订单号带场所前缀：归属登记按订单号全局索引，两个 paper
+        # 场所若都从 paper-1 起号会互相覆盖/注销登记（中性网格这类
+        # 双场所策略会踩中）；真实场所的订单号本身也带场所命名空间
+        oid = f"paper-{self.venue_id}-{next(self._seq)}"
         if req.price is not None:
             # 限价单：未被盘口穿价（或 post_only）则挂单等待
             marketable = (req.side is Side.BUY and req.price >= book.ask) or \

@@ -32,8 +32,10 @@ _YAML_TOP_KEYS = {"engine", "risk", "venues", "tasks", "caps"}
 _YAML_RISK_KEYS = {"min_corridor_pct", "close_corridor_pct", "max_consecutive_errors"}
 _YAML_CAPS_KEYS = {"global_usd", "venues", "strategies"}
 _TASK_KEYS = {"name", "strategy", "venue", "symbol", "venue_a", "venue_b",
-              "base_venue", "hedge_venue", "params"}
-_TASK_STRATEGIES = ("grid", "rotation_hedge", "premium_arb", "volume_loop")
+              "base_venue", "hedge_venue", "grid_venue", "params"}
+_TASK_STRATEGIES = ("hedged_grid", "rotation_hedge", "premium_arb",
+                    "funding_carry")
+_TASK_REMOVED = ("grid", "volume_loop")   # 已移除的旧策略名，单独报错
 
 
 class ConfigError(ValueError):
@@ -176,6 +178,10 @@ def build_config(env: dict[str, str] | None = None, yaml_data: dict | None = Non
         unknown = set(t) - _TASK_KEYS
         if unknown:
             raise ConfigError(f"tasks[{i}] 含未知键：{sorted(unknown)}")
+        if t.get("strategy") in _TASK_REMOVED:
+            raise ConfigError(
+                f"tasks[{i}].strategy 已移除：{t.get('strategy')}，"
+                f"可用策略：{' / '.join(_TASK_STRATEGIES)}")
         if t.get("strategy") not in _TASK_STRATEGIES:
             raise ConfigError(
                 f"tasks[{i}].strategy 非法：{t.get('strategy')}，"
@@ -200,11 +206,11 @@ def build_config(env: dict[str, str] | None = None, yaml_data: dict | None = Non
 
         used: set[tuple[str, str]] = set()
         strat = t["strategy"]
-        if strat == "grid":
-            used.add((_tf("venue"), _tf("symbol")))
-        elif strat == "volume_loop":
-            used.add((_tf("venue"), _tf("symbol")))
-        elif strat == "rotation_hedge":
+        if strat == "hedged_grid":
+            sym = _tf("symbol")
+            used.add((_tf("grid_venue"), sym))
+            used.add((_tf("hedge_venue"), sym))
+        elif strat in ("rotation_hedge", "funding_carry"):
             sym = _tf("symbol")
             used.add((_tf("venue_a"), sym))
             used.add((_tf("venue_b"), sym))

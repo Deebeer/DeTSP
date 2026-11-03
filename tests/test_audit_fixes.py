@@ -22,7 +22,7 @@ from detsp.core.ledger import Ledger
 from detsp.core.registry import OwnershipRegistry
 from detsp.core.risk import KillSwitch, funding_hourly_rate
 from detsp.core.venue import OrderRequest, Side
-from detsp.strategies.grid import GridParams, GridStrategy
+from detsp.strategies.hedged_grid import HedgedGridParams, HedgedGridStrategy
 from detsp.venues.hl import HyperliquidVenue
 from detsp.venues.paper import PaperVenue
 
@@ -292,27 +292,38 @@ class _NoPollVenue(PaperVenue):
 
 
 def _grid_yaml(**params):
-    base = {"lower": 55_000, "upper": 65_000, "grid_count": 10,
-            "qty_per_grid": 0.01, "mode": "neutral",
+    # 中性网格（原普通网格的已验证语义在此策略的网格腿上回归）
+    base = {"grid_venue": "arcus", "hedge_venue": "lighter",
+            "symbol": "BTC", "lower_price": 55_000, "upper_price": 65_000,
+            "grid_count": 10, "qty_per_grid": 0.01, "mode": "long_short",
             "out_of_range_action": "close"}
     base.update(params)
-    return {"tasks": [{"name": "grid-btc", "strategy": "grid",
-                       "venue": "arcus", "symbol": "BTC", "params": base}]}
+    return {"tasks": [{"name": "hgrid-btc", "strategy": "hedged_grid",
+                       "params": base}]}
+
+
+def _two_venues(v):
+    """中性网格要两个场所：网格腿用传入的 v，对冲腿另给一个 paper。"""
+    return {"arcus": v,
+            "lighter": PaperVenue(venue_id="lighter", prices=dict(BTC))}
 
 
 def test_s2_grid_reconcile_fill_via_position_delta():
     v = _NoPollVenue(venue_id="arcus", prices=dict(BTC))
     cfg = build_config(env={}, yaml_data=_grid_yaml())
     ledger = Ledger()
-    engine = Engine.from_config(cfg, {"arcus": v}, ledger=ledger)
+    engine = Engine.from_config(cfg, _two_venues(v), ledger=ledger)
     assert len(v.open_orders("BTC")) == 10
     v.set_price("BTC", 58_900)   # 穿 59000 买单（paper 内部已成交）
     engine.tick(now=1)
     pos = engine.executor.position("arcus", "BTC")
     assert pos is not None and pos.qty == pytest.approx(0.01)
-    # 对账式发现成交 → 补记账本 + 挂出反向单（总数回到 10）
-    assert ledger.count("grid-btc") == 1
+    # 对账式发现成交 → 补记账本 + 挂出反向单（总数回到 10），
+    # 且对冲腿同步卖出等量（账本共 2 笔：网格补记 + 对冲成交）
+    assert ledger.count("hgrid-btc") == 2
     assert len(v.open_orders("BTC")) == 10
+    hedge = engine.executor.position("lighter", "BTC")
+    assert hedge is not None and hedge.qty == pytest.approx(-0.01)
 
 
 # ═══════════ S3：启动恢复对账 ═══════════
@@ -323,7 +334,7 @@ def test_s3_grid_cancels_leftover_orders():
     v.place_order(OrderRequest("BTC", Side.BUY, 0.02, price=50_000.0))
     assert len(v.open_orders("BTC")) == 1
     cfg = build_config(env={}, yaml_data=_grid_yaml())
-    engine = Engine.from_config(cfg, {"arcus": v}, ledger=Ledger())
+    engine = Engine.from_config(cfg, _two_venues(v), ledger=Ledger())
     # 遗留单已被撤销，只剩网格自己的 10 张
     assert len(v.open_orders("BTC")) == 10
     assert any("撤销遗留挂单" in e for e in engine.events)
@@ -333,7 +344,7 @@ def test_s3_grid_unmanaged_position_blocks():
     v = PaperVenue(venue_id="arcus", prices=dict(BTC))
     v.place_order(OrderRequest("BTC", Side.BUY, 0.05))  # 已有持仓
     cfg = build_config(env={}, yaml_data=_grid_yaml())
-    engine = Engine.from_config(cfg, {"arcus": v}, ledger=Ledger())
+    engine = Engine.from_config(cfg, _two_venues(v), ledger=Ledger())
     rt = engine.tasks[0].runtime
     assert rt.unmanaged_position is True
     assert len(v.open_orders("BTC")) == 0     # 不铺单
@@ -345,7 +356,7 @@ def test_s3_grid_takeover_position():
     v = PaperVenue(venue_id="arcus", prices=dict(BTC))
     v.place_order(OrderRequest("BTC", Side.BUY, 0.05))
     cfg = build_config(env={}, yaml_data=_grid_yaml(takeover_position=True))
-    engine = Engine.from_config(cfg, {"arcus": v}, ledger=Ledger())
+    engine = Engine.from_config(cfg, _two_venues(v), ledger=Ledger())
     rt = engine.tasks[0].runtime
     assert rt.unmanaged_position is False
     assert len(v.open_orders("BTC")) == 10    # 接管后正常铺单
@@ -373,22 +384,27 @@ def test_s3_rotation_initializes_from_existing_positions():
 
 def test_h1_caps_from_config_reject_grid_start():
     y = _grid_yaml()
-    y["caps"] = {"global_usd": 100}     # 网格估算名义 6000，远超上限
+    y["caps"] = {"global_usd": 100}     # 双腿总名义估算 12000，远超上限
     cfg = build_config(env={}, yaml_data=y)
     v = PaperVenue(venue_id="arcus", prices=dict(BTC))
-    engine = Engine.from_config(cfg, {"arcus": v}, ledger=Ledger())
+    engine = Engine.from_config(cfg, _two_venues(v), ledger=Ledger())
     assert engine.executor.caps.global_ == 100   # config 已接线进 Executor
-    assert engine.tasks == []                     # 网格被拒绝启动
-    assert "grid-btc" in engine.errors
-    assert "caps" in engine.errors["grid-btc"]
+    assert engine.tasks == []                     # 中性网格被拒绝启动
+    assert "hgrid-btc" in engine.errors
+    assert "caps" in engine.errors["hgrid-btc"]
 
 
 def test_h1_grid_start_caps_hard_check():
     v = PaperVenue(venue_id="v", prices=dict(BTC))
-    ex = _executor(v, caps=Caps(strategy={"g1": 100.0}))
-    g = GridStrategy(GridParams(lower=55_000, upper=65_000, grid_count=10,
-                                qty_per_grid=0.01),
-                     executor=ex, venue_id="v", symbol="BTC", owner="g1")
+    h = PaperVenue(venue_id="h", prices=dict(BTC))
+    ex = Executor(venues={"v": v, "h": h}, registry=OwnershipRegistry(),
+                  ledger=Ledger(), kill_switch=KillSwitch(),
+                  caps=Caps(strategy={"g1": 100.0}))
+    g = HedgedGridStrategy(
+        HedgedGridParams(grid_venue="v", hedge_venue="h", symbol="BTC",
+                         lower_price=55_000, upper_price=65_000,
+                         grid_count=10, qty_per_grid=0.01),
+        executor=ex, owner="g1")
     with pytest.raises(RuntimeError, match="caps"):
         g.start()
 
@@ -431,13 +447,14 @@ def test_h4_claim_mutex_between_tasks():
     from detsp.core.registry import ConflictError
 
     v = PaperVenue(venue_id="v", prices=dict(BTC))
-    ex = _executor(v)
-    p = GridParams(lower=55_000, upper=65_000, grid_count=10,
-                   qty_per_grid=0.01)
-    g1 = GridStrategy(p, executor=ex, venue_id="v", symbol="BTC",
-                      owner="task-1")
-    g2 = GridStrategy(p, executor=ex, venue_id="v", symbol="BTC",
-                      owner="task-2")
+    h = PaperVenue(venue_id="h", prices=dict(BTC))
+    ex = Executor(venues={"v": v, "h": h}, registry=OwnershipRegistry(),
+                  ledger=Ledger(), kill_switch=KillSwitch())
+    p = HedgedGridParams(grid_venue="v", hedge_venue="h", symbol="BTC",
+                         lower_price=55_000, upper_price=65_000,
+                         grid_count=10, qty_per_grid=0.01)
+    g1 = HedgedGridStrategy(p, executor=ex, owner="task-1")
+    g2 = HedgedGridStrategy(p, executor=ex, owner="task-2")
     g1.start()
     with pytest.raises(ConflictError):
         g2.start()   # 同 (venue,symbol) 第二个任务真互斥
@@ -477,17 +494,19 @@ def test_h7_position_corridor_unevaluable():
 def test_h7_grid_closes_when_corridor_collapses():
     v = PaperVenue(venue_id="arcus", prices=dict(BTC))
     cfg = build_config(env={}, yaml_data=_grid_yaml())
-    engine = Engine.from_config(cfg, {"arcus": v}, ledger=Ledger())
+    engine = Engine.from_config(cfg, _two_venues(v), ledger=Ledger())
     v.set_price("BTC", 58_900)
     engine.tick(now=1)
     pos = engine.executor.position("arcus", "BTC")
     assert pos is not None and pos.qty == pytest.approx(0.01)
+    assert engine.executor.position("lighter", "BTC") is not None
     v.set_price("BTC", 60_000)
     pos.liq_price = 59_900.0    # 强平距离只剩约 0.17% < 3% 门槛
     engine.tick(now=2)
     rt = engine.tasks[0].runtime
     assert rt.stopped is True
     assert engine.executor.position("arcus", "BTC") is None
+    assert engine.executor.position("lighter", "BTC") is None  # 对冲腿同平
 
 
 def test_h7_premium_blocks_when_unevaluable():
@@ -656,8 +675,10 @@ def test_m3_preflight_mark_fingerprint(tmp_path):
     ok, _ = check_preflight_mark(cfg, mark)
     assert ok is True
     y2 = {"venues": {"arcus": {"mode": "live"}},
-          "tasks": [{"name": "t", "strategy": "grid", "venue": "arcus",
-                     "symbol": "BTC", "params": {}}]}
+          "tasks": [{"name": "t", "strategy": "hedged_grid",
+                     "params": {"grid_venue": "arcus",
+                                "hedge_venue": "lighter",
+                                "symbol": "BTC"}}]}
     cfg2 = build_config(env={"DRY_RUN": "false"}, yaml_data=y2)
     ok, why = check_preflight_mark(cfg2, mark)
     assert ok is False and "重跑预检" in why   # 指纹变了必须重跑

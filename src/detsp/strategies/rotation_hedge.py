@@ -130,6 +130,8 @@ class RotationHedgeStrategy:
     """
 
     name = "rotation_hedge"
+    # 面板停止语义：四策略统一为撤单 + 平仓型
+    stop_note = "已停止：双腿挂单已撤、双腿持仓已平"
 
     def __init__(self, params: RotationParams, executor=None, risk_cfg=None,
                  rng: random.Random | None = None,
@@ -143,6 +145,7 @@ class RotationHedgeStrategy:
         self.close_corridor_pct = getattr(risk_cfg, "close_corridor_pct", 1.5)
         self.max_basis_pct = 3.0
         self.phase = "idle"          # idle / opening / open / cooldown
+        self.stopped = False         # 面板 stop 后置位，tick 不再动作
         self.opened_at = 0.0
         self.closed_at = -1e18
         self.hold_drawn = params.hold_seconds
@@ -178,6 +181,7 @@ class RotationHedgeStrategy:
         if self.executor is None:
             raise RuntimeError("RotationHedgeStrategy 未注入 executor（骨架模式）")
         self._ensure_claims()
+        self.stopped = False
         # S3 启动恢复对账：已有持仓（双腿对冲或单腿残留）按 open 阶段
         # 初始化，opened_at 重置为现在，安全检查从下一 tick 起接管
         # （孤腿会被平、双腿到期轮换），不假设是本进程开的仓
@@ -189,6 +193,25 @@ class RotationHedgeStrategy:
             self.recovery_notes.append(
                 f"启动对账：发现已有持仓 a={legs['a']} b={legs['b']}，"
                 f"按 open 阶段接管，安全检查接管处理")
+
+    def stop(self) -> None:
+        """面板停止：撤自有挂单（含 maker 开仓单）+ 双腿全平。"""
+        if self.executor is None:
+            return
+        self._ensure_claims()
+        if self._maker_oid is not None:
+            try:
+                self.executor.cancel(self.owner,
+                                     self._venue_id(self._maker_leg),
+                                     self._maker_oid)
+            except Exception:  # noqa: BLE001 — 撤单失败不挡平仓
+                pass
+            self._maker_oid = None
+        for leg in ("a", "b"):
+            self.executor.cancel_all_own(self.owner, self._venue_id(leg),
+                                         self.params.symbol)
+        self._close_both(0.0)
+        self.stopped = True
 
     def _legs_qty(self) -> dict[str, float]:
         out = {}
@@ -542,7 +565,7 @@ class RotationHedgeStrategy:
 
     # ----- 主循环 -----
     def tick(self, now: float = 0.0, allow_open: bool = True) -> None:
-        if self.executor is None:
+        if self.executor is None or self.stopped:
             return
         self._ensure_claims()
 

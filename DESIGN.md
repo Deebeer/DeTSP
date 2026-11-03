@@ -1,6 +1,6 @@
 # DeTSP 设计文档
 
-统一永续合约交易系统：一套代码、一个引擎、一个账本，承载四种策略（网格、轮换对冲刷量、溢价套利、单所刷量），接入 7 个交易场所。本项目为个人自用、非商业用途。
+统一永续合约交易系统：一套代码、一个引擎、一个账本，承载四种策略（中性网格、轮换对冲刷量、溢价套利、资金费 carry），接入 7 个交易场所。本项目为个人自用、非商业用途。
 
 ## 1. 目标与边界
 
@@ -25,31 +25,33 @@ Lighter 两个部署共用 lighter.py：仅端点、chain id、账户与密钥�
 
 ## 3. 四种策略（strategies/）
 
-### 3.1 网格 grid.py
-- 等差网格：中性 / 做多 / 做空三模式；区间 [lower, upper] 切 grid_count 格。
-- 成交后在相邻格挂反向单；区间外动作二选一：close（撤单平仓停机）或 recover（只减仓回收阶梯，不加仓、不当止损）。
-- 逻辑移植自 WGALL 的 grid.js/bot.js（MIT），用 Python 重写，不复制 Node 代码。
+四个策略全部是双腿/对冲结构：方向风险靠第二条腿对锁，不留单边裸仓。每个策略注明来源仓库与重组关系；普通网格与单所刷量已移除（单边裸仓不符合本系统的中性原则）。
+
+### 3.1 中性网格 hedged_grid.py
+- 网格腿在区间 [lower_price, upper_price] 内等差铺单：long / short / long_short 三模式，成交后在相邻格挂反向单；对冲腿每个 tick 读网格腿真实净持仓，目标 = −网格净持仓，差额超 hedge_deadband_qty（死区）时用 taker 市价调平。
+- 残差达不到对冲所最小下单量时等累积；裸露持续超过 max_unhedged_seconds 时报警并强制对冲。
+- 区间外动作二选一：close（撤双腿单、平双腿停机）或 reduce_only（网格腿只挂只减仓回收阶梯，不加仓、不当止损，对冲腿继续跟随调平）。
+- 双腿都做强平距离监控；caps 启动硬校验按双腿总名义估算。
+- 来源：网格铺单语义来自 WGALL-ZJ005（ZAIJIN88，MIT）的网格逻辑；对锁调平来自 Parallax Hedge（ZAIJIN88，MIT）的双腿结构。两者重组为一个策略。
 
 ### 3.2 轮换对冲刷量 rotation_hedge.py
 - 在两个场所开方向相反、数量相同的永续仓位，按持有时长轮换开平，以低磨损产生交易量，顺带收取两所资金费差。
-- 开仓方向按两边净资金费比较选边；Arcus 腿可选 maker 挂单（ALO）降费。
+- 开仓方向按两边净资金费比较选边（费率统一换算到每小时口径）；双 taker 开仓与 Arcus 腿 maker 挂单（ALO）两种模式，maker 部分成交按最终量对冲。
 - 风控：开仓前强平距离门槛、两所价差闸门、开仓后复核、持仓监控双腿同平、孤腿无条件市价平。
-- 可选 max_position_qty（>0）：首轮开仓后按 accumulate_interval_seconds 间隔逐档同向加仓（每档仍为 notional 口径、末档截断），两腿达到上限后停止加仓、转入正常持有→到期平仓循环；持有期从首轮开仓起算。语义源自 perp-dex-tools 的 hedge --max-position（非商业许可，个人自用）。
-- 实现移植自 Parallax Hedge（MIT）。
+- 可选 max_position_qty（>0）：首轮开仓后按 accumulate_interval_seconds 间隔逐档同向加仓（每档仍为 notional 口径、末档截断），两腿达到上限后停止加仓、转入正常持有→到期平仓循环；持有期从首轮开仓起算。逐步建仓语义源自 perp-dex-tools 的 hedge --max-position（非商业许可，个人自用）。
+- 实现移植自 Parallax Hedge（ZAIJIN88/Arcus-Entropy-Lighter-，MIT）。
 
 ### 3.3 溢价套利 premium_arb.py
 - 一腿为基准场所，另一腿为对冲场所；溢价 premium_bps = (A 价 / B 价 − 1) × 10000。
-- 信号带由三参数定义：midline_bps（溢价中枢，必须先录制数据实测，不假设为 0）、upper_bps、lower_bps。
-- 触发判断用可成交价（bid/ask）且扣除双边 taker 手续费；溢价回归时反向平仓。
-- 附盘口录制（1 分钟 CSV）与分析工具思路，移植自 entropy-arb（MIT）。
+- 信号带由三参数定义：midline_bps（溢价中枢，必须先录制数据实测，不假设为 0）、upper_bps、lower_bps；触发判断用可成交价（bid/ask）且扣除双边 taker 手续费，信号须持续 persist_seconds 才触发；仓位受 max_position_usd 与库存阶梯约束；定期对账修正净 delta。
+- 执行模式 execution_mode：taker（默认）双腿 taker 立即开平；maker 时**开仓**的基准腿先以 post-only 限价挂在盘口内侧（买贴 bid、卖贴 ask，可配 maker_offset_ticks）等成交，全成后对冲腿 taker 跟上，部分成交先对冲已成部分再撤余单结束本轮，超时未成撤单放弃本轮。**平仓与反向减仓永远走双腿 taker**，保证退出确定性。
+- 来源：价差带逻辑移植自 entropy-arb（your-quantguy，MIT）；maker 主腿执行方式源自 perp-dex-tools（非商业许可，个人自用）的 hedge 模式。盘口录制与分析工具思路同样来自 entropy-arb。
 
-### 3.4 单所刷量 volume_loop.py
-- 单场所、单方向（buy/sell 固定）：现价附近挂 maker 开仓单（买贴 ask−1 tick / 卖贴 bid+1 tick），成交后按 take_profit_pct 挂 reduce-only 止盈平仓单。
-- 未平批次（未成交止盈单）达 max_orders 上限停开新仓；开仓间隔按未平占比分档放大（wait_seconds 的 1/4~2 倍）；grid_step_pct 约束候选止盈价与已有止盈单的最小间距。
-- stop_price 触发：撤开仓单并退出运行，止盈单与持仓保留（与原实现语义一致）；pause_price 触发只暂停开新仓。开仓单超时撤单，部分成交按最终量挂止盈；另有止盈覆盖检查按持仓均价补挂差额，防仓位裸奔。
-- ⚠ **无止损**（原始语义）：唯一的自动保护是全局强平距离监控与 caps；live 模式默认强制至少一层 caps，未配拒绝启动；最大敞口估算（max_orders × qty × 现价）超任一层 caps 同样拒绝启动。
-- 面板停止语义：撤自有全部挂单、**持仓不自动平**（stop_note 如实标注）。
-- 语义源自 perp-dex-tools（非商业许可，个人自用）的 trading_bot.py，按 DeTSP 架构重组（走 Executor/registry/risk，归属、停机、启动对账与其他策略一致）。
+### 3.4 资金费 carry funding_carry.py
+- 不刷量、不轮换：选两所资金费差最大的一组方向（多腿在费率低侧、空腿在费率高侧，费率统一换算到每小时），双腿 taker 等量开仓长期持有，赚组合每小时净收的资金费差。
+- 入场门槛 min_entry_edge_bps_per_hour（bps/小时）；退出带迟滞：优势连续 exit_confirm_checks 次检查低于 exit_edge_bps_per_hour 才双平；max_hold_seconds 到期也平；平仓后冷却 cooldown_seconds，reopen 决定是否自动重开。
+- 启动对账定案：已有双腿先做净 delta 修正（不等量削多余腿、孤腿平掉），等量双腿按真实持仓方向接管只继续监控，不因当前最优方向不同而强制平仓。
+- 来源：Parallax Hedge 的资金费选向模块（轮换对冲里只用它选开仓方向）独立成策略。
 
 ## 4. 统一适配接口（core/venue.py）
 
@@ -105,7 +107,7 @@ Lighter 两个部署共用 lighter.py：仅端点、chain id、账户与密钥�
 
 - .env 只放密钥与连接参数（见 .env.example，7 所字段分开，值留空）。
 - config.yaml 放策略与风控参数，加载时严格校验：未知键、未知 venue_id、非法 mode 直接报错退出（core/config.py）。任务名必填唯一、同一 (venue, symbol) 被两个任务占用在加载时直接报错（H4）。
-- caps（H1）：config.yaml 顶层三层名义上限（global_usd / venues / strategies，键为任务名，USD），经 Engine.from_config 接线进 Executor；网格启动另按总名义估算硬校验，超限拒绝启动。
+- caps：config.yaml 顶层三层名义上限（USD：global_usd / venues / strategies，键为任务名），经 Engine.from_config 接线进 Executor；中性网格启动另按双腿总名义估算硬校验，超限拒绝启动。
 
 ## 11. 许可
 
@@ -114,7 +116,7 @@ Lighter 两个部署共用 lighter.py：仅端点、chain id、账户与密钥�
   - Parallax Hedge（ZAIJIN88/Arcus-Entropy-Lighter-，MIT）：Arcus、RHC Lighter 的签名、下单、风控、账本实现。
   - WGALL-ZJ005（ZAIJIN88，MIT）：网格逻辑（Node 版逻辑移植到 Python，未复制 Node 代码）。
   - entropy-arb（your-quantguy，MIT）：Hyperliquid 家族与 Lighter 主网适配、溢价套利引擎、盘口录制/分析。
-  - perp-dex-tools（your-quantguy，**Non-Commercial License 非商业许可**，全文见 LICENSES/perp-dex-tools.txt）：单所刷量策略（volume_loop）语义、轮换对冲的 max_position_qty 逐步建仓语义、Aster/Lighter 适配的对照校准。本项目为个人自用、非商业，依其许可使用并保留署名；若转商业用途须先取得作者单独授权或移除上述部分。
+  - perp-dex-tools（your-quantguy，**Non-Commercial License 非商业许可**，全文见 LICENSES/perp-dex-tools.txt）：溢价套利的 maker 主腿执行方式、轮换对冲的 max_position_qty 逐步建仓语义、Aster/Lighter 适配的对照校准。本项目为个人自用、非商业，依其许可使用并保留署名；若转商业用途须先取得作者单独授权或移除上述部分。
 
 ## 12. 实现状态
 
@@ -128,7 +130,7 @@ Lighter 两个部署共用 lighter.py：仅端点、chain id、账户与密钥�
 | venues/lighter（主网 / Robinhood 链） | live 已完成（第二批）：REST 读 + lighter-sdk 1.1.2 签名下单；市价单异步结算，成交以持仓对账为准；未做实盘小额验证。第五批对照 perp-dex-tools（SDK 1.0.4 时代实现，仅吸收不冲突的逻辑）：数量换算改截断、订单状态字段归一化 |
 | venues/arcus | live 已完成（第二批）：Ed25519 签名（含载荷字节级单测）、精度、强平价复算、REST 下单/撤单/setLeverage；未做实盘小额验证 |
 | venues/aster | live 已完成（第二批）：依据官方 V1（Legacy）文档自写，HMAC-SHA256 签名有官方示例向量对拍；未做实盘小额验证。第五批按 perp-dex-tools 实盘实现对照校准：签名串/端点/参数一致，补市价单 avgPrice 成交价与 reduceOnly 回读 |
-| strategies（四策略） | 执行状态机已完成（第三批，paper 端到端集成测试覆盖）：网格铺单/成交补单/区间外 close 与 recover/人工补格；轮换对冲双 taker 与 maker+对冲、到期轮换、孤腿平、开仓后复核；溢价套利双腿 taker、持续门、库存阶梯、对账与净 delta 修正。尚未做实盘小额验证。审计修复：owner=任务名（H4）、资金费每小时口径（H3）、maker 部分成交跟踪（M2）、三策略 tick 强平监控（H7）、启动恢复对账（S3）。**第五批（perp-dex-tools 并入）**：新增第四策略单所刷量 volume_loop（maker 开仓+止盈退出、max_orders/wait 分档/grid_step/stop/pause，paper 端到端覆盖一轮往返/上限拦截/stop 退出/停机平仓）；轮换对冲加可选 max_position_qty 逐步建仓；Aster 适配按其实盘实现补 avgPrice 成交价与 reduceOnly 回读；Lighter 数量改截断、订单状态字段归一化。187 个测试全绿 |
+| strategies（四策略） | **策略层推倒重写（用户定案）**：删除普通网格 grid 与单所刷量 volume_loop，新四策略全部为双腿对冲结构——中性网格（网格腿铺单/成交补单/区间外 close 与 reduce_only 回收/人工补格 + 对冲腿按净持仓调平、死区与裸露超时强制对冲、双腿强平监控、双腿总名义 caps 硬校验）；溢价套利（保留价差带/持续门/库存阶梯/对账净 delta 修正，新增 execution_mode=maker 主腿开仓：全成对冲跟上、部分成按最终量对冲、超时撤单放弃，平仓仍双腿 taker）；轮换对冲（行为等价保留：双 taker 与 maker+对冲、到期轮换、孤腿平、开仓后复核、逐步建仓）；资金费 carry（全新：资金费优势入场门槛 + 退出迟滞确认、检查周期、最长持有、冷却重开、启动对账净 delta 修正后接管）。四策略面板停止语义统一为撤自有挂单 + 平全部持仓。191 个测试全绿。尚未做实盘小额验证 |
 | venues/paper | 第三批增强：限价单挂单撮合（改价穿价成交）、poll_order 终态查询、资金费/杠杆可设。审计修复（H6）：价格驱动三级——公开行情只读（venues/quotes）→ 随机游走兜底（可设种子）→ 静态价；未知 symbol 不再 KeyError |
 | venues/dryrun（DRY_RUN 代理） | 已完成（第四批）：live 场所读实盘行情/账户、下单走本地 PaperVenue 模拟并按实盘中价同步撮合价，落实第 9 节 DRY_RUN 语义（组装见 venues/factory.py 的 dry_run 参数） |
 | web 网页面板 | 已完成（第四批）：与引擎**同进程共享对象**（Engine/venues/Ledger 同一批实例，不另开进程读状态文件），标准库 http.server，强制只绑回环地址；接口 /api/overview、/api/tasks、任务 start/stop、/api/killswitch(+reset)、/api/fills；账本连接已做线程安全（引擎线程写、面板线程读）。审计修复（H2/M4）：随机 token（POST 必带 X-API-Token）、Host 回环字面校验、POST Origin 同源校验；启停任务经引擎命令队列串行执行，不在 HTTP 线程组装/下单 |
@@ -136,9 +138,10 @@ Lighter 两个部署共用 lighter.py：仅端点、chain id、账户与密钥�
 | tools 盘口录制/溢价分析 | 已完成（第四批）：detsp.tools.recorder 每秒采样、每分钟一行 CSV（双边盘口与溢价 OHLC/均值、可成交 edge）；detsp.tools.analyze 输出溢价分布、候选带触发次数与建议 midline/upper/lower（扣费口径） |
 | core/preflight 实盘预检 | 已完成（第四批）：`python -m detsp.preflight`，逐所查凭据齐全（不打印值）、签名自检（只签不发）、时钟偏差（>30 秒失败）、行情连通、账户快照（live）、精度与最小量；paper 只跑离线项；任一失败退出码非 0。审计修复（M3）：含 live 场所且预检通过时写 data/preflight-ok.json（时间 + config 指纹），供主入口 live 启动门校验 |
 
-**启动恢复对账语义（S3，2026-11-03 审计修复）**：进程重启后内存归属登记为空，但交易所的挂单/持仓还在。各任务 start 时先对账再动作，事件记入 engine.events 并在面板总览可见：
-- 网格：先撤销该 (venue, symbol) 下未登记的遗留挂单再铺单（防新旧两套网格单叠加）；发现已有持仓且任务未开 takeover_position 时，持仓登记为「未托管」，网格不铺单、不自动开新仓，直到人工处理或显式接管；全局停机时未托管持仓仍会被平（安全优先）。
+**启动恢复对账语义**：进程重启后内存归属登记为空，但交易所的挂单/持仓还在。各任务 start 时先对账再动作，事件记入 engine.events 并在面板总览可见：
+- 中性网格：先撤销双腿该 (venue, symbol) 下未登记的遗留挂单再铺单（防新旧两套单叠加）；网格腿发现已有持仓且任务未开 takeover_position 时，持仓登记为「未托管」，不铺单、不动对冲腿，直到人工处理或显式接管；接管时对冲腿按目标自动调平。全局停机时未托管持仓仍会被平（安全优先）。
 - 轮换对冲 / 溢价套利：按已有持仓初始化——轮换直接进入 open 阶段（opened_at 重置），孤腿/不平由安全检查在下一 tick 起处理；套利的净 delta 由定期对账自动修正、强平距离由 tick 监控接管。
+- 资金费 carry：已有双腿先做净 delta 修正（不等量削多余腿、孤腿平掉），等量双腿按真实方向接管并继续监控，不因当前最优方向不同而强制平仓。
 - 「重启会重新 claim 并对账」自此成立：claim 解决进程内互斥，对账解决与交易所真实状态的一致性。
 
 **计划内功能至此全部完成。** 遗留项（均为计划外/需真实账户验证）：

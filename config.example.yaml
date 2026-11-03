@@ -1,14 +1,14 @@
 # DeTSP 策略与风控参数示例：复制为 config.yaml 后修改。
 # 加载时严格校验，未知键会直接报错（见 core/config.py）。
 #
-# ⚠ 安全约定（M7）：下面的 tasks 示例默认全部注释——它们只是结构
+# ⚠ 安全约定：下面的 tasks 示例默认全部注释——它们只是结构
 # 说明，里面的区间/中枢等数字是占位符，**不是可照抄的实盘参数**：
-# - 网格区间必须按当下行情与波动自己设定；
+# - 中性网格的区间必须按当下行情与波动自己设定；
 # - 溢价套利的 midline_bps（中枢）必须先用自带盘口录制器采样、
 #   再用 tools 分析实测得出，猜测值会直接亏钱；
 # - 启用任何任务前先 paper 跑通、再过实盘预检。
 # caps 是三层名义金额上限（USD），<=0 或不写 = 不限；强烈建议
-# 实盘时至少设置 global_usd 与各策略上限（H1）。
+# 实盘时至少设置 global_usd 与各策略上限。
 
 engine:
   cycle_seconds: 20
@@ -21,7 +21,7 @@ risk:
 caps:
   global_usd: 0             # 全局总名义上限（USD），0=不限
   venues: {}                # 如 { arcus: 5000 }
-  strategies: {}            # 键为任务名，如 { grid-btc-arcus: 3000 }
+  strategies: {}            # 键为任务名，如 { hgrid-btc: 3000 }
 
 venues:
   arcus:       { mode: paper }
@@ -32,25 +32,53 @@ venues:
   tradexyz:    { mode: paper }
   aster:       { mode: paper }
 
-# 任务列表：引擎按此组装策略（strategy 四选一，params 见各策略参数类）。
-# 任务名（name）必填且唯一，它是归属与账本的标识（H4）。
-# 同一 (场所, 币种) 只能被一个任务占用，重复配置在加载时直接报错。
+# 任务列表：引擎按此组装策略（strategy 四选一：hedged_grid /
+# premium_arb / rotation_hedge / funding_carry；旧名 grid 与
+# volume_loop 已移除，写了会在加载时报错并提示可用策略）。
+# 任务名（name）必填且唯一，它是归属与账本的标识。
+# 同一 (场所, 币种) 只能被一个任务占用（双腿策略占两个场所），
+# 重复配置在加载时直接报错。
 # 启用示例：去掉对应行首的 "# "，并把占位符换成自己实测/设定的值。
 tasks: []
-#  - name: <任务名，如 grid-btc-arcus>
-#    strategy: grid
-#    venue: <venue_id>
-#    symbol: <币种>
+#  - name: <任务名，如 hgrid-btc-arcus>
+#    strategy: hedged_grid        # 中性网格：WGALL 网格 + Parallax 对锁
 #    params:
-#      lower: <区间下限，占位符>
-#      upper: <区间上限，占位符>
+#      grid_venue: <venue_id>     # 网格腿
+#      hedge_venue: <venue_id>    # 对冲腿（与网格腿净仓位反向等量）
+#      symbol: <币种>
+#      lower_price: <区间下限，占位符>
+#      upper_price: <区间上限，占位符>
 #      grid_count: <格数>
 #      qty_per_grid: <每格数量>
-#      mode: neutral
-#      out_of_range_action: close
-#      takeover_position: false   # 启动发现已有持仓时是否接管（S3）
+#      mode: long_short           # long / short / long_short
+#      out_of_range_action: close # close 平双腿停机 / reduce_only 只减仓回收
+#      leverage_grid: <杠杆，与账户实际设置一致>
+#      leverage_hedge: <杠杆，与账户实际设置一致>
+#      hedge_deadband_qty: 0      # 对冲死区（币）：净残差小于它不对冲
+#      max_unhedged_seconds: 0    # 裸露超时强制对冲（秒），0=禁用
+#      takeover_position: false   # 启动发现网格腿已有持仓时是否接管
+#      # ⚠ 风险：对冲腿每次调平都付 taker 手续费与滑点，网格步长
+#      # 太密时磨损会吃掉网格利润；死区太小也会频繁调平。
+#  - name: <任务名，如 arb-entropy-rh>
+#    strategy: premium_arb        # 溢价套利：entropy-arb 价差带逻辑
+#    params:
+#      symbol: <币种>
+#      base_venue: <venue_id>     # 基准腿
+#      hedge_venue: <venue_id>    # 对冲腿
+#      midline_bps: <实测中枢，占位符——必须用录制+分析工具实测>
+#      upper_bps: <上方入场带>
+#      lower_bps: <下方入场带>
+#      max_position_usd: <仓位上限>
+#      max_order_notional_usd: <单笔上限>
+#      execution_mode: taker      # taker 双腿立即成交 / maker 主腿
+#      # 先挂单等成交（源自 perp-dex-tools 的主腿执行方式，省手续费
+#      # 但可能不成交）；平仓永远走 taker 保证退出
+#      maker_offset_ticks: 0      # maker 挂价向盘口内侧偏移 tick 数
+#      maker_timeout_seconds: 30  # maker 开仓单超时撤单放弃本轮
+#      leverage_base: <杠杆，与账户实际设置一致>
+#      leverage_hedge: <杠杆，与账户实际设置一致>
 #  - name: <任务名，如 hedge-arcus-lighter>
-#    strategy: rotation_hedge
+#    strategy: rotation_hedge     # 轮换对冲刷量：Parallax
 #    params:
 #      symbol: <币种>
 #      venue_a: <venue_id>
@@ -61,30 +89,21 @@ tasks: []
 #      leverage_b: <杠杆，与账户实际设置一致>
 #      max_position_qty: 0        # 可选：>0 时逐步建仓到该数量（币）后转平仓循环，0=禁用
 #      accumulate_interval_seconds: 60   # 逐步建仓的加仓间隔
-#  - name: <任务名，如 vol-btc-lighter>
-#    strategy: volume_loop
-#    venue: <venue_id>
-#    symbol: <币种>
-#    params:
-#      qty: <每笔开仓数量>
-#      take_profit_pct: <止盈幅度（%），唯一自动退出，必填>
-#      direction: buy             # buy / sell，固定单方向
-#      max_orders: <未平批次上限>
-#      wait_seconds: <开仓基础间隔>
-#      grid_step_pct: 0           # 止盈单最小间距（%），0=不限制
-#      stop_price: 0              # 退出价，0=禁用（触发后止盈单/持仓保留）
-#      pause_price: 0             # 暂停开仓价，0=禁用
-#      # ⚠ 单所刷量【无止损】：价格反向走远不会自动砍仓，只能靠止盈
-#      # 回归、人工处理或全局停机。live 模式必须至少配一层 caps
-#      # （见上方 caps 段），未配时该任务拒绝启动。
-#  - name: <任务名，如 arb-xxx>
-#    strategy: premium_arb
+#  - name: <任务名，如 carry-arcus-lighter>
+#    strategy: funding_carry      # 资金费 carry：Parallax 资金费选向独立成策略
 #    params:
 #      symbol: <币种>
-#      base_venue: <venue_id>
-#      hedge_venue: <venue_id>
-#      midline_bps: <实测中枢，占位符——必须用录制+分析工具实测>
-#      upper_bps: <上方入场带>
-#      lower_bps: <下方入场带>
-#      max_position_usd: <仓位上限>
-#      max_order_notional_usd: <单笔上限>
+#      venue_a: <venue_id>
+#      venue_b: <venue_id>
+#      notional_usd: <单边金额>
+#      leverage: <杠杆，与账户实际设置一致>
+#      min_entry_edge_bps_per_hour: <入场门槛：组合每小时净收资金费优势（bps）>
+#      exit_edge_bps_per_hour: <退出门槛，必须小于入场门槛（迟滞）>
+#      exit_confirm_checks: 3     # 优势连续低于退出门槛几次才平仓
+#      check_seconds: 60          # 资金费检查周期
+#      max_hold_seconds: 0        # 最长持有（秒），0=不限
+#      reopen: true               # 平仓后优势恢复是否自动重开
+#      cooldown_seconds: 300      # 平仓后的重开冷却
+#      # ⚠ 风险：资金费差会反转——费率符号翻转后组合从净收变净付，
+#      # 退出靠迟滞确认，确认期间仍在付费；两所强平价不对称时
+#      # 单腿先爆会留下裸腿（系统会按孤腿口径立即平掉剩余腿）。

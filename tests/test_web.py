@@ -18,9 +18,11 @@ from detsp.venues.paper import PaperVenue
 from detsp.web.server import PanelState, serve, web_settings
 
 GRID_YAML = {"tasks": [{
-    "name": "grid-btc", "strategy": "grid", "venue": "arcus", "symbol": "BTC",
-    "params": {"lower": 55_000, "upper": 65_000, "grid_count": 10,
-               "qty_per_grid": 0.01, "mode": "neutral",
+    "name": "hgrid-btc", "strategy": "hedged_grid",
+    "params": {"grid_venue": "arcus", "hedge_venue": "lighter",
+               "symbol": "BTC", "lower_price": 55_000,
+               "upper_price": 65_000, "grid_count": 10,
+               "qty_per_grid": 0.01, "mode": "long_short",
                "out_of_range_action": "close"}}]}
 
 
@@ -37,11 +39,13 @@ def _req(base, path, method="GET", token=None):
 def panel():
     cfg = build_config(env={}, yaml_data=GRID_YAML)
     venue = PaperVenue(venue_id="arcus", prices={"BTC": 60_000.0})
+    hedge = PaperVenue(venue_id="lighter", prices={"BTC": 60_000.0})
+    venues = {"arcus": venue, "lighter": hedge}
     ledger = Ledger()
-    engine = Engine.from_config(cfg, {"arcus": venue}, ledger=ledger)
-    state = PanelState(engine=engine, venues={"arcus": venue}, ledger=ledger,
+    engine = Engine.from_config(cfg, venues, ledger=ledger)
+    state = PanelState(engine=engine, venues=venues, ledger=ledger,
                        app_config=cfg,
-                       task_cfgs={"grid-btc": GRID_YAML["tasks"][0]})
+                       task_cfgs={"hgrid-btc": GRID_YAML["tasks"][0]})
     server = serve(state, "127.0.0.1", 0)
     base = f"http://127.0.0.1:{server.server_address[1]}"
     # 命令泵：模拟引擎主循环串行执行面板命令（M4）
@@ -82,16 +86,19 @@ def test_tasks_start_stop(panel):
     base, state, _ = panel
     _, body = _req(base, "/api/tasks")
     tasks = json.loads(body)["tasks"]
-    assert tasks[0]["name"] == "grid-btc" and tasks[0]["status"] == "running"
+    assert tasks[0]["name"] == "hgrid-btc" and tasks[0]["status"] == "running"
     assert tasks[0]["params"]["params"]["grid_count"] == 10
 
-    _, body = _req(base, "/api/tasks/grid-btc/stop", "POST",
+    _, body = _req(base, "/api/tasks/hgrid-btc/stop", "POST",
                    token=state.api_token)
-    assert json.loads(body)["ok"] is True
+    res = json.loads(body)
+    assert res["ok"] is True
+    # 四策略停止语义统一：撤单 + 平仓，note 必须如实说明已平仓
+    assert "持仓已平" in res["note"]
     _, body = _req(base, "/api/tasks")
     assert json.loads(body)["tasks"][0]["status"] == "stopped"
 
-    _, body = _req(base, "/api/tasks/grid-btc/start", "POST",
+    _, body = _req(base, "/api/tasks/hgrid-btc/start", "POST",
                    token=state.api_token)
     assert json.loads(body)["ok"] is True
     _, body = _req(base, "/api/tasks")
@@ -112,8 +119,8 @@ def test_killswitch(panel):
 def test_fills_api(panel):
     base, _, ledger = panel
     ledger.record(Fill(venue="arcus", account="default", symbol="BTC",
-                       strategy="grid", side="buy", qty=0.01, price=60_000.0,
-                       fee=0.1, order_id="paper-1"))
+                       strategy="hedged_grid", side="buy", qty=0.01,
+                       price=60_000.0, fee=0.1, order_id="paper-1"))
     _, body = _req(base, "/api/fills")
     fills = json.loads(body)["fills"]
     assert len(fills) == 1 and fills[0]["order_id"] == "paper-1"

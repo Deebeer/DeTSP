@@ -100,9 +100,9 @@ class PanelState:
                 stop = getattr(t.runtime, "stop", None)
                 if callable(stop):
                     try:
-                        stop()   # 收尾动作因策略而异（见各 runtime 的
-                        # stop_note / 默认口径）：网格撤单+平仓；单所刷量
-                        # 只撤自有单、持仓不自动平
+                        stop()   # 四个策略的停止语义统一：撤自有
+                        # 挂单 + 平掉全部持仓（见各 runtime 的
+                        # stop_note），note 如实回报实际动作
                         note = getattr(
                             t.runtime, "stop_note",
                             "已停止：自有挂单已撤、持仓已平")

@@ -2,12 +2,14 @@
 
 import pytest
 
+from detsp.core.venue import Side
 from detsp.strategies.premium_arb import (
     PremiumParams,
     band_signal,
     buy_threshold_bps,
     executable_signal,
     inventory_surcharge_bps,
+    maker_open_price,
     premium_bps,
     round_trip_floor_bps,
     sell_threshold_bps,
@@ -77,3 +79,26 @@ def test_invalid_params():
         make(upper_bps=0)
     with pytest.raises(ValueError):
         make(take_fraction=0)
+    with pytest.raises(ValueError):
+        make(execution_mode="iceberg")   # 未知执行模式
+    with pytest.raises(ValueError):
+        make(maker_timeout_seconds=0)
+
+
+def test_maker_open_price_inside_book():
+    # 默认贴盘口内侧：买贴 bid、卖贴 ask
+    assert maker_open_price(99.9, 100.1, Side.BUY, 0.1) == pytest.approx(99.9)
+    assert maker_open_price(99.9, 100.1, Side.SELL, 0.1) == pytest.approx(100.1)
+    # offset 向内侧推进 1 tick
+    assert maker_open_price(99.9, 100.1, Side.BUY, 0.1, 1) == \
+        pytest.approx(100.0)
+    assert maker_open_price(99.9, 100.1, Side.SELL, 0.1, 1) == \
+        pytest.approx(100.0)
+    # offset 过大也不穿价：买价封顶 ask−tick、卖价封底 bid+tick
+    assert maker_open_price(99.9, 100.1, Side.BUY, 0.1, 9) == \
+        pytest.approx(100.0)
+    assert maker_open_price(99.9, 100.1, Side.SELL, 0.1, 9) == \
+        pytest.approx(100.0)
+    # tick<=0 时直接贴盘口
+    assert maker_open_price(99.9, 100.1, Side.BUY, 0.0, 3) == \
+        pytest.approx(99.9)

@@ -60,7 +60,8 @@ class Task:
 
     name: str
     strategy_type: str
-    runtime: object  # GridStrategy / RotationHedgeStrategy / PremiumArbStrategy
+    runtime: object  # HedgedGridStrategy / RotationHedgeStrategy /
+    # PremiumArbStrategy / FundingCarryStrategy
     errors: ErrorCounter = field(default_factory=ErrorCounter)
     last_error: str = ""
     disabled: bool = False
@@ -77,27 +78,34 @@ def _filter_params(cls, raw: dict) -> dict:
 
 
 def build_task(task_cfg: dict, executor: Executor, risk_cfg) -> Task:
-    """由 config 的一条 task dict 组装策略运行时。"""
-    from ..strategies.grid import GridParams, GridStrategy
+    """由 config 的一条 task dict 组装策略运行时。
+
+    只认四个现行策略：hedged_grid / premium_arb / rotation_hedge /
+    funding_carry。已移除的旧策略名（grid / volume_loop）与未知
+    名字一样报错，并明确列出可用策略，避免用户对着旧配置猜。
+    """
+    from ..strategies.funding_carry import CarryParams, FundingCarryStrategy
+    from ..strategies.hedged_grid import HedgedGridParams, HedgedGridStrategy
     from ..strategies.premium_arb import PremiumArbStrategy, PremiumParams
     from ..strategies.rotation_hedge import RotationHedgeStrategy, RotationParams
-    from ..strategies.volume_loop import VolumeLoopStrategy, VolumeParams
 
+    available = "hedged_grid / premium_arb / rotation_hedge / funding_carry"
     name = str(task_cfg.get("name") or task_cfg.get("strategy") or "task")
     stype = task_cfg.get("strategy")
     params_raw = dict(task_cfg.get("params") or {})
     # venue/symbol 也可写在 task 顶层，合并进参数（params 内优先）
     for k in ("venue", "symbol", "venue_a", "venue_b",
-              "base_venue", "hedge_venue"):
+              "base_venue", "hedge_venue", "grid_venue"):
         if k in task_cfg:
             params_raw.setdefault(k, task_cfg[k])
 
-    if stype == "grid":
-        venue_id = params_raw.pop("venue", task_cfg.get("venue", ""))
-        symbol = params_raw.pop("symbol", task_cfg.get("symbol", "BTC"))
-        runtime = GridStrategy(GridParams(**_filter_params(GridParams, params_raw)),
-                               executor=executor, venue_id=venue_id,
-                               symbol=symbol, owner=name)
+    if stype in ("grid", "volume_loop"):
+        raise ValueError(
+            f"策略 {stype} 已移除，可用策略：{available}")
+    if stype == "hedged_grid":
+        runtime = HedgedGridStrategy(
+            HedgedGridParams(**_filter_params(HedgedGridParams, params_raw)),
+            executor=executor, owner=name)
         runtime.start()
     elif stype == "rotation_hedge":
         runtime = RotationHedgeStrategy(
@@ -109,15 +117,14 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg) -> Task:
             PremiumParams(**_filter_params(PremiumParams, params_raw)),
             executor=executor, owner=name)
         runtime.start()
-    elif stype == "volume_loop":
-        venue_id = params_raw.pop("venue", task_cfg.get("venue", ""))
-        symbol = params_raw.pop("symbol", task_cfg.get("symbol", "BTC"))
-        runtime = VolumeLoopStrategy(
-            VolumeParams(**_filter_params(VolumeParams, params_raw)),
-            executor=executor, venue_id=venue_id, symbol=symbol, owner=name)
+    elif stype == "funding_carry":
+        runtime = FundingCarryStrategy(
+            CarryParams(**_filter_params(CarryParams, params_raw)),
+            executor=executor, risk_cfg=risk_cfg, owner=name)
         runtime.start()
     else:
-        raise ValueError(f"未知策略类型：{stype}")
+        raise ValueError(
+            f"未知策略类型：{stype}，可用策略：{available}")
     return Task(name=name, strategy_type=str(stype), runtime=runtime)
 
 
