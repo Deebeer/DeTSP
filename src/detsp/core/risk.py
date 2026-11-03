@@ -6,7 +6,15 @@
 
 from __future__ import annotations
 
+import json
+import threading
+from pathlib import Path
+
 from .venue import Position, Side
+
+# 交易所未提供维持保证金率时的保守默认（5%）：强平距离估算统一用它，
+# 宁可低估距离早拦截，不可按 mmr=0 乐观放行（M5）
+DEFAULT_MMR = 0.05
 
 
 class RiskHaltError(RuntimeError):
@@ -61,17 +69,29 @@ def position_corridor_pct(current_price: float, pos: Position,
     """持仓的强平距离（%）：优先用交易所给的 liq_price，否则按杠杆估算。
 
     空仓返回 None。方向由持仓数量符号决定（多头看跌破，空头看涨破）。
+    liq_price 缺失且杠杆未知（leverage_known=False，如 Lighter/Arcus
+    持仓接口不给杠杆）时返回 None = 不可评估——调用方必须按
+    「不可评估就阻止开仓/触发安全动作」处理，禁止当作安全放行（M5）。
     """
     if pos.qty == 0:
         return None
     side = Side.BUY if pos.qty > 0 else Side.SELL
     liq = pos.liq_price
     if liq is None:
-        if pos.entry_price <= 0:
+        if not pos.leverage_known or pos.entry_price <= 0:
             return None
         liq = estimate_liq_price(pos.entry_price, pos.leverage, side,
                                  maint_margin_rate)
     return liquidation_corridor_pct(current_price, liq, side)
+
+
+def funding_hourly_rate(rate: float, interval_seconds: float) -> float:
+    """资金费率统一换算到每小时口径（H3）：rate 是 interval_seconds
+    周期内的费率。HL/Arcus 每小时结算（interval=3600，原样），
+    Lighter/Aster 每 8 小时（interval=28800，须除以 8）。"""
+    if interval_seconds <= 0:
+        return rate
+    return rate * 3600.0 / interval_seconds
 
 
 def basis_ok(price_a: float, price_b: float, max_diff_pct: float = 3.0) -> bool:
@@ -113,11 +133,27 @@ def check_caps(position: Position, venue_cap: float, strategy_cap: float) -> boo
 
 
 class KillSwitch:
-    """全局停机：触发后只允许撤单/平仓，拒绝一切新开仓。"""
+    """全局停机：触发后只允许撤单/平仓，拒绝一切新开仓。
 
-    def __init__(self) -> None:
+    传入 persist_path 时状态落盘（M3）：halt 写 JSON、reset 删文件，
+    进程重启后从文件恢复停机状态与原因，必须人工 reset 才解除——
+    避免「连续错误触发的停机一重启就无痕复活实盘」。
+    """
+
+    def __init__(self, persist_path: str | Path | None = None) -> None:
         self._halted = False
         self._reason = ""
+        self._lock = threading.Lock()
+        self._persist_path = Path(persist_path) if persist_path else None
+        if self._persist_path is not None and self._persist_path.exists():
+            try:
+                data = json.loads(self._persist_path.read_text(encoding="utf-8"))
+                if data.get("halted"):
+                    self._halted = True
+                    self._reason = str(data.get("reason") or "重启前已停机")
+            except (ValueError, OSError):
+                # 文件损坏按未停机处理，但不覆盖原文件（留待人工查看）
+                pass
 
     @property
     def halted(self) -> bool:
@@ -127,13 +163,31 @@ class KillSwitch:
     def reason(self) -> str:
         return self._reason
 
+    def _save(self) -> None:
+        if self._persist_path is None:
+            return
+        try:
+            self._persist_path.parent.mkdir(parents=True, exist_ok=True)
+            if self._halted:
+                self._persist_path.write_text(json.dumps(
+                    {"halted": True, "reason": self._reason},
+                    ensure_ascii=False), encoding="utf-8")
+            else:
+                self._persist_path.unlink(missing_ok=True)
+        except OSError:
+            pass  # 落盘失败不阻塞停机动作本身
+
     def halt(self, reason: str = "") -> None:
-        self._halted = True
-        self._reason = reason
+        with self._lock:
+            self._halted = True
+            self._reason = reason
+            self._save()
 
     def reset(self) -> None:
-        self._halted = False
-        self._reason = ""
+        with self._lock:
+            self._halted = False
+            self._reason = ""
+            self._save()
 
     def assert_allowed(self) -> None:
         if self._halted:

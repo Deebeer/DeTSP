@@ -16,11 +16,14 @@
 
 from __future__ import annotations
 
+import queue
+import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Protocol
 
-from .execution import Executor
+from .execution import Caps, Executor
 from .ledger import Ledger
 from .registry import Key, OwnershipRegistry
 from .risk import ErrorCounter, KillSwitch
@@ -93,17 +96,17 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg) -> Task:
         symbol = params_raw.pop("symbol", task_cfg.get("symbol", "BTC"))
         runtime = GridStrategy(GridParams(**_filter_params(GridParams, params_raw)),
                                executor=executor, venue_id=venue_id,
-                               symbol=symbol)
+                               symbol=symbol, owner=name)
         runtime.start()
     elif stype == "rotation_hedge":
         runtime = RotationHedgeStrategy(
             RotationParams(**_filter_params(RotationParams, params_raw)),
-            executor=executor, risk_cfg=risk_cfg)
+            executor=executor, risk_cfg=risk_cfg, owner=name)
         runtime.start()
     elif stype == "premium_arb":
         runtime = PremiumArbStrategy(
             PremiumParams(**_filter_params(PremiumParams, params_raw)),
-            executor=executor)
+            executor=executor, owner=name)
         runtime.start()
     else:
         raise ValueError(f"未知策略类型：{stype}")
@@ -119,6 +122,46 @@ class Engine:
     executor: Executor | None = None
     tasks: list[Task] = field(default_factory=list)
     max_consecutive_errors: int = 3
+    # S3：启动恢复对账等事件（面板可见）
+    events: list[str] = field(default_factory=list)
+    # M4：面板命令队列——HTTP 线程只投递，引擎主循环串行执行
+    _cmd_queue: queue.Queue = field(default_factory=queue.Queue, repr=False)
+
+    # ----- 命令队列（M4）-----
+    def run_command(self, fn, timeout: float = 10.0):
+        """在引擎主循环线程执行 fn 并等待结果（其他线程调用）。
+
+        主循环每 tick 先 drain 队列；调用方超时返回 TimeoutError，
+        命令本身的异常原样抛回调用方。
+        """
+        done = threading.Event()
+        box: dict = {}
+
+        def _wrap():
+            try:
+                box["value"] = fn()
+            except Exception as e:  # noqa: BLE001 — 原样回传调用方
+                box["error"] = e
+            finally:
+                done.set()
+
+        self._cmd_queue.put(_wrap)
+        if not done.wait(timeout):
+            raise TimeoutError("引擎主循环未在超时内执行命令")
+        if "error" in box:
+            raise box["error"]
+        return box.get("value")
+
+    def process_commands(self) -> int:
+        """主循环调用：串行执行队列中的全部待处理命令，返回条数。"""
+        n = 0
+        while True:
+            try:
+                fn = self._cmd_queue.get_nowait()
+            except queue.Empty:
+                return n
+            fn()
+            n += 1
 
     # ----- 骨架模式（第一批兼容） -----
     def add_strategy(self, strategy: Strategy) -> None:
@@ -143,14 +186,26 @@ class Engine:
     # ----- 执行模式 -----
     @classmethod
     def from_config(cls, app_config, venues: dict, ledger: Ledger | None = None,
-                    caps=None) -> "Engine":
+                    caps=None, state_dir: str | Path | None = None) -> "Engine":
         """按 AppConfig.tasks 组装引擎。
 
-        单个 task 组装失败（如归属冲突）不拖垮全局：该任务记入
-        errors 并跳过，其余任务照常启动。
+        - caps：显式传入优先；缺省时从 app_config.caps（H1 的 config
+          接线）换算，两处都没有则不限。
+        - state_dir：停机状态落盘目录（M3），KillSwitch 持久化到
+          <state_dir>/killswitch.json，重启保持停机。
+        - 单个 task 组装失败（如归属冲突）不拖垮全局：该任务记入
+          errors 并跳过，其余任务照常启动。各任务的 S3 启动对账
+          事件汇总进 engine.events（面板可见）。
         """
         registry = OwnershipRegistry()
-        kill_switch = KillSwitch()
+        ks_path = Path(state_dir) / "killswitch.json" if state_dir else None
+        kill_switch = KillSwitch(persist_path=ks_path)
+        if caps is None:
+            cc = getattr(app_config, "caps", None)
+            if cc is not None:
+                caps = Caps(venue=dict(cc.venues),
+                            strategy=dict(cc.strategies),
+                            global_=float(cc.global_usd))
         executor = Executor(venues=venues, registry=registry,
                             ledger=ledger or Ledger(),
                             kill_switch=kill_switch, caps=caps,
@@ -158,17 +213,25 @@ class Engine:
         engine = cls(registry=registry, kill_switch=kill_switch,
                      executor=executor,
                      max_consecutive_errors=app_config.risk.max_consecutive_errors)
+        if kill_switch.halted:
+            engine.events.append(
+                f"停机状态由落盘恢复（{kill_switch.reason}），"
+                f"须人工 reset 才恢复开仓")
         for task_cfg in getattr(app_config, "tasks", []) or []:
             try:
-                engine.tasks.append(build_task(task_cfg, executor,
-                                               app_config.risk))
+                task = build_task(task_cfg, executor, app_config.risk)
+                engine.tasks.append(task)
+                for note in getattr(task.runtime, "recovery_notes", []) or []:
+                    engine.events.append(f"[{task.name}] {note}")
             except Exception as e:  # 启动期隔离：冲突/参数错误只废该任务
                 tname = str(task_cfg.get("name") or task_cfg.get("strategy"))
                 engine.errors[tname] = str(e)
         return engine
 
     def tick(self, now: float | None = None) -> None:
-        """跑一轮执行调度：逐任务 tick，异常隔离 + 错误计数 + 停机联动。"""
+        """跑一轮执行调度：先执行面板命令队列（M4），再逐任务 tick，
+        异常隔离 + 错误计数 + 停机联动。"""
+        self.process_commands()
         now = time.time() if now is None else now
         allow_open = not self.kill_switch.halted
         for task in self.tasks:

@@ -4,11 +4,21 @@
 在盘口未触及时挂单等待，set_price 改价时按穿价规则撮合成交
 （买单：ask <= 限价；卖单：bid >= 限价，成交价取限价）。
 持仓/权益在本地维护。用于跑通策略与风控，不连任何真实接口。
+
+价格驱动（H6 修复）：原实现只有写死的 BTC/ETH 静态价——网格永不
+成交、套利永无信号、未知 symbol 直接 KeyError。现在 book() 取价顺序：
+1. 注入的 quote_provider（公开行情只读接口，如 venues.quotes 的
+   PublicQuoteProvider，失败返回 None 自动回退）；
+2. walk=True 时的内置随机游走（可设种子复现，每次 book 按 ±5bps
+   游走一步并触发挂单撮合）；
+3. 静态价（默认行为，既有测试/手动 set_price 驱动不受影响）。
+未知 symbol 不再报错：以 DEFAULT_WALK_START 兜底价起步。
 """
 
 from __future__ import annotations
 
 import itertools
+import random
 
 from ..core.venue import (
     Book,
@@ -21,6 +31,11 @@ from ..core.venue import (
     VenueAdapter,
 )
 
+# paper 内置起始价：覆盖 config 示例与常用标的
+DEFAULT_PRICES = {"BTC": 60_000.0, "ETH": 3_000.0, "SNDK": 250.0,
+                  "SOL": 150.0, "HYPE": 40.0}
+DEFAULT_WALK_START = 100.0  # 未知 symbol 的兜底起始价
+
 
 class PaperVenue(VenueAdapter):
     def __init__(
@@ -31,27 +46,35 @@ class PaperVenue(VenueAdapter):
         spread_bps: float = 2.0,
         account: str = "default",
         leverage: float = 1.0,
+        quote_provider=None,
+        walk: bool = False,
+        seed: int | None = None,
     ) -> None:
         self.venue_id = venue_id
         self.mode = "paper"
         self.account = account
         self.leverage = leverage  # 盖到新建持仓上，供强平距离估算
-        self._prices = dict(prices or {"BTC": 60_000.0, "ETH": 3_000.0})
+        self._prices = dict(prices or DEFAULT_PRICES)
         self._spread = spread_bps / 10_000
         self._equity = balance_usd
         self._positions: dict[str, Position] = {}
         self._orders: dict[str, Order] = {}       # 挂单中
         self._done: dict[str, Order] = {}         # 终态（filled/canceled）
-        self._funding: dict[str, float] = {}
+        self._funding: dict[str, tuple[float, float]] = {}
         self._seq = itertools.count(1)
+        # 价格驱动（H6）：公开行情 provider + 随机游走兜底
+        self._quote_provider = quote_provider
+        self._walk = walk
+        self._rng = random.Random(seed)
 
     # 供测试/录制行情回放改价；改价后立即撮合被穿价的挂单
     def set_price(self, symbol: str, price: float) -> None:
         self._prices[symbol] = price
         self._match(symbol)
 
-    def set_funding(self, symbol: str, rate: float) -> None:
-        self._funding[symbol] = rate
+    def set_funding(self, symbol: str, rate: float,
+                    interval_seconds: float = 3600.0) -> None:
+        self._funding[symbol] = (rate, interval_seconds)
 
     def markets(self) -> list[Market]:
         return [
@@ -60,8 +83,25 @@ class PaperVenue(VenueAdapter):
             for s in self._prices
         ]
 
+    def _drive_price(self, symbol: str) -> float:
+        """book() 的取价：公开行情 → 随机游走 → 静态价（H6）。"""
+        if self._quote_provider is not None:
+            q = self._quote_provider.mid(self.venue_id, symbol)
+            if q is not None and q > 0:
+                self._prices[symbol] = q
+                return q
+        cur = self._prices.get(symbol)
+        if cur is None:
+            cur = DEFAULT_WALK_START
+            self._prices[symbol] = cur
+        if self._walk:
+            cur = cur * (1 + self._rng.uniform(-0.0005, 0.0005))
+            self._prices[symbol] = cur
+            self._match(symbol)
+        return cur
+
     def book(self, symbol: str) -> Book:
-        mid = self._prices[symbol]
+        mid = self._drive_price(symbol)
         half = mid * self._spread / 2
         return Book(symbol=symbol, bid=mid - half, ask=mid + half)
 
@@ -86,8 +126,13 @@ class PaperVenue(VenueAdapter):
         pos.qty = new_qty
 
     def _match(self, symbol: str) -> None:
-        """撮合该币种被当前盘口穿价的挂单，成交价取限价。"""
-        book = self.book(symbol)
+        """撮合该币种被当前盘口穿价的挂单，成交价取限价。
+
+        直接用当前静态价算盘口，不走 _drive_price（避免游走递归）。
+        """
+        mid = self._prices[symbol]
+        half = mid * self._spread / 2
+        book = Book(symbol=symbol, bid=mid - half, ask=mid + half)
         for oid, o in list(self._orders.items()):
             if o.symbol != symbol:
                 continue
@@ -149,4 +194,5 @@ class PaperVenue(VenueAdapter):
         return {"equity": self._equity, "available": max(self._equity - used, 0.0)}
 
     def funding(self, symbol: str) -> FundingInfo:
-        return FundingInfo(symbol=symbol, rate=self._funding.get(symbol, 0.0))
+        rate, interval = self._funding.get(symbol, (0.0, 3600.0))
+        return FundingInfo(symbol=symbol, rate=rate, interval_seconds=interval)

@@ -70,7 +70,7 @@ def test_grid_lifecycle_fill_and_counter():
     v.set_price("BTC", 60_100)   # 涨穿 60000 反向卖单
     engine.tick(now=2)
     assert engine.executor.position("arcus", "BTC") is None
-    assert ledger.count("grid") >= 2
+    assert ledger.count("grid-btc") >= 2
 
 
 def test_grid_out_of_range_close():
@@ -135,7 +135,7 @@ def test_rotation_full_round_trip():
     engine.tick(now=1061)                    # 到期轮换双平
     assert engine.executor.position("arcus", "BTC") is None
     assert engine.executor.position("lighter", "BTC") is None
-    assert ledger.count("rotation_hedge") == 4
+    assert ledger.count("hedge") == 4
 
 
 def test_rotation_maker_leg_then_hedge():
@@ -209,7 +209,7 @@ def test_premium_arb_round_trip():
     engine.tick(now=1)
     assert engine.executor.position("entropy", "SNDK") is None
     assert engine.executor.position("lighter_rh", "SNDK") is None
-    assert ledger.count("premium_arb") == 4
+    assert ledger.count("arb") == 4
 
 
 def test_premium_arb_delta_correction_on_reconcile():
@@ -227,11 +227,26 @@ def test_premium_arb_delta_correction_on_reconcile():
 
 # ---------------- 引擎级 ----------------
 
+def test_conflict_task_rejected_at_config_level():
+    """H4：同 (venue,symbol) 被两个任务占用，config 校验层直接报错。"""
+    from detsp.core.config import ConfigError
+
+    y = grid_yaml()
+    y["tasks"].append(rotation_yaml()["tasks"][0])  # 同样占用 arcus BTC
+    with pytest.raises(ConfigError):
+        build_config(env={}, yaml_data=y)
+
+
 def test_conflict_task_isolated_at_start():
+    """绕过 config 校验直接组装时，registry claim 仍在引擎层隔离冲突任务。"""
+    from detsp.core.config import AppConfig
+
     venues = two_btc_venues()
     y = grid_yaml()
     y["tasks"].append(rotation_yaml()["tasks"][0])  # 同样占用 arcus BTC
-    engine, _ = build(y, venues)
+    cfg = AppConfig(tasks=y["tasks"])
+    ledger = Ledger()
+    engine = Engine.from_config(cfg, venues, ledger=ledger)
     assert len(engine.tasks) == 1                    # 网格照常启动
     assert "hedge" in engine.errors                  # 对冲任务被拦截并记录
     assert len(venues["arcus"].open_orders("BTC")) == 10

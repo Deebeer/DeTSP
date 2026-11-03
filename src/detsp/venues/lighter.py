@@ -32,6 +32,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from ..core.execution import unknown_outcome_guard
 from ..core.venue import (
     Book,
     FundingInfo,
@@ -235,7 +236,8 @@ class LighterVenue(SkeletonVenue):
                 continue
             if int(row.get("market_id")) == m["market_id"]:
                 return FundingInfo(symbol=symbol, rate=float(row["rate"]),
-                                   next_ts=time.time() + FUNDING_INTERVAL_SEC)
+                                   next_ts=time.time() + FUNDING_INTERVAL_SEC,
+                                   interval_seconds=FUNDING_INTERVAL_SEC)
         raise RuntimeError(f"{self.venue_id} 找不到 {symbol} 的资金费率")
 
     def _account_data(self) -> dict:
@@ -268,7 +270,9 @@ class LighterVenue(SkeletonVenue):
             out.append(Position(
                 symbol=self._symbol_of(int(p["market_id"])), qty=qty,
                 entry_price=float(p.get("avg_entry_price") or 0),
-                liq_price=float(liq) if liq not in (None, "", "0") else None))
+                liq_price=float(liq) if liq not in (None, "", "0") else None,
+                # 账户持仓接口不给杠杆：liq 缺失时强平距离不可评估（M5）
+                leverage_known=False))
         return out
 
     def _active_orders_raw(self) -> list[dict]:
@@ -326,11 +330,13 @@ class LighterVenue(SkeletonVenue):
         if base <= 0:
             raise ValueError(f"{self.venue_id} 数量 {req.qty} 对齐精度后为 0")
         coi = self._next_coi()
-        _tx, resp, err = _run(signer.create_order(
-            market_index=m["market_id"], client_order_index=coi,
-            base_amount=base, price=px, is_ask=req.side is Side.SELL,
-            order_type=order_type, time_in_force=tif,
-            reduce_only=req.reduce_only, order_expiry=expiry))
+        # S1：SDK/网络超时统一翻译为 UnknownOutcomeError（禁止上层重发）
+        with unknown_outcome_guard():
+            _tx, resp, err = _run(signer.create_order(
+                market_index=m["market_id"], client_order_index=coi,
+                base_amount=base, price=px, is_ask=req.side is Side.SELL,
+                order_type=order_type, time_in_force=tif,
+                reduce_only=req.reduce_only, order_expiry=expiry))
         if err is not None or (getattr(resp, "code", 200) or 200) != 200:
             msg = str(err) if err is not None else \
                 f"code={resp.code} msg={getattr(resp, 'message', None)}"
@@ -361,11 +367,74 @@ class LighterVenue(SkeletonVenue):
                     break
             if target_market is None:
                 return False
-        _tx, resp, err = _run(signer.cancel_order(
-            market_index=target_market, order_index=target_index))
+        _tx, resp, err = None, None, None
+        with unknown_outcome_guard():
+            _tx, resp, err = _run(signer.cancel_order(
+                market_index=target_market, order_index=target_index))
         if err is not None:
             raise RuntimeError(f"{self.venue_id} 撤单失败：{err}")
         return (getattr(resp, "code", 200) or 200) == 200
+
+    # ── 订单终态查询（S2）────────────────────────────────────
+    def _row_to_order(self, o: dict, status: str) -> Order:
+        total = float(o.get("initial_base_amount") or 0)
+        filled = float(o.get("filled_base_amount") or 0)
+        return Order(
+            order_id=str(o.get("order_index")), symbol=self._symbol_of(
+                int(o.get("market_index") or 0)),
+            side=Side.SELL if o.get("is_ask") else Side.BUY,
+            qty=total, price=float(o.get("price") or 0) or None,
+            filled_qty=filled, status=status)
+
+    def _inactive_orders_raw(self) -> list[dict]:
+        """历史订单（终态）：/api/v1/accountInactiveOrders。
+
+        注：端点名按 Lighter REST 命名规律（active 的对应面）采用，
+        未在参考实现中实证——调用失败时 poll_order 退回对账式口径，
+        不影响正确性，只损失终态细节。
+        """
+        data = self._get("/api/v1/accountInactiveOrders",
+                         params={"account_index": self._account_index},
+                         headers={"authorization": self._auth_token()})
+        return data.get("orders") or []
+
+    def poll_order(self, order_id: str) -> Order | None:
+        """S2：先查活跃单（open/部分成交），再查历史单（终态）；
+        历史接口不可用时返回 None，由策略层走「挂单消失+持仓差」
+        对账式发现。order_id 认 "coi:<n>" 与 order_index 两种形式。"""
+        if self._paper is not None:
+            return self._delegate().poll_order(order_id)
+        want_coi = int(str(order_id)[4:]) if str(order_id).startswith("coi:") \
+            else None
+        want_idx = None if want_coi is not None else _int_or_none(order_id)
+
+        def _match(o: dict) -> bool:
+            if want_coi is not None:
+                return int(o.get("client_order_index") or -1) == want_coi
+            return int(o.get("order_index") or -1) == want_idx
+
+        for o in self._active_orders_raw():
+            if _match(o):
+                return self._row_to_order(o, "open")
+        try:
+            rows = self._inactive_orders_raw()
+        except Exception:  # noqa: BLE001 — 历史接口不可用 → 对账式兜底
+            return None
+        for o in rows:
+            if _match(o):
+                total = float(o.get("initial_base_amount") or 0)
+                filled = float(o.get("filled_base_amount") or 0)
+                st = str(o.get("status") or "").lower()
+                if filled >= total and total > 0:
+                    status = "filled"
+                elif "cancel" in st:
+                    status = "canceled"
+                elif filled > 0:
+                    status = "canceled"  # 部分成交后终结
+                else:
+                    status = "canceled"
+                return self._row_to_order(o, status)
+        return None
 
 
 def lighter_mainnet(**kw) -> LighterVenue:

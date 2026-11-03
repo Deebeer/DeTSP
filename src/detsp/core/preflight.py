@@ -273,11 +273,72 @@ def run_preflight(app_config: AppConfig, venues: dict) -> PreflightReport:
     return rep
 
 
+# ── 预检通过标记（M3：live 首次启动门）─────────────────────
+PREFLIGHT_MARK_NAME = "preflight-ok.json"
+
+
+def config_fingerprint(app_config: AppConfig) -> str:
+    """config 指纹：任务/场所模式/风控/caps 的规范化 JSON + 各密钥
+    值的 sha256 拼接。指纹只含哈希，不含任何明文。配置或密钥任一
+    变化，指纹即变，旧预检标记失效，必须重跑预检。"""
+    import hashlib
+    import json as _json
+
+    canon = {
+        "venues": {vid: app_config.venue_mode(vid) for vid in VENUE_IDS},
+        "tasks": app_config.tasks,
+        "risk": vars(app_config.risk),
+        "caps": {"global_usd": app_config.caps.global_usd,
+                 "venues": app_config.caps.venues,
+                 "strategies": app_config.caps.strategies},
+        "dry_run": app_config.dry_run,
+    }
+    blob = _json.dumps(canon, sort_keys=True, ensure_ascii=False,
+                       default=str)
+    secret_digest = hashlib.sha256()
+    for k in sorted((app_config.secrets or {}).keys()):
+        secret_digest.update(k.encode())
+        secret_digest.update(
+            hashlib.sha256((app_config.secrets or {})[k].encode()).digest())
+    return hashlib.sha256(
+        (blob + secret_digest.hexdigest()).encode()).hexdigest()
+
+
+def write_preflight_mark(app_config: AppConfig, mark_path) -> None:
+    """预检通过后写标记文件（含时间与 config 指纹）。"""
+    import json as _json
+
+    p = Path(mark_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(_json.dumps({
+        "ok": True, "ts": time.time(),
+        "fingerprint": config_fingerprint(app_config),
+    }, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def check_preflight_mark(app_config: AppConfig, mark_path) -> tuple[bool, str]:
+    """校验标记：存在且指纹与当前 config 一致才算通过。"""
+    import json as _json
+
+    p = Path(mark_path)
+    if not p.exists():
+        return False, f"缺少预检通过标记 {p}：先运行预检命令"
+    try:
+        data = _json.loads(p.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as e:
+        return False, f"预检标记不可读：{e}"
+    if data.get("fingerprint") != config_fingerprint(app_config):
+        return False, "config 或密钥已变化，预检标记失效：请重跑预检命令"
+    return True, "预检标记有效"
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="DeTSP 实盘预检")
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--env", default=".env")
     ap.add_argument("--paper", action="store_true", help="强制全 paper，只跑离线项")
+    ap.add_argument("--mark", default=None,
+                    help="预检通过标记文件路径（默认 data/preflight-ok.json）")
     args = ap.parse_args(argv)
 
     env = dict(os.environ)
@@ -291,6 +352,14 @@ def main(argv: list[str] | None = None) -> int:
     venues = build_venues(app_config, force_paper=args.paper)
     rep = run_preflight(app_config, venues)
     print(rep.render())
+    if rep.ok:
+        # M3：只有配置里真有 live 场所时才写标记（全 paper 预检无意义）
+        has_live = any(app_config.venue_mode(v) == "live" for v in VENUE_IDS)
+        if has_live and not args.paper:
+            mark = Path(args.mark) if args.mark else \
+                Path("data") / PREFLIGHT_MARK_NAME
+            write_preflight_mark(app_config, mark)
+            print(f"预检通过标记已写入：{mark}")
     return 0 if rep.ok else 1
 
 

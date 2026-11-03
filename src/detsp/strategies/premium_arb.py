@@ -1,7 +1,10 @@
-"""溢价套利策略（骨架）：参数 + 纯函数溢价带计算。
+"""溢价套利策略：参数 + 纯函数溢价带计算 + 执行状态机。
 
 移植自 entropy-arb（MIT）：溢价中枢带、扣费后可成交价门槛、
-信号持续门、库存阶梯。本批只做纯函数与决策骨架，不接实盘。
+信号持续门、库存阶梯。已接统一执行层（core.execution.Executor），
+归属 owner = 任务名（H4）。审计修复（2026-11-03）：tick 增加持仓
+强平距离监控、开仓双腿带 corridor 估算（H7，公共口径带 mmr）；
+启动按已有持仓对账初始化（S3）。
 
 约定：premium 以基准腿（base，如 Entropy）相对对冲腿（hedge）计：
 premium_bps = (base 价 / hedge 价 − 1) × 10000。
@@ -31,6 +34,8 @@ class PremiumParams:
     base_venue: str = ""        # 基准腿 venue_id（如 entropy）
     hedge_venue: str = ""       # 对冲腿 venue_id（如 lighter）
     reconcile_seconds: float = 15.0  # 与场所持仓对账周期
+    leverage_base: float = 1.0  # 两腿杠杆（H7：开仓 corridor 估算用；
+    leverage_hedge: float = 1.0  # 交易所不由本程序设置杠杆，须与账户实际一致）
 
     def __post_init__(self) -> None:
         if self.upper_bps <= 0 or self.lower_bps <= 0:
@@ -134,24 +139,37 @@ class PremiumArbStrategy:
 
     name = "premium_arb"
 
-    def __init__(self, params: PremiumParams, executor=None) -> None:
+    def __init__(self, params: PremiumParams, executor=None,
+                 owner: str | None = None) -> None:
         self.params = params
         self.executor = executor
+        # H4：归属 owner = 任务名（config 的 name）；未给时退回类型名
+        self.owner = owner or self.name
         self._claimed = False
         self._armed: dict[str, float] = {}   # 信号 -> 首次出现时间
         self._last_reconcile = -1e18
         self.last_error: str = ""
+        self.recovery_notes: list[str] = []  # S3 启动对账事件
 
     def start(self, now: float = 0.0) -> None:
         if self.executor is None:
             raise RuntimeError("PremiumArbStrategy 未注入 executor（骨架模式）")
         self._ensure_claims()
+        # S3 启动恢复对账：已有持仓不假设是本进程开的——记录事件，
+        # 净 delta 由 tick 的定期对账（_fix_delta）自动修正，
+        # 强平距离由 tick 监控接管
+        qb = self._pos_qty(self.params.base_venue)
+        qh = self._pos_qty(self.params.hedge_venue)
+        if qb != 0 or qh != 0:
+            self.recovery_notes.append(
+                f"启动对账：发现已有持仓 base={qb} hedge={qh}，"
+                f"由定期对账与强平监控接管")
 
     def _ensure_claims(self) -> None:
         if not self._claimed:
             p = self.params
-            self.executor.claim(self.name, p.base_venue, p.symbol)
-            self.executor.claim(self.name, p.hedge_venue, p.symbol)
+            self.executor.claim(self.owner, p.base_venue, p.symbol)
+            self.executor.claim(self.owner, p.hedge_venue, p.symbol)
             self._claimed = True
 
     def _pos_qty(self, venue_id: str) -> float:
@@ -175,7 +193,7 @@ class PremiumArbStrategy:
         side = Side.SELL if legs[big] > 0 else Side.BUY
         req = OrderRequest(symbol=p.symbol, side=side, qty=excess,
                            price=None, reduce_only=True)
-        self.executor.place(self.name, big, req, intent="close")
+        self.executor.place(self.owner, big, req, intent="close")
 
     def _signal_with_surcharge(self, base_book, hedge_book) -> str | None:
         """可成交信号 + 库存阶梯：同向加仓时门槛上浮 surcharge。"""
@@ -212,8 +230,16 @@ class PremiumArbStrategy:
             adds = base_qty >= 0
         if adds and abs(base_qty * base_book.mid) + notional > p.max_position_usd:
             return
-        ex.place(self.name, p.base_venue, base_req, intent="open")
-        ex.place(self.name, p.hedge_venue, hedge_req, intent="open")
+        # H7：双腿开仓都带 corridor 估算（公共口径带 mmr），
+        # 任一腿估算低于门槛会被 Executor 拒绝，事后 _fix_delta 修正
+        corr_base = ex.estimate_open_corridor(
+            p.leverage_base, ex.market_mmr(p.base_venue, p.symbol))
+        corr_hedge = ex.estimate_open_corridor(
+            p.leverage_hedge, ex.market_mmr(p.hedge_venue, p.symbol))
+        ex.place(self.owner, p.base_venue, base_req, intent="open",
+                 corridor_pct=corr_base)
+        ex.place(self.owner, p.hedge_venue, hedge_req, intent="open",
+                 corridor_pct=corr_hedge)
         # 双腿成交量可能不等（部分成交）：立即按对账结果修正净 delta
         self._fix_delta()
         self._last_reconcile = -1e18  # 下一 tick 先对账确认
@@ -227,8 +253,8 @@ class PremiumArbStrategy:
 
         if not allow_open:
             # 停机：双腿全平
-            ex.close_position(self.name, p.base_venue, p.symbol)
-            ex.close_position(self.name, p.hedge_venue, p.symbol)
+            ex.close_position(self.owner, p.base_venue, p.symbol)
+            ex.close_position(self.owner, p.hedge_venue, p.symbol)
             self._armed.clear()
             return
 
@@ -239,8 +265,28 @@ class PremiumArbStrategy:
 
         base_book = ex.venue(p.base_venue).book(p.symbol)
         hedge_book = ex.venue(p.hedge_venue).book(p.symbol)
+
+        # H7：持仓强平距离监控（公共口径）：任一腿跌破门槛 → 双平；
+        # 不可评估 → 本 tick 不开新仓（不放行）
+        block_fire = False
+        for vid, bk in ((p.base_venue, base_book), (p.hedge_venue, hedge_book)):
+            has, corr = ex.position_corridor(vid, p.symbol, bk.mid)
+            if not has:
+                continue
+            if corr is None:
+                block_fire = True
+                self.last_error = (f"{vid} 强平距离不可评估"
+                                   f"（无强平价且杠杆未知），暂停开仓")
+            elif corr < ex.min_corridor_pct:
+                self.last_error = (f"{vid} 强平距离 {corr:.2f}% 跌破门槛 "
+                                   f"{ex.min_corridor_pct}%，双腿平仓")
+                ex.close_position(self.owner, p.base_venue, p.symbol)
+                ex.close_position(self.owner, p.hedge_venue, p.symbol)
+                self._armed.clear()
+                return
+
         signal = self._signal_with_surcharge(base_book, hedge_book)
-        if signal is None:
+        if signal is None or block_fire:
             self._armed.clear()
             return
         since = self._armed.setdefault(signal, now)

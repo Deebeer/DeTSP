@@ -86,15 +86,17 @@ Lighter 两个部署共用 lighter.py：仅端点、chain id、账户与密钥�
 
 ## 9. 运行模式
 
-- paper：本地模拟撮合，不发真实订单（venues/paper.py 通用模拟适配）。
+- paper：本地模拟撮合，不发真实订单（venues/paper.py 通用模拟适配）。paper 价格驱动（H6）：优先公开行情只读接口（venues/quotes.py，HL 家族/Aster/Lighter），失败或无公开端点（Arcus）回退随机游走，再回退静态价。
 - DRY_RUN=true：走全部真实行情与决策、记录意图，不下单。
-- live：DRY_RUN=false 且对应场所 mode=live 才真实下单；切换前必须过实盘预检（签名、时钟、余额、精度）。
+- live：DRY_RUN=false 且对应场所 mode=live 才真实下单；切换前必须过实盘预检（签名、时钟、余额、精度），且主入口会校验预检通过标记 data/preflight-ok.json 的指纹与当前 config/密钥一致（M3），不一致拒绝启动。
+- 全局停机状态落盘 data/killswitch.json（M3）：重启保持停机，须面板 reset 或 `python -m detsp --reset-killswitch` 人工解除。
 - entropy-arb 原设计无模拟模式，本系统为溢价套利补齐 paper/DRY_RUN。
 
 ## 10. 配置
 
 - .env 只放密钥与连接参数（见 .env.example，7 所字段分开，值留空）。
-- config.yaml 放策略与风控参数，加载时严格校验：未知键、未知 venue_id、非法 mode 直接报错退出（core/config.py）。
+- config.yaml 放策略与风控参数，加载时严格校验：未知键、未知 venue_id、非法 mode 直接报错退出（core/config.py）。任务名必填唯一、同一 (venue, symbol) 被两个任务占用在加载时直接报错（H4）。
+- caps（H1）：config.yaml 顶层三层名义上限（global_usd / venues / strategies，键为任务名，USD），经 Engine.from_config 接线进 Executor；网格启动另按总名义估算硬校验，超限拒绝启动。
 
 ## 11. 许可
 
@@ -110,20 +112,25 @@ Lighter 两个部署共用 lighter.py：仅端点、chain id、账户与密钥�
 | 模块 | 状态 |
 |---|---|
 | core（配置/接口/登记/风控/账本/引擎骨架） | 已完成（第一批） |
-| core/execution 统一执行层 | 已完成（第三批）：claim 归属校验、KillSwitch/强平距离/三层上限、成交记账、结果未知不重发先对账、部分成交按实际量 |
-| core/engine 执行调度 | 已完成（第三批）：按 config.yaml 的 tasks 组装三策略，单任务异常隔离、连续错误停用并触发全局停机、安全动作优先（停机时 allow_open=False 照常撤单/平仓） |
+| core/execution 统一执行层 | 已完成（第三批）：claim 归属校验、KillSwitch/强平距离/三层上限、成交记账、结果未知不重发先对账、部分成交按实际量。审计修复（S1）：异常翻译统一口径（unknown_outcome_guard）+ Executor 兜底对账定性；强平距离公共函数 position_corridor/estimate_open_corridor（带 mmr，H7/M5）；cancel_unregistered 启动对账撤单（S3） |
+| core/engine 执行调度 | 已完成（第三批）：按 config.yaml 的 tasks 组装三策略，单任务异常隔离、连续错误停用并触发全局停机、安全动作优先（停机时 allow_open=False 照常撤单/平仓）。审计修复：caps 从 config 接线（H1）、state_dir 停机落盘（M3）、任务启动 S3 对账事件汇总 events、面板命令队列串行执行（M4） |
 | venues/paper 通用模拟 | 已完成 |
 | venues/hl（Hyperliquid 本体 / Entropy / trade.xyz） | live 已完成（第二批）：基于官方 hyperliquid-python-sdk 0.24 的 Info/Exchange；签名/请求构造有 mock 单测，未做实盘小额验证 |
 | venues/lighter（主网 / Robinhood 链） | live 已完成（第二批）：REST 读 + lighter-sdk 1.1.2 签名下单；市价单异步结算，成交以持仓对账为准；未做实盘小额验证 |
 | venues/arcus | live 已完成（第二批）：Ed25519 签名（含载荷字节级单测）、精度、强平价复算、REST 下单/撤单/setLeverage；未做实盘小额验证 |
 | venues/aster | live 已完成（第二批）：依据官方 V1（Legacy）文档自写，HMAC-SHA256 签名有官方示例向量对拍；未做实盘小额验证 |
-| strategies（三策略） | 执行状态机已完成（第三批，paper 端到端集成测试覆盖）：网格铺单/成交补单/区间外 close 与 recover/人工补格；轮换对冲双 taker 与 maker+对冲、到期轮换、孤腿平、开仓后复核；溢价套利双腿 taker、持续门、库存阶梯、对账与净 delta 修正。尚未做实盘小额验证 |
-| venues/paper | 第三批增强：限价单挂单撮合（改价穿价成交）、poll_order 终态查询、资金费/杠杆可设 |
+| strategies（三策略） | 执行状态机已完成（第三批，paper 端到端集成测试覆盖）：网格铺单/成交补单/区间外 close 与 recover/人工补格；轮换对冲双 taker 与 maker+对冲、到期轮换、孤腿平、开仓后复核；溢价套利双腿 taker、持续门、库存阶梯、对账与净 delta 修正。尚未做实盘小额验证。审计修复：owner=任务名（H4）、资金费每小时口径（H3）、maker 部分成交跟踪（M2）、三策略 tick 强平监控（H7）、启动恢复对账（S3） |
+| venues/paper | 第三批增强：限价单挂单撮合（改价穿价成交）、poll_order 终态查询、资金费/杠杆可设。审计修复（H6）：价格驱动三级——公开行情只读（venues/quotes）→ 随机游走兜底（可设种子）→ 静态价；未知 symbol 不再 KeyError |
 | venues/dryrun（DRY_RUN 代理） | 已完成（第四批）：live 场所读实盘行情/账户、下单走本地 PaperVenue 模拟并按实盘中价同步撮合价，落实第 9 节 DRY_RUN 语义（组装见 venues/factory.py 的 dry_run 参数） |
-| web 网页面板 | 已完成（第四批）：与引擎**同进程共享对象**（Engine/venues/Ledger 同一批实例，不另开进程读状态文件），标准库 http.server，强制只绑回环地址、无鉴权；接口 /api/overview、/api/tasks、任务 start/stop、/api/killswitch(+reset)、/api/fills；账本连接已做线程安全（引擎线程写、面板线程读） |
-| 程序入口与一键启动 | 已完成（第四批）：`python -m detsp`（--config/--env/--paper/--no-web/--db）；一键启动.bat（纯 ASCII）+ start.ps1、start.sh，首次自动建 venv 装依赖并生成 .env/config.yaml |
+| web 网页面板 | 已完成（第四批）：与引擎**同进程共享对象**（Engine/venues/Ledger 同一批实例，不另开进程读状态文件），标准库 http.server，强制只绑回环地址；接口 /api/overview、/api/tasks、任务 start/stop、/api/killswitch(+reset)、/api/fills；账本连接已做线程安全（引擎线程写、面板线程读）。审计修复（H2/M4）：随机 token（POST 必带 X-API-Token）、Host 回环字面校验、POST Origin 同源校验；启停任务经引擎命令队列串行执行，不在 HTTP 线程组装/下单 |
+| 程序入口与一键启动 | 已完成（第四批）：`python -m detsp`（--config/--env/--paper/--no-web/--db/--reset-killswitch）；一键启动.bat（纯 ASCII）+ start.ps1、start.sh，首次自动建 venv 装依赖并生成 .env/config.yaml。审计修复（M3）：live 真金模式启动前校验预检通过标记（指纹绑定 config+密钥） |
 | tools 盘口录制/溢价分析 | 已完成（第四批）：detsp.tools.recorder 每秒采样、每分钟一行 CSV（双边盘口与溢价 OHLC/均值、可成交 edge）；detsp.tools.analyze 输出溢价分布、候选带触发次数与建议 midline/upper/lower（扣费口径） |
-| core/preflight 实盘预检 | 已完成（第四批）：`python -m detsp.preflight`，逐所查凭据齐全（不打印值）、签名自检（只签不发）、时钟偏差（>30 秒失败）、行情连通、账户快照（live）、精度与最小量；paper 只跑离线项；任一失败退出码非 0 |
+| core/preflight 实盘预检 | 已完成（第四批）：`python -m detsp.preflight`，逐所查凭据齐全（不打印值）、签名自检（只签不发）、时钟偏差（>30 秒失败）、行情连通、账户快照（live）、精度与最小量；paper 只跑离线项；任一失败退出码非 0。审计修复（M3）：含 live 场所且预检通过时写 data/preflight-ok.json（时间 + config 指纹），供主入口 live 启动门校验 |
+
+**启动恢复对账语义（S3，2026-11-03 审计修复）**：进程重启后内存归属登记为空，但交易所的挂单/持仓还在。各任务 start 时先对账再动作，事件记入 engine.events 并在面板总览可见：
+- 网格：先撤销该 (venue, symbol) 下未登记的遗留挂单再铺单（防新旧两套网格单叠加）；发现已有持仓且任务未开 takeover_position 时，持仓登记为「未托管」，网格不铺单、不自动开新仓，直到人工处理或显式接管；全局停机时未托管持仓仍会被平（安全优先）。
+- 轮换对冲 / 溢价套利：按已有持仓初始化——轮换直接进入 open 阶段（opened_at 重置），孤腿/不平由安全检查在下一 tick 起处理；套利的净 delta 由定期对账自动修正、强平距离由 tick 监控接管。
+- 「重启会重新 claim 并对账」自此成立：claim 解决进程内互斥，对账解决与交易所真实状态的一致性。
 
 **计划内功能至此全部完成。** 遗留项（均为计划外/需真实账户验证）：
 - 7 所实盘小额验证（全部 live 适配只过了 mock 单测与本地签名自检，未用真实账户下过单）。

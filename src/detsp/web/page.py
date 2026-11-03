@@ -25,8 +25,9 @@ pre{background:#161c2b;padding:8px;overflow:auto;font-size:12px}
 </head>
 <body>
 <h1>DeTSP 交易面板 <span class="muted" id="mode"></span></h1>
-<p class="warn">⚠ 本面板<b>没有任何登录鉴权</b>，只允许绑本机 127.0.0.1 使用，
-不要改绑公网地址、不要做端口映射。</p>
+<p class="warn">⚠ 本面板只允许绑本机 127.0.0.1 使用，POST 操作带随机
+token 校验（防跨站借道），但<b>不等于登录鉴权</b>：不要改绑公网地址、
+不要做端口映射。</p>
 
 <h2>总览</h2>
 <div id="killbox"></div>
@@ -35,6 +36,7 @@ pre{background:#161c2b;padding:8px;overflow:auto;font-size:12px}
 <table id="venues"><thead><tr>
 <th>场所</th><th>模式</th><th>权益</th><th>可用</th><th>持仓</th><th>挂单数</th>
 </tr></thead><tbody></tbody></table>
+<div id="events"></div>
 
 <h2>任务</h2>
 <table id="tasks"><thead><tr>
@@ -49,8 +51,9 @@ pre{background:#161c2b;padding:8px;overflow:auto;font-size:12px}
 
 <script>
 const $=s=>document.querySelector(s);
+const TOKEN="__TOKEN__";  // 由后端在返回页面时注入（H2）
 function fmt(x,d=2){return x==null?"-":Number(x).toFixed(d)}
-async function post(url){const r=await fetch(url,{method:"POST"});return r.json()}
+async function post(url){const r=await fetch(url,{method:"POST",headers:{"X-API-Token":TOKEN}});return r.json()}
 async function refresh(){
   const ov=await (await fetch("/api/overview")).json();
   $("#mode").textContent="（"+(ov.dry_run?"DRY_RUN 只决策不下单":"实盘模式")+"）";
@@ -67,6 +70,8 @@ async function refresh(){
     (v.positions.length?v.positions.map(p=>p.symbol+" "+p.qty+" @ "+p.entry_price).join("<br>"):"-")+
     (v.error?'<br><span class="bad">'+v.error+"</span>":"")+
     "</td><td>"+v.open_orders+"</td></tr>").join("");
+  $("#events").innerHTML=(ov.events&&ov.events.length)
+    ? '<p class="muted">系统事件（启动对账等）：<br>'+ov.events.join("<br>")+"</p>" : "";
   const tk=await (await fetch("/api/tasks")).json();
   $("#tasks tbody").innerHTML=tk.tasks.map(t=>{
     let btn="";

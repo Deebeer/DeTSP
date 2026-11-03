@@ -1,8 +1,12 @@
-"""轮换对冲刷量策略（骨架）：参数 + 纯函数决策。
+"""轮换对冲刷量策略：参数 + 纯函数决策 + 执行状态机。
 
 移植自 Parallax Hedge（MIT）：双腿反向等量、定时轮换、
 按资金费选向、强平距离风控、孤腿抢救。
-本批只做纯函数与决策骨架，不接实盘。
+已接统一执行层（core.execution.Executor），归属 owner = 任务名（H4）。
+审计修复（2026-11-03）：资金费统一换算每小时口径再选向（H3）；
+强平距离改用 Executor 公共口径带 mmr、不可评估按危险处理（H7/M5）；
+maker 部分成交保留跟踪、终局按最终量对冲（M2）；poll 不可得时
+「挂单消失+持仓差」对账式发现（S2）；启动按已有持仓对账初始化（S3）。
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ from dataclasses import dataclass
 from ..core.risk import (
     basis_ok,
     detect_single_leg,
-    position_corridor_pct,
+    funding_hourly_rate,
     should_force_close,
 )
 from ..core.venue import OrderRequest, Side
@@ -103,10 +107,13 @@ class RotationHedgeStrategy:
     name = "rotation_hedge"
 
     def __init__(self, params: RotationParams, executor=None, risk_cfg=None,
-                 rng: random.Random | None = None) -> None:
+                 rng: random.Random | None = None,
+                 owner: str | None = None) -> None:
         self.params = params
         self.executor = executor
         self.rng = rng
+        # H4：归属 owner = 任务名（config 的 name）；未给时退回类型名
+        self.owner = owner or self.name
         self.min_corridor_pct = getattr(risk_cfg, "min_corridor_pct", 3.0)
         self.close_corridor_pct = getattr(risk_cfg, "close_corridor_pct", 1.5)
         self.max_basis_pct = 3.0
@@ -120,7 +127,12 @@ class RotationHedgeStrategy:
         self._maker_leg: str = ""    # "a" / "b"
         self._maker_qty = 0.0
         self._maker_started = 0.0
+        self._maker_partial = 0.0    # M2：已发现的部分成交量（累计口径）
+        self._maker_recorded = 0.0   # 下单时 Executor 已记账的量
+        self._maker_pos_before = 0.0  # S2：挂单前该腿持仓（对账基线）
+        self._maker_sign = 1.0       # maker 腿方向符号（多 +1 / 空 -1）
         self.last_error: str = ""
+        self.recovery_notes: list[str] = []  # S3 启动对账事件
 
     # ----- 基础 -----
     def _venue_id(self, leg: str) -> str:
@@ -131,14 +143,25 @@ class RotationHedgeStrategy:
 
     def _ensure_claims(self) -> None:
         if not self._claimed:
-            self.executor.claim(self.name, self.params.venue_a, self.params.symbol)
-            self.executor.claim(self.name, self.params.venue_b, self.params.symbol)
+            self.executor.claim(self.owner, self.params.venue_a, self.params.symbol)
+            self.executor.claim(self.owner, self.params.venue_b, self.params.symbol)
             self._claimed = True
 
     def start(self, now: float = 0.0) -> None:
         if self.executor is None:
             raise RuntimeError("RotationHedgeStrategy 未注入 executor（骨架模式）")
         self._ensure_claims()
+        # S3 启动恢复对账：已有持仓（双腿对冲或单腿残留）按 open 阶段
+        # 初始化，opened_at 重置为现在，安全检查从下一 tick 起接管
+        # （孤腿会被平、双腿到期轮换），不假设是本进程开的仓
+        legs = self._legs_qty()
+        if legs["a"] != 0 or legs["b"] != 0:
+            self.phase = "open"
+            self.opened_at = now
+            self.hold_drawn = draw_hold_seconds(self.params, self.rng)
+            self.recovery_notes.append(
+                f"启动对账：发现已有持仓 a={legs['a']} b={legs['b']}，"
+                f"按 open 阶段接管，安全检查接管处理")
 
     def _legs_qty(self) -> dict[str, float]:
         out = {}
@@ -148,7 +171,7 @@ class RotationHedgeStrategy:
         return out
 
     def _close_leg(self, leg: str, qty: float | None = None) -> None:
-        self.executor.close_position(self.name, self._venue_id(leg),
+        self.executor.close_position(self.owner, self._venue_id(leg),
                                      self.params.symbol, qty=qty)
 
     def _finish_round(self, now: float) -> None:
@@ -156,6 +179,8 @@ class RotationHedgeStrategy:
         self.closed_at = now
         self.open_corridor = None
         self._maker_oid = None
+        self._maker_partial = 0.0
+        self._maker_recorded = 0.0
 
     def _close_both(self, now: float) -> None:
         self._close_leg("a")
@@ -183,17 +208,21 @@ class RotationHedgeStrategy:
             self._close_leg("a" if qa != 0 else "b")
             self._finish_round(now)
             return True
-        # 强平距离监控
+        # 强平距离监控（H7/M5 公共口径：带 mmr；不可评估按危险处理）
         corridors = []
         for leg in ("a", "b"):
-            pos = self.executor.position(self._venue_id(leg), self.params.symbol)
-            if pos is None or pos.qty == 0:
+            vid = self._venue_id(leg)
+            mid = self.executor.venue(vid).book(self.params.symbol).mid
+            has, c = self.executor.position_corridor(
+                vid, self.params.symbol, mid)
+            if not has:
                 continue
-            mid = self.executor.venue(self._venue_id(leg)).book(
-                self.params.symbol).mid
-            c = position_corridor_pct(mid, pos)
-            if c is not None:
-                corridors.append(c)
+            if c is None:
+                self.last_error = (f"{vid} 强平距离不可评估"
+                                   f"（无强平价且杠杆未知），双平")
+                self._close_both(now)
+                return True
+            corridors.append(c)
         if corridors:
             worst = min(corridors)
             ref = self.open_corridor if self.open_corridor is not None else worst
@@ -205,8 +234,10 @@ class RotationHedgeStrategy:
 
     # ----- 开仓 -----
     def _est_corridor(self, leg: str) -> float:
-        """开仓前估算强平距离（%）：按杠杆近似 100/杠杆。"""
-        return 100.0 / max(self._leverage(leg), 1e-9)
+        """开仓前估算强平距离（%）：Executor 公共口径（带 mmr，M5）。"""
+        return self.executor.estimate_open_corridor(
+            self._leverage(leg),
+            self.executor.market_mmr(self._venue_id(leg), self.params.symbol))
 
     def _open_round(self, now: float) -> None:
         p = self.params
@@ -218,8 +249,13 @@ class RotationHedgeStrategy:
         worst_est = min(self._est_corridor("a"), self._est_corridor("b"))
         if worst_est < self.min_corridor_pct:
             return  # 杠杆太高，估算强平距离不足
-        fa = ex.venue(p.venue_a).funding(p.symbol).rate
-        fb = ex.venue(p.venue_b).funding(p.symbol).rate
+        # H3：资金费先统一换算到每小时口径再选向/算 edge——
+        # HL/Arcus 是每小时费率、Lighter 是 8 小时费率，直接比原始
+        # rate 会系统性选错方向
+        info_a = ex.venue(p.venue_a).funding(p.symbol)
+        info_b = ex.venue(p.venue_b).funding(p.symbol)
+        fa = funding_hourly_rate(info_a.rate, info_a.interval_seconds)
+        fb = funding_hourly_rate(info_b.rate, info_b.interval_seconds)
         long_leg, short_leg = choose_direction(fa, fb)
         bal = {leg: ex.venue(self._venue_id(leg)).balance().get("available", 0.0)
                for leg in ("a", "b")}
@@ -248,7 +284,7 @@ class RotationHedgeStrategy:
         for leg in legs_order:
             side = Side.BUY if leg == long_leg else Side.SELL
             req = OrderRequest(symbol=p.symbol, side=side, qty=qty, price=None)
-            res = ex.place(self.name, self._venue_id(leg), req,
+            res = ex.place(self.owner, self._venue_id(leg), req,
                            intent="open", corridor_pct=worst_est)
             results[leg] = res
             if res.status in ("rejected", "unknown"):
@@ -271,17 +307,24 @@ class RotationHedgeStrategy:
         book = self.executor.venue(venue_id).book(p.symbol)
         is_long = maker_leg == long_leg
         price = book.bid if is_long else book.ask
+        # S2 对账基线：挂单前该腿持仓量，poll 不可得时用持仓差推断成交
+        pos = self.executor.position(venue_id, p.symbol)
+        self._maker_pos_before = pos.qty if pos else 0.0
+        self._maker_sign = 1.0 if is_long else -1.0
         req = OrderRequest(symbol=p.symbol,
                            side=Side.BUY if is_long else Side.SELL,
                            qty=qty, price=price, post_only=True)
-        res = self.executor.place(self.name, venue_id, req, intent="open",
+        res = self.executor.place(self.owner, venue_id, req, intent="open",
                                   corridor_pct=self._est_corridor(maker_leg))
-        if res.order is not None and res.status == "open":
+        if res.order is not None and res.status in ("open", "partial"):
+            # M2：部分成交也进 opening 跟踪，剩余继续等/超时按最终量对冲
             self.phase = "opening"
             self._maker_oid = res.order.order_id
             self._maker_leg = maker_leg
             self._maker_qty = qty
             self._maker_started = now
+            self._maker_partial = res.filled_qty
+            self._maker_recorded = res.filled_qty
         elif res.status == "filled":
             self._hedge_after_maker(maker_leg, long_leg, qty, now)
 
@@ -291,7 +334,7 @@ class RotationHedgeStrategy:
         side = Side.BUY if other == long_leg else Side.SELL
         req = OrderRequest(symbol=self.params.symbol, side=side, qty=qty,
                            price=None)
-        self.executor.place(self.name, self._venue_id(other), req,
+        self.executor.place(self.owner, self._venue_id(other), req,
                             intent="open",
                             corridor_pct=self._est_corridor(other))
         legs_now = self._legs_qty()
@@ -300,20 +343,29 @@ class RotationHedgeStrategy:
             self._close_both(now)
             return
         self._maker_oid = None
+        self._maker_partial = 0.0
+        self._maker_recorded = 0.0
         self._post_open(now)
 
     def _post_open(self, now: float) -> None:
-        """开仓后复核：用真实持仓重算强平距离，不合格立即双平。"""
+        """开仓后复核：用真实持仓重算强平距离，不合格立即双平。
+
+        H7/M5：走 Executor 公共口径（带 mmr）；任一腿不可评估
+        （无强平价且杠杆未知）按不合格处理，双平。
+        """
         corridors = []
         for leg in ("a", "b"):
-            pos = self.executor.position(self._venue_id(leg), self.params.symbol)
-            if pos is None or pos.qty == 0:
+            vid = self._venue_id(leg)
+            mid = self.executor.venue(vid).book(self.params.symbol).mid
+            has, c = self.executor.position_corridor(
+                vid, self.params.symbol, mid)
+            if not has:
                 continue
-            mid = self.executor.venue(self._venue_id(leg)).book(
-                self.params.symbol).mid
-            c = position_corridor_pct(mid, pos)
-            if c is not None:
-                corridors.append(c)
+            if c is None:
+                self.last_error = f"{vid} 开仓后强平距离不可评估，双平"
+                self._close_both(now)
+                return
+            corridors.append(c)
         worst = min(corridors) if corridors else None
         if worst is not None and worst < self.min_corridor_pct:
             self._close_both(now)
@@ -323,36 +375,92 @@ class RotationHedgeStrategy:
         self.hold_drawn = draw_hold_seconds(self.params, self.rng)
         self.phase = "open"
 
-    def _tick_opening(self, now: float) -> None:
-        """maker 挂单等待阶段：成交→立即 taker 对冲；超时→撤单回 idle。"""
-        venue = self.executor.venue(self._venue_id(self._maker_leg))
+    def _maker_final_filled(self) -> float | None:
+        """maker 单的最终成交量：优先 poll 终态；poll 不可得时用
+        「持仓 − 挂单前基线」对账推断（S2）。订单仍在挂单中返回 None。"""
+        venue_id = self._venue_id(self._maker_leg)
+        venue = self.executor.venue(venue_id)
         o = venue.poll_order(self._maker_oid)
-        if o is not None and (o.status == "filled" or o.filled_qty > 0):
-            filled = o.filled_qty if o.filled_qty > 0 else self._maker_qty
-            # maker 成交在下单后发生，补记账本
+        if o is not None:
+            if o.status == "open":
+                return None
+            return o.filled_qty
+        try:
+            open_ids = {x.order_id for x in venue.open_orders(self.params.symbol)}
+        except Exception:  # noqa: BLE001 — 查询失败：保持跟踪
+            return None
+        if self._maker_oid in open_ids:
+            return None
+        pos = self.executor.position(venue_id, self.params.symbol)
+        cur = pos.qty if pos else 0.0
+        delta = (cur - self._maker_pos_before) * self._maker_sign
+        return min(max(delta, 0.0), self._maker_qty)
+
+    def _finalize_maker(self, filled: float, now: float) -> None:
+        """maker 终局：按最终成交量补记账本并对冲（M2）。"""
+        p = self.params
+        venue_id = self._venue_id(self._maker_leg)
+        oid = self._maker_oid
+        inc = filled - self._maker_recorded
+        if inc > 1e-9:
+            venue = self.executor.venue(venue_id)
+            try:
+                px = venue.book(p.symbol).mid
+            except Exception:  # noqa: BLE001
+                px = 0.0
             self.executor.record_fill(
-                self.name, self._venue_id(self._maker_leg), self.params.symbol,
-                o.side, filled,
-                o.price if o.price is not None else 0.0, order_id=self._maker_oid)
-            # maker 腿的持仓方向决定哪条腿是多头
-            pos = self.executor.position(self._venue_id(self._maker_leg),
-                                         self.params.symbol)
-            if pos is not None and pos.qty > 0:
-                long_leg = self._maker_leg
-            else:
-                long_leg = "b" if self._maker_leg == "a" else "a"
-            self._maker_oid = None
-            self._hedge_after_maker(self._maker_leg, long_leg, filled, now)
-            return
-        if o is not None and o.status in ("canceled", "rejected"):
-            self._maker_oid = None
+                self.owner, venue_id, p.symbol,
+                Side.BUY if self._maker_sign > 0 else Side.SELL,
+                inc, px, order_id=oid or "")
+        self._maker_oid = None
+        self._maker_partial = 0.0
+        self._maker_recorded = 0.0
+        if filled <= 1e-9:
             self.phase = "idle"
             return
+        pos = self.executor.position(venue_id, p.symbol)
+        if pos is not None and pos.qty > 0:
+            long_leg = self._maker_leg
+        else:
+            long_leg = "b" if self._maker_leg == "a" else "a"
+        self._hedge_after_maker(self._maker_leg, long_leg, filled, now)
+
+    def _tick_opening(self, now: float) -> None:
+        """maker 挂单等待阶段（M2 重做）：
+
+        - 部分成交（status=open 且 filled>0）：只更新已成交量，**保留
+          跟踪**，绝不提前对冲——等终态或超时撤单确认后按最终量对冲；
+        - 终态（filled / canceled 带部分量 / 对账推断终局）：按最终
+          成交量一次性对冲；
+        - 超时：先撤单，再复查最终成交量，有量按最终量对冲、无量回 idle。
+        """
+        venue_id = self._venue_id(self._maker_leg)
+        venue = self.executor.venue(venue_id)
+        o = venue.poll_order(self._maker_oid)
+        if o is not None:
+            if o.status == "open":
+                if o.filled_qty > self._maker_partial:
+                    self._maker_partial = o.filled_qty
+            elif o.status == "filled":
+                self._finalize_maker(
+                    o.filled_qty if o.filled_qty > 0 else self._maker_qty, now)
+                return
+            elif o.status in ("canceled", "rejected"):
+                self._finalize_maker(o.filled_qty, now)
+                return
+        else:
+            final = self._maker_final_filled()
+            if final is not None:
+                self._finalize_maker(final, now)
+                return
         if now - self._maker_started > self.params.maker_wait_seconds:
-            self.executor.cancel(self.name, self._venue_id(self._maker_leg),
-                                 self._maker_oid)
-            self._maker_oid = None
-            self.phase = "idle"
+            self.executor.cancel(self.owner, venue_id, self._maker_oid)
+            final = self._maker_final_filled()
+            if final is None:
+                # 撤单未确认终局：用已发现的部分成交量兜底，再不行等下轮
+                final = self._maker_partial if self._maker_partial > 0 else None
+            if final is not None:
+                self._finalize_maker(final, now)
 
     # ----- 主循环 -----
     def tick(self, now: float = 0.0, allow_open: bool = True) -> None:
@@ -364,7 +472,7 @@ class RotationHedgeStrategy:
         # 本来就是单腿，若先跑安全检查会把 maker 腿误平掉
         if self.phase == "opening" and self._maker_oid is not None:
             if not allow_open:
-                self.executor.cancel(self.name, self._venue_id(self._maker_leg),
+                self.executor.cancel(self.owner, self._venue_id(self._maker_leg),
                                      self._maker_oid)
                 self._maker_oid = None
                 self.phase = "idle"

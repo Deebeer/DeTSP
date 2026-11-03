@@ -23,6 +23,7 @@ from __future__ import annotations
 import math
 import time
 
+from ..core.execution import unknown_outcome_guard
 from ..core.venue import (
     Book,
     FundingInfo,
@@ -178,7 +179,8 @@ class HyperliquidVenue(SkeletonVenue):
             if a["name"] == coin:
                 # HL 资金费按小时收取，ctx.funding 即每小时费率
                 return FundingInfo(symbol=symbol, rate=float(ctx.get("funding") or 0),
-                                   next_ts=time.time() + 3600)
+                                   next_ts=time.time() + 3600,
+                                   interval_seconds=3600)
         raise RuntimeError(f"{self.venue_id} 找不到市场 {symbol}")
 
     def balance(self) -> dict:
@@ -232,26 +234,29 @@ class HyperliquidVenue(SkeletonVenue):
     def place_order(self, req: OrderRequest) -> Order:
         if self._paper is not None:
             return super().place_order(req)
-        ex = self._get_exchange()
-        coin = self.coin(req.symbol)
-        qty = self._round_qty(req.symbol, req.qty)
-        if qty <= 0:
-            raise ValueError(f"{self.venue_id} 数量 {req.qty} 对齐精度后为 0")
-        is_buy = req.side is Side.BUY
-        if req.price is None:
-            resp = ex.market_open(coin, is_buy, qty, px=None,
-                                  slippage=MARKET_SLIPPAGE)
-            limit_px = None
-        else:
-            px = self._round_px(req.price, self._sz_decimals_for(req.symbol))
-            tif = "Alo" if req.post_only else "Gtc"
-            resp = ex.order(coin, is_buy, qty, px, {"limit": {"tif": tif}},
-                            reduce_only=req.reduce_only)
-            limit_px = px
-        order = self._parse_order_response(resp, req, qty, limit_px)
-        if order.order_id:
-            self._oid_coin[order.order_id] = coin
-        return order
+        # S1：SDK 基于 requests，超时/断连统一翻译为 UnknownOutcomeError
+        with unknown_outcome_guard():
+            ex = self._get_exchange()
+            coin = self.coin(req.symbol)
+            qty = self._round_qty(req.symbol, req.qty)
+            if qty <= 0:
+                raise ValueError(f"{self.venue_id} 数量 {req.qty} 对齐精度后为 0")
+            is_buy = req.side is Side.BUY
+            if req.price is None:
+                resp = ex.market_open(coin, is_buy, qty, px=None,
+                                      slippage=MARKET_SLIPPAGE)
+                limit_px = None
+            else:
+                px = self._round_px(req.price, self._sz_decimals_for(req.symbol))
+                tif = "Alo" if req.post_only else "Gtc"
+                resp = ex.order(coin, is_buy, qty, px,
+                                {"limit": {"tif": tif}},
+                                reduce_only=req.reduce_only)
+                limit_px = px
+            order = self._parse_order_response(resp, req, qty, limit_px)
+            if order.order_id:
+                self._oid_coin[order.order_id] = coin
+            return order
 
     def _parse_order_response(self, resp, req: OrderRequest,
                               qty: float, limit_px: float | None) -> Order:
@@ -289,8 +294,45 @@ class HyperliquidVenue(SkeletonVenue):
                     break
         if coin is None:
             return False
-        resp = self._get_exchange().cancel(coin, int(order_id))
+        with unknown_outcome_guard():
+            resp = self._get_exchange().cancel(coin, int(order_id))
         return isinstance(resp, dict) and resp.get("status") == "ok"
+
+    def poll_order(self, order_id: str) -> Order | None:
+        """S2：用 Info.query_order_by_oid 查真实终态（限价单成交后不在
+        挂单列表里，默认实现会误判）。查不到/接口异常时退回挂单列表。"""
+        if self._paper is not None:
+            return self._delegate().poll_order(order_id)
+        try:
+            oid = int(order_id)
+        except (TypeError, ValueError):
+            return None
+        try:
+            resp = self._get_info().query_order_by_oid(self._address(), oid)
+        except Exception:  # noqa: BLE001 — 查询失败退回挂单列表口径
+            resp = None
+        if isinstance(resp, dict) and resp.get("status") == "order":
+            o = (resp.get("order") or {}).get("order") or {}
+            st = (resp.get("order") or {}).get("status") or ""
+            coin = o.get("coin") or self._oid_coin.get(str(order_id), "")
+            orig = float(o.get("origSz") or o.get("sz") or 0)
+            remaining = float(o.get("sz") or 0)
+            filled = max(orig - remaining, 0.0)
+            status = {"open": "open", "filled": "filled",
+                      "canceled": "canceled", "rejected": "rejected",
+                      "marginCanceled": "canceled"}.get(st, st or "open")
+            if status == "filled":
+                filled = orig
+            return Order(order_id=str(order_id),
+                         symbol=self._plain(coin) if coin else "",
+                         side=Side.BUY if o.get("side") == "B" else Side.SELL,
+                         qty=orig, price=float(o.get("limitPx") or 0) or None,
+                         filled_qty=filled, status=status)
+        # unknownOid 等：退回挂单列表口径（不在挂单中 → None）
+        for o in self.open_orders():
+            if o.order_id == str(order_id):
+                return o
+        return None
 
 
 def hyperliquid(**kw) -> HyperliquidVenue:

@@ -9,6 +9,12 @@
   --paper        强制全部场所 paper（无视 config 的 live 设置）
   --no-web       不启动网页面板
   --db PATH      账本 SQLite 路径（默认 data/detsp.db）
+  --reset-killswitch  清除落盘的停机状态后退出（人工恢复用，M3）
+
+live 启动门（M3）：配置里有 live 场所、且非 DRY_RUN、未 --paper 时，
+必须存在有效的预检通过标记（data/preflight-ok.json，指纹与当前
+config+密钥一致），否则拒绝启动并提示先跑预检。caps（H1）经
+Engine.from_config 从 config 读入，不再需要单独传参。
 """
 
 from __future__ import annotations
@@ -18,9 +24,10 @@ import os
 import time
 from pathlib import Path
 
-from .core.config import build_config, load_env_file, load_yaml_config
+from .core.config import VENUE_IDS, build_config, load_env_file, load_yaml_config
 from .core.engine import Engine
 from .core.ledger import Ledger
+from .core.preflight import PREFLIGHT_MARK_NAME, check_preflight_mark
 from .venues.factory import build_venues
 from .web.server import PanelState, serve, web_settings
 
@@ -32,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--paper", action="store_true", help="强制全 paper")
     ap.add_argument("--no-web", action="store_true", help="不启动网页面板")
     ap.add_argument("--db", default="data/detsp.db")
+    ap.add_argument("--reset-killswitch", action="store_true",
+                    help="清除落盘停机状态后退出（人工恢复，M3）")
     args = ap.parse_args(argv)
 
     env = dict(os.environ)
@@ -41,10 +50,36 @@ def main(argv: list[str] | None = None) -> int:
     yaml_data = load_yaml_config(cfg_path) if cfg_path.exists() else {}
     app_config = build_config(env=env, yaml_data=yaml_data)
 
+    state_dir = Path(args.db).parent
+    if args.reset_killswitch:
+        # 人工恢复：删停机落盘文件即解除（KillSwitch 以文件存在为准）
+        f = state_dir / "killswitch.json"
+        if f.exists():
+            f.unlink()
+            print(f"[DeTSP] 已清除停机状态：{f}", flush=True)
+        else:
+            print("[DeTSP] 当前没有落盘的停机状态", flush=True)
+        return 0
+
+    # M3 live 启动门：真金白银模式（有 live 场所 + 非 DRY_RUN + 未强制
+    # paper）必须先过预检且标记指纹与当前 config/密钥一致
+    has_live = any(app_config.venue_mode(v) == "live" for v in VENUE_IDS)
+    if has_live and not app_config.dry_run and not args.paper:
+        ok, why = check_preflight_mark(
+            app_config, state_dir / PREFLIGHT_MARK_NAME)
+        if not ok:
+            print(f"[DeTSP] 拒绝 live 启动：{why}\n"
+                  f"        先运行：python -m detsp.preflight "
+                  f"--config {args.config} --env {args.env}", flush=True)
+            return 2
+
     venues = build_venues(app_config, force_paper=args.paper,
                           dry_run=app_config.dry_run)
     ledger = Ledger(args.db)
-    engine = Engine.from_config(app_config, venues, ledger=ledger)
+    engine = Engine.from_config(app_config, venues, ledger=ledger,
+                                state_dir=state_dir)
+    for note in engine.events:
+        print(f"[DeTSP] {note}", flush=True)
     for name, err in engine.errors.items():
         print(f"[DeTSP] 任务 {name} 启动失败（已隔离）：{err}", flush=True)
 
@@ -58,7 +93,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_web:
         host, port = web_settings(env)
         server = serve(state, host, port)
-        print(f"[DeTSP] 面板：http://{host}:{port}/（无鉴权，仅本机）", flush=True)
+        print(f"[DeTSP] 面板：http://{host}:{port}/?token={state.api_token}"
+              f"（仅本机，POST 需 token，勿外传此地址）", flush=True)
 
     mode_note = "paper" if args.paper else (
         "DRY_RUN（只决策不下单）" if app_config.dry_run else "live")

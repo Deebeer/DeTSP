@@ -1,6 +1,12 @@
-"""网页面板测试：本地起服务打真实 HTTP 接口（不联网外呼）。"""
+"""网页面板测试：本地起服务打真实 HTTP 接口（不联网外呼）。
+
+H2/M4 后：POST 必须带 X-API-Token；启停任务经引擎命令队列执行，
+fixture 起一个泵线程模拟引擎主循环（循环 process_commands）。
+"""
 
 import json
+import threading
+import time
 import urllib.request
 
 import pytest
@@ -18,8 +24,10 @@ GRID_YAML = {"tasks": [{
                "out_of_range_action": "close"}}]}
 
 
-def _req(base, path, method="GET"):
+def _req(base, path, method="GET", token=None):
     req = urllib.request.Request(base + path, method=method)
+    if token:
+        req.add_header("X-API-Token", token)
     with urllib.request.urlopen(req, timeout=5) as r:
         body = r.read().decode("utf-8")
         return r.status, body
@@ -36,14 +44,26 @@ def panel():
                        task_cfgs={"grid-btc": GRID_YAML["tasks"][0]})
     server = serve(state, "127.0.0.1", 0)
     base = f"http://127.0.0.1:{server.server_address[1]}"
+    # 命令泵：模拟引擎主循环串行执行面板命令（M4）
+    stop_flag = threading.Event()
+
+    def _pump():
+        while not stop_flag.is_set():
+            engine.process_commands()
+            time.sleep(0.01)
+
+    pump = threading.Thread(target=_pump, daemon=True)
+    pump.start()
     yield base, state, ledger
+    stop_flag.set()
     server.shutdown()
 
 
 def test_index_page(panel):
-    base, _, _ = panel
+    base, state, _ = panel
     status, body = _req(base, "/")
-    assert status == 200 and "DeTSP" in body and "没有任何登录鉴权" in body
+    assert status == 200 and "DeTSP" in body and "不等于登录鉴权" in body
+    assert state.api_token and state.api_token in body  # token 已注入页面
 
 
 def test_overview(panel):
@@ -59,30 +79,32 @@ def test_overview(panel):
 
 
 def test_tasks_start_stop(panel):
-    base, _, _ = panel
+    base, state, _ = panel
     _, body = _req(base, "/api/tasks")
     tasks = json.loads(body)["tasks"]
     assert tasks[0]["name"] == "grid-btc" and tasks[0]["status"] == "running"
     assert tasks[0]["params"]["params"]["grid_count"] == 10
 
-    _, body = _req(base, "/api/tasks/grid-btc/stop", "POST")
+    _, body = _req(base, "/api/tasks/grid-btc/stop", "POST",
+                   token=state.api_token)
     assert json.loads(body)["ok"] is True
     _, body = _req(base, "/api/tasks")
     assert json.loads(body)["tasks"][0]["status"] == "stopped"
 
-    _, body = _req(base, "/api/tasks/grid-btc/start", "POST")
+    _, body = _req(base, "/api/tasks/grid-btc/start", "POST",
+                   token=state.api_token)
     assert json.loads(body)["ok"] is True
     _, body = _req(base, "/api/tasks")
     assert json.loads(body)["tasks"][0]["status"] == "running"
 
 
 def test_killswitch(panel):
-    base, _, _ = panel
-    _req(base, "/api/killswitch", "POST")
+    base, state, _ = panel
+    _req(base, "/api/killswitch", "POST", token=state.api_token)
     _, body = _req(base, "/api/overview")
     ks = json.loads(body)["killswitch"]
     assert ks["halted"] is True and "手动" in ks["reason"]
-    _req(base, "/api/killswitch/reset", "POST")
+    _req(base, "/api/killswitch/reset", "POST", token=state.api_token)
     _, body = _req(base, "/api/overview")
     assert json.loads(body)["killswitch"]["halted"] is False
 

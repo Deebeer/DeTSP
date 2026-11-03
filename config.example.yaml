@@ -1,5 +1,14 @@
 # DeTSP 策略与风控参数示例：复制为 config.yaml 后修改。
 # 加载时严格校验，未知键会直接报错（见 core/config.py）。
+#
+# ⚠ 安全约定（M7）：下面的 tasks 示例默认全部注释——它们只是结构
+# 说明，里面的区间/中枢等数字是占位符，**不是可照抄的实盘参数**：
+# - 网格区间必须按当下行情与波动自己设定；
+# - 溢价套利的 midline_bps（中枢）必须先用自带盘口录制器采样、
+#   再用 tools 分析实测得出，猜测值会直接亏钱；
+# - 启用任何任务前先 paper 跑通、再过实盘预检。
+# caps 是三层名义金额上限（USD），<=0 或不写 = 不限；强烈建议
+# 实盘时至少设置 global_usd 与各策略上限（H1）。
 
 engine:
   cycle_seconds: 20
@@ -8,6 +17,11 @@ risk:
   min_corridor_pct: 3.0     # 开仓门槛：估算强平距离低于此值不开仓
   close_corridor_pct: 1.5   # 平仓线：任一腿强平距离低于此值双腿同平
   max_consecutive_errors: 3
+
+caps:
+  global_usd: 0             # 全局总名义上限（USD），0=不限
+  venues: {}                # 如 { arcus: 5000 }
+  strategies: {}            # 键为任务名，如 { grid-btc-arcus: 3000 }
 
 venues:
   arcus:       { mode: paper }
@@ -19,37 +33,40 @@ venues:
   aster:       { mode: paper }
 
 # 任务列表：引擎按此组装策略（strategy 三选一，params 见各策略参数类）。
-# 同一 (场所, 账户, 币种) 只能被一个任务占用，冲突的任务会被拒绝启动。
-tasks:
-  - name: grid-btc-arcus
-    strategy: grid
-    venue: arcus
-    symbol: BTC
-    params:
-      lower: 55000
-      upper: 65000
-      grid_count: 10
-      qty_per_grid: 0.01
-      mode: neutral
-      out_of_range_action: close
-  - name: hedge-arcus-lighter
-    strategy: rotation_hedge
-    params:
-      symbol: ETH
-      venue_a: arcus
-      venue_b: lighter
-      notional_usd: 200
-      hold_seconds: 3600
-      leverage_a: 5
-      leverage_b: 5
-  - name: arb-sndk
-    strategy: premium_arb
-    params:
-      symbol: SNDK
-      base_venue: entropy
-      hedge_venue: lighter_rh
-      midline_bps: 5
-      upper_bps: 30
-      lower_bps: 30
-      max_position_usd: 1000
-      max_order_notional_usd: 500
+# 任务名（name）必填且唯一，它是归属与账本的标识（H4）。
+# 同一 (场所, 币种) 只能被一个任务占用，重复配置在加载时直接报错。
+# 启用示例：去掉对应行首的 "# "，并把占位符换成自己实测/设定的值。
+tasks: []
+#  - name: <任务名，如 grid-btc-arcus>
+#    strategy: grid
+#    venue: <venue_id>
+#    symbol: <币种>
+#    params:
+#      lower: <区间下限，占位符>
+#      upper: <区间上限，占位符>
+#      grid_count: <格数>
+#      qty_per_grid: <每格数量>
+#      mode: neutral
+#      out_of_range_action: close
+#      takeover_position: false   # 启动发现已有持仓时是否接管（S3）
+#  - name: <任务名，如 hedge-arcus-lighter>
+#    strategy: rotation_hedge
+#    params:
+#      symbol: <币种>
+#      venue_a: <venue_id>
+#      venue_b: <venue_id>
+#      notional_usd: <单边金额>
+#      hold_seconds: <持有时长>
+#      leverage_a: <杠杆，与账户实际设置一致>
+#      leverage_b: <杠杆，与账户实际设置一致>
+#  - name: <任务名，如 arb-xxx>
+#    strategy: premium_arb
+#    params:
+#      symbol: <币种>
+#      base_venue: <venue_id>
+#      hedge_venue: <venue_id>
+#      midline_bps: <实测中枢，占位符——必须用录制+分析工具实测>
+#      upper_bps: <上方入场带>
+#      lower_bps: <下方入场带>
+#      max_position_usd: <仓位上限>
+#      max_order_notional_usd: <单笔上限>

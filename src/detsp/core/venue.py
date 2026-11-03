@@ -33,6 +33,8 @@ class Market:
     min_qty: float             # 最小下单量（币）
     min_notional: float = 0.0  # 最小名义金额
     max_leverage: float = 1.0
+    maint_margin_rate: float | None = None  # 维持保证金率（交易所给得出时填，
+    # 如 Arcus 的 maintenanceMarginFraction；None=未知，风控用保守默认）
 
 
 @dataclass
@@ -76,6 +78,9 @@ class Position:
     entry_price: float = 0.0
     leverage: float = 1.0
     liq_price: float | None = None  # 交易所给出的强平价（可得时）
+    leverage_known: bool = True     # leverage 是否来自交易所真实数据；
+    # False（如 Lighter/Arcus 持仓接口不给杠杆）且 liq_price 又缺失时，
+    # 强平距离视为「不可评估」，风控不许按 leverage=1 的乐观估算放行（M5）
 
     @property
     def notional(self) -> float:
@@ -87,6 +92,9 @@ class FundingInfo:
     symbol: str
     rate: float                # 当期资金费率（多头支付为正的约定）
     next_ts: float = 0.0
+    interval_seconds: float = 3600.0  # 结算周期（秒）：HL/Arcus=3600、
+    # Lighter/Aster=28800。跨场所比较费率前必须统一换算（H3），
+    # 直接比原始 rate 会差出数倍量级
 
 
 class VenueAdapter(ABC):
@@ -123,8 +131,12 @@ class VenueAdapter(ABC):
     def poll_order(self, order_id: str) -> Order | None:
         """查询单个订单的最新状态（策略检测成交用）。
 
-        默认实现只查挂单列表：不在挂单中返回 None（含义由调用方结合
-        持仓对账判断）。paper 适配会覆盖为含终态订单的完整查询。
+        live 适配应覆盖为交易所的真实终态查询（HL orderStatus、
+        Aster GET order、Lighter 历史订单）；确实没有终态查询接口的
+        场所（Arcus）返回挂单中的订单、不在挂单中时返回 None，
+        调用方（网格/轮换 maker）对 None 走「挂单消失 + 持仓差」
+        对账式成交发现。paper 适配覆盖为含终态订单的完整查询。
+        默认实现只查挂单列表：不在挂单中返回 None。
         """
         for o in self.open_orders():
             if o.order_id == order_id:

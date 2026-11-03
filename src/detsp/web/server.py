@@ -4,14 +4,18 @@
 不另开进程读状态文件——状态即内存对象，不存在不一致窗口（见 DESIGN）。
 引擎调度循环跑在后台线程，本模块的 HTTP 服务跑在调用线程或独立线程。
 
-安全红线：面板**没有任何登录鉴权**。因此强制只绑回环地址
-（127.0.0.1 / localhost / ::1），非回环绑定直接拒绝启动；
-不要做端口映射，不要改绑公网——任何能打开面板的人都能下单和平仓。
+安全（H2 修复）：面板除只绑回环外，启动时生成随机 token——所有
+POST 必须带 X-API-Token 头（页面 JS 从页面内嵌值自动带上），
+Host 头必须是回环字面值（防 DNS rebinding），POST 带 Origin 时
+必须同源（防跨站 POST 操控交易）。即便如此也不要做端口映射、
+不要改绑公网——token 只防「本机浏览器被恶意网页借道」这一类攻击，
+不等于登录鉴权。
 """
 
 from __future__ import annotations
 
 import json
+import secrets as _secrets
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, time as dtime
@@ -33,7 +37,7 @@ def web_settings(env: dict) -> tuple[str, int]:
     port = int(env.get("WEB_PORT") or env.get("PORT") or DEFAULT_PORT)
     if host not in _LOOPBACK:
         raise ValueError(
-            f"面板无鉴权，禁止绑非回环地址：{host}（只允许 127.0.0.1）")
+            f"面板只绑回环且 POST 需 token，禁止绑非回环地址：{host}（只允许 127.0.0.1）")
     return host, port
 
 
@@ -47,6 +51,7 @@ class PanelState:
     app_config: object = None
     task_cfgs: dict = field(default_factory=dict)   # 任务名 -> 原始 task dict
     stopped_by_user: set = field(default_factory=set)
+    api_token: str = ""   # H2：serve() 时生成；POST 必须带此 token
 
     # ----- 任务视图 -----
     def _task_status(self, task) -> str:
@@ -79,8 +84,14 @@ class PanelState:
                 })
         return out
 
-    # ----- 启停 -----
+    # ----- 启停（M4：经引擎命令队列串行执行，不在 HTTP 线程下单）-----
     def stop_task(self, name: str) -> dict:
+        try:
+            return self.engine.run_command(lambda: self._do_stop_task(name))
+        except TimeoutError:
+            return {"ok": False, "error": "引擎主循环繁忙，停止命令超时"}
+
+    def _do_stop_task(self, name: str) -> dict:
         for t in self.engine.tasks:
             if t.name == name:
                 t.disabled = True
@@ -99,6 +110,12 @@ class PanelState:
         return {"ok": False, "error": f"任务不存在：{name}"}
 
     def start_task(self, name: str) -> dict:
+        try:
+            return self.engine.run_command(lambda: self._do_start_task(name))
+        except TimeoutError:
+            return {"ok": False, "error": "引擎主循环繁忙，启动命令超时"}
+
+    def _do_start_task(self, name: str) -> dict:
         cfg = self.task_cfgs.get(name)
         if cfg is None or self.engine.executor is None or self.app_config is None:
             return {"ok": False, "error": f"任务不存在或引擎未就绪：{name}"}
@@ -107,6 +124,8 @@ class PanelState:
                                   self.app_config.risk)
         except Exception as e:
             return {"ok": False, "error": f"启动失败：{e}"}
+        for note in getattr(new_task.runtime, "recovery_notes", []) or []:
+            self.engine.events.append(f"[{name}] {note}")
         for i, t in enumerate(self.engine.tasks):
             if t.name == name:
                 self.engine.tasks[i] = new_task
@@ -152,7 +171,19 @@ class PanelState:
             "today": stats,
             "unrealized_pnl": round(upnl, 4),
             "venues": venues_out,
+            # S3：启动恢复对账等事件（最近 20 条，面板可见）
+            "events": list(self.engine.events[-20:]),
         }
+
+
+def _host_is_loopback(host_header: str | None) -> bool:
+    """Host 头必须是回环字面值（可带端口）：防 DNS rebinding（H2）。"""
+    if not host_header:
+        return False
+    h = host_header.strip().lower()
+    if h.startswith("["):
+        return h.startswith("[::1]")
+    return h.split(":")[0] in ("127.0.0.1", "localhost")
 
 
 def make_handler(state: PanelState):
@@ -168,10 +199,36 @@ def make_handler(state: PanelState):
             self.end_headers()
             self.wfile.write(body)
 
+        def _check_host(self) -> bool:
+            if _host_is_loopback(self.headers.get("Host")):
+                return True
+            self._json({"error": "Host 头不被接受"}, 403)
+            return False
+
+        def _check_post_auth(self) -> bool:
+            """POST 安全校验（H2）：token 必带；Origin 存在时必须同源。"""
+            token = self.headers.get("X-API-Token") or ""
+            if not state.api_token or not _secrets.compare_digest(
+                    token, state.api_token):
+                self._json({"error": "缺少或错误的 X-API-Token"}, 403)
+                return False
+            origin = self.headers.get("Origin")
+            if origin:
+                from urllib.parse import urlparse as _up
+                if _up(origin).netloc.lower() != \
+                        (self.headers.get("Host") or "").lower():
+                    self._json({"error": "Origin 与 Host 不同源"}, 403)
+                    return False
+            return True
+
         def do_GET(self):
+            if not self._check_host():
+                return
             u = urlparse(self.path)
             if u.path == "/":
-                body = PAGE_HTML.encode("utf-8")
+                # token 注入页面：页面 JS 读取后自动带在 POST 头里
+                html = PAGE_HTML.replace("__TOKEN__", state.api_token)
+                body = html.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -189,6 +246,10 @@ def make_handler(state: PanelState):
                 self._json({"error": "not found"}, 404)
 
         def do_POST(self):
+            if not self._check_host():
+                return
+            if not self._check_post_auth():
+                return
             u = urlparse(self.path)
             parts = [unquote(p) for p in u.path.split("/") if p]
             if parts == ["api", "killswitch"]:
@@ -210,9 +271,16 @@ def make_handler(state: PanelState):
 
 def serve(state: PanelState, host: str = DEFAULT_HOST,
           port: int = DEFAULT_PORT) -> ThreadingHTTPServer:
-    """创建并启动面板服务（独立线程），返回 server 对象。"""
+    """创建并启动面板服务（独立线程），返回 server 对象。
+
+    启动时生成随机 token（H2）：调用方应把带 token 的地址打印到
+    启动日志；页面本身会从内嵌值自动带 token，地址栏 token 只是
+    方便用户确认打开的是本进程面板。
+    """
     if host not in _LOOPBACK:
-        raise ValueError(f"面板无鉴权，禁止绑非回环地址：{host}")
+        raise ValueError(f"面板只绑回环且 POST 需 token，禁止绑非回环地址：{host}")
+    if not state.api_token:
+        state.api_token = _secrets.token_urlsafe(24)
     server = ThreadingHTTPServer((host, port), make_handler(state))
     th = threading.Thread(target=server.serve_forever, daemon=True,
                           name="detsp-web")

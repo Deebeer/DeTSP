@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 import httpx
 
+from ..core.execution import unknown_outcome_guard
 from ..core.venue import (
     Book,
     FundingInfo,
@@ -207,7 +208,9 @@ class ArcusVenue(SkeletonVenue):
                        qty_step=float(m["arcus_step_size"]),
                        min_qty=m["arcus_min_order_size"],
                        min_notional=m["arcus_min_notional"],
-                       max_leverage=float(m["max_leverage"]))
+                       max_leverage=float(m["max_leverage"]),
+                       # 维持保证金率来自 markets 的 maintenanceMarginFraction
+                       maint_margin_rate=m["arcus_mmf"])
                 for m in self._load_markets().values()]
 
     def book(self, symbol: str) -> Book:
@@ -234,7 +237,9 @@ class ArcusVenue(SkeletonVenue):
             if rate is None:
                 rate = _f(raw.get("fundingRate")) or 0.0
             # Arcus 资金费每小时结算，rate 本身就是每小时费率
-            return FundingInfo(symbol=symbol, rate=rate, next_ts=time.time() + 3600)
+            return FundingInfo(symbol=symbol, rate=rate,
+                               next_ts=time.time() + 3600,
+                               interval_seconds=3600)
         raise RuntimeError(f"Arcus 找不到市场 {symbol}")
 
     # ── 账户 ────────────────────────────────────────────────
@@ -292,7 +297,10 @@ class ArcusVenue(SkeletonVenue):
             out.append(Position(
                 symbol=m["asset"] if m else str(market_id), qty=size,
                 entry_price=_f(row.get("averageEntryPrice")) or 0.0,
-                liq_price=liq))
+                liq_price=liq,
+                # 持仓接口不给杠杆：liq 靠公式复算得出时可用，
+                # 复算不出（liq=None）时强平距离不可评估（M5）
+                leverage_known=False))
         return out
 
     def open_orders(self, symbol: str | None = None) -> list[Order]:
@@ -387,8 +395,11 @@ class ArcusVenue(SkeletonVenue):
             tif = "ALO" if req.post_only else "GTT"
         signed = self.build_signed_order(m, side, req.qty, price,
                                          req.reduce_only, tif)
-        status, data = self._post_signed("/v1/placeOrder", signed["body"],
-                                         signed["timestamp"], signed["signature"])
+        # S1：httpx 超时/断连统一翻译为 UnknownOutcomeError（只发一次不重试）
+        with unknown_outcome_guard():
+            status, data = self._post_signed(
+                "/v1/placeOrder", signed["body"],
+                signed["timestamp"], signed["signature"])
         receipt = ax.parse_order_response(status, data, signed["client_id"])
         ref = ax.order_ref(receipt.order_id, receipt.client_id) or ""
         if ref and not ref.startswith("cid:"):
@@ -437,9 +448,24 @@ class ArcusVenue(SkeletonVenue):
             body = {"kind": "orderId", "orderId": plain_id,
                     "address": self._address, "marketId": market_id,
                     "accountIndex": int(self._account_index), "timestamp": ts}
-        status, _data = self._post_signed("/v1/cancelOrder", body, ts,
-                                          ax.sign_hex(key, payload))
+        status, _data = None, None
+        with unknown_outcome_guard():
+            status, _data = self._post_signed(
+                "/v1/cancelOrder", body, ts, ax.sign_hex(key, payload))
         return status in (200, 202)
+
+    def poll_order(self, order_id: str) -> Order | None:
+        """S2：Arcus 在 Parallax 参考实现里没有单订单终态查询接口
+        （只有 /v1/openOrders 按市场列 OPEN 单），故这里只能返回
+        挂单中的订单；不在挂单中返回 None，成交发现由策略层走
+        「挂单消失 + 持仓差」对账式口径（见 grid/rotation 的实现），
+        不臆造不存在的终态接口。"""
+        if self._paper is not None:
+            return self._delegate().poll_order(order_id)
+        for o in self.open_orders():
+            if o.order_id == str(order_id):
+                return o
+        return None
 
     def set_leverage(self, symbol: str, leverage: int) -> bool:
         """设置某市场杠杆为全仓（旧式签名）。接口外附加能力，供预检/策略用。"""

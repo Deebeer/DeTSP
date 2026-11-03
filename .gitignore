@@ -3,6 +3,12 @@
 *.key
 *.pem
 secrets/
+*private*
+*secret*
+keys*.json
+*api_key*
+lighter*.txt
+*.keystore
 
 # 运行数据
 data/

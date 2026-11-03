@@ -30,12 +30,14 @@ from __future__ import annotations
 
 import hashlib
 import hmac as hmac_mod
+import math
 import time
 from typing import Callable
 from urllib.parse import urlencode
 
 import httpx
 
+from ..core.execution import unknown_outcome_guard
 from ..core.venue import (
     Book,
     FundingInfo,
@@ -100,6 +102,8 @@ class AsterVenue(SkeletonVenue):
         self._http = http
         # 可注入（测试用）：(method, path, query_string, headers) -> (status, json)
         self._transport = transport
+        self._oid_symbol: dict[str, str] = {}  # order_id → 基础符号（查单/撤单用）
+        self._markets_cache: list[Market] | None = None
 
     # ── 请求层 ──────────────────────────────────────────────
     def _get_http(self) -> httpx.Client:
@@ -139,6 +143,8 @@ class AsterVenue(SkeletonVenue):
     def markets(self) -> list[Market]:
         if self._paper is not None:
             return super().markets()
+        if self._markets_cache is not None:
+            return self._markets_cache
         data = self._request("GET", "/fapi/v1/exchangeInfo")
         out: list[Market] = []
         for s in data.get("symbols") or []:
@@ -156,6 +162,7 @@ class AsterVenue(SkeletonVenue):
                 min_notional=float(notional_f.get("notional") or 0),
                 max_leverage=0.0))  # 未核实：exchangeInfo 不含最大杠杆；
             # 官方 leverageBracket 需签名且口径未在本批核对，先记 0=未知
+        self._markets_cache = out
         return out
 
     def book(self, symbol: str) -> Book:
@@ -171,10 +178,12 @@ class AsterVenue(SkeletonVenue):
             return super().funding(symbol)
         data = self._request("GET", "/fapi/v1/premiumIndex",
                              {"symbol": to_pair(symbol)})
-        # lastFundingRate 是上一期已结算费率（官方无当期预测字段）
+        # lastFundingRate 是上一期已结算费率（官方无当期预测字段）；
+        # Aster 结算周期 8 小时（H3 口径标注）
         return FundingInfo(symbol=symbol,
                            rate=float(data.get("lastFundingRate") or 0),
-                           next_ts=float(data.get("nextFundingTime") or 0) / 1000)
+                           next_ts=float(data.get("nextFundingTime") or 0) / 1000,
+                           interval_seconds=28800)
 
     def balance(self) -> dict:
         if self._paper is not None:
@@ -209,7 +218,10 @@ class AsterVenue(SkeletonVenue):
             return super().open_orders(symbol)
         params = {"symbol": to_pair(symbol)} if symbol else {}
         rows = self._request("GET", "/fapi/v1/openOrders", params, signed=True)
-        return [self._to_order(o) for o in rows or []]
+        out = [self._to_order(o) for o in rows or []]
+        for o in out:
+            self._oid_symbol[o.order_id] = o.symbol
+        return out
 
     @staticmethod
     def _to_order(o: dict) -> Order:
@@ -223,40 +235,88 @@ class AsterVenue(SkeletonVenue):
             status=STATUS_MAP.get(str(o.get("status") or ""), "open"))
 
     # ── 交易接口 ────────────────────────────────────────────
+    def _market_for(self, symbol: str) -> Market | None:
+        for m in self.markets():
+            if m.symbol == symbol:
+                return m
+        return None
+
     def place_order(self, req: OrderRequest) -> Order:
         if self._paper is not None:
             return super().place_order(req)
+        # H5：按市场精度对齐后再发单（数量向下、价格按方向就近 tick）
+        mkt = self._market_for(req.symbol)
+        qty = req.qty
+        price = req.price
+        if mkt is not None:
+            if mkt.qty_step > 0:
+                qty = _floor_step(qty, mkt.qty_step)
+            if price is not None and mkt.price_step > 0:
+                price = _align_price(price, mkt.price_step, req.side)
+        if qty <= 0:
+            raise ValueError(f"aster 数量 {req.qty} 对齐精度后为 0")
         params: dict = {
             "symbol": to_pair(req.symbol),
             "side": "BUY" if req.side is Side.BUY else "SELL",
-            "quantity": _fmt_qty(req.qty),
+            "quantity": _fmt_qty(qty),
         }
-        if req.price is None:
+        if price is None:
             params["type"] = "MARKET"
         else:
             params["type"] = "LIMIT"
-            params["price"] = _fmt_qty(req.price)
+            params["price"] = _fmt_qty(price)
             # 接口层映射：post_only → GTX（只做 maker）；其余限价 → GTC 长挂
             params["timeInForce"] = "GTX" if req.post_only else "GTC"
         if req.reduce_only:
             params["reduceOnly"] = "true"
-        data = self._request("POST", "/fapi/v1/order", params, signed=True)
+        # S1：httpx 超时/断连统一翻译为 UnknownOutcomeError
+        with unknown_outcome_guard():
+            data = self._request("POST", "/fapi/v1/order", params, signed=True)
+        order = self._to_order(data)
+        if order.order_id:
+            self._oid_symbol[order.order_id] = req.symbol
+        return order
+
+    def poll_order(self, order_id: str) -> Order | None:
+        """S2：GET /fapi/v1/order 查真实终态（需 symbol：用下单/挂单时
+        记录的映射，映射缺失时退回挂单列表口径）。"""
+        if self._paper is not None:
+            return self._delegate().poll_order(order_id)
+        symbol = self._oid_symbol.get(str(order_id))
+        if symbol is None:
+            for o in self.open_orders():
+                if o.order_id == str(order_id):
+                    return o
+            return None
+        try:
+            data = self._request("GET", "/fapi/v1/order",
+                                 {"symbol": to_pair(symbol),
+                                  "orderId": int(order_id)}, signed=True)
+        except RuntimeError:
+            return None
         return self._to_order(data)
 
     def cancel_order(self, order_id: str) -> bool:
         if self._paper is not None:
             return super().cancel_order(order_id)
-        # DELETE /fapi/v1/order 必须带 symbol：先从挂单列表反查
-        for o in self.open_orders():
-            if o.order_id == str(order_id):
-                try:
-                    self._request("DELETE", "/fapi/v1/order",
-                                  {"symbol": to_pair(o.symbol),
-                                   "orderId": int(order_id)}, signed=True)
-                    return True
-                except RuntimeError:
-                    return False
-        return False
+        # DELETE /fapi/v1/order 必须带 symbol：优先用记录的映射，
+        # 没有再从挂单列表反查
+        symbol = self._oid_symbol.get(str(order_id))
+        if symbol is None:
+            for o in self.open_orders():
+                if o.order_id == str(order_id):
+                    symbol = o.symbol
+                    break
+        if symbol is None:
+            return False
+        try:
+            with unknown_outcome_guard():
+                self._request("DELETE", "/fapi/v1/order",
+                              {"symbol": to_pair(symbol),
+                               "orderId": int(order_id)}, signed=True)
+            return True
+        except RuntimeError:
+            return False
 
     def cancel_all(self, symbol: str) -> int:
         if self._paper is not None:
@@ -270,3 +330,17 @@ class AsterVenue(SkeletonVenue):
 def _fmt_qty(v: float) -> str:
     """数量/价格格式化：去掉浮点尾巴，避免 0.30000000000000004 这种串。"""
     return f"{v:.10f}".rstrip("0").rstrip(".") or "0"
+
+
+def _floor_step(v: float, step: float) -> float:
+    """数量向下对齐到 step 的整数倍（H5）。"""
+    return math.floor(v / step + 1e-9) * step
+
+
+def _align_price(price: float, step: float, side: Side) -> float:
+    """价格按方向就近到 tick（H5）：买单向下、卖单向上，
+    保证对齐后不比原价更激进（不会意外穿价）。"""
+    units = price / step
+    if side is Side.BUY:
+        return math.floor(units + 1e-9) * step
+    return math.ceil(units - 1e-9) * step

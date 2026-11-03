@@ -25,11 +25,15 @@ class SkeletonVenue(VenueAdapter):
     source: str = ""  # 移植来源说明（子类填写）
 
     def __init__(self, mode: str = "paper", account: str = "default",
-                 prices: dict[str, float] | None = None) -> None:
+                 prices: dict[str, float] | None = None,
+                 quote_provider=None, walk: bool = False,
+                 seed: int | None = None) -> None:
         self.mode = mode
         self.account = account
         self._paper = PaperVenue(venue_id=self.venue_id, account=account,
-                                 prices=prices) if mode == "paper" else None
+                                 prices=prices, quote_provider=quote_provider,
+                                 walk=walk, seed=seed) \
+            if mode == "paper" else None
 
     def _live(self):
         raise NotImplementedError(f"{self.venue_id} {SOURCE_NOTE}：{self.source}")
