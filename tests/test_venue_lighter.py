@@ -168,3 +168,46 @@ def test_place_rejected_raises(venue):
     venue._signer = BadSigner()
     with pytest.raises(RuntimeError, match="被拒"):
         venue.place_order(OrderRequest("BTC", Side.BUY, 0.1, price=59000.0))
+
+
+# ── 与 perp-dex-tools 实盘实现对照补齐（本批） ──────────────────
+
+def test_base_amount_truncates_not_rounds(venue):
+    """数量换整数单位用截断（pdt 的 int() 口径）：0.100009 ×10^5
+    =10000.9 → 10000，永不超过请求量（四舍五入会得到 10001）。"""
+    venue.place_order(OrderRequest("BTC", Side.BUY, 0.100009, price=59000.0))
+    assert venue._signer.orders[-1]["base_amount"] == 10000
+
+
+def test_norm_order_status():
+    from detsp.venues.lighter import _norm_order_status as norm
+
+    assert norm("open", 0.0, 0.1) == "open"
+    assert norm(None, 0.04, 0.1) == "open"
+    assert norm("partially_filled", 0.04, 0.1) == "open"  # 仍在挂单中
+    assert norm("filled", 0.1, 0.1) == "filled"
+    assert norm(None, 0.1, 0.1) == "filled"               # 按量推断
+    assert norm("canceled", 0.0, 0.1) == "canceled"
+
+
+def test_open_orders_maps_status_field():
+    rows = {"orders": [
+        {"order_index": 778, "client_order_index": 4243, "market_index": 1,
+         "is_ask": True, "initial_base_amount": "0.2",
+         "filled_base_amount": "0.2", "price": "61000", "status": "filled"}]}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/orderBooks":
+            return httpx.Response(200, json=ORDER_BOOKS)
+        if request.url.path == "/api/v1/accountActiveOrders":
+            return httpx.Response(200, json=rows)
+        return httpx.Response(404, json={})
+
+    http = httpx.Client(base_url="https://example.invalid",
+                        transport=httpx.MockTransport(handler))
+    v = LighterVenue(deployment="mainnet", mode="live",
+                     secrets={"LIGHTER_ACCOUNT_INDEX": "7",
+                              "LIGHTER_API_KEY_INDEX": "4"},
+                     http=http, signer=FakeSigner())
+    os_ = v.open_orders()
+    assert os_[0].status == "filled" and os_[0].side is Side.SELL

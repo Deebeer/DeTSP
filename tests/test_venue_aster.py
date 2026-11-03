@@ -168,3 +168,39 @@ def test_missing_keys_raise(venue):
     v = AsterVenue(mode="live", transport=FakeTransport())
     with pytest.raises(RuntimeError, match="ASTER_API_KEY"):
         v.balance()
+
+
+# ── 与 perp-dex-tools 实盘实现对照补齐（本批） ──────────────────
+
+class MarketFillTransport:
+    """市价单回执：price=0、真实成交价在 avgPrice、带 reduceOnly。"""
+
+    def __call__(self, method, path, query, headers):
+        if path == "/fapi/v1/exchangeInfo":
+            return 200, EXCHANGE_INFO
+        if path == "/fapi/v1/order" and method == "POST":
+            return 200, {"orderId": 99, "symbol": "BTCUSDT", "side": "SELL",
+                         "type": "MARKET", "origQty": "0.05",
+                         "executedQty": "0.05", "price": "0",
+                         "avgPrice": "60123.5", "status": "FILLED",
+                         "reduceOnly": True}
+        raise AssertionError(f"{method} {path}")
+
+
+def test_market_order_price_from_avg_price():
+    """市价单 price 字段恒 0：成交价必须取 avgPrice（pdt 实盘口径），
+    且回执的 reduceOnly 要回读到 Order 上。"""
+    v = AsterVenue(mode="live", api_key=API_KEY, secret_key=SECRET,
+                   transport=MarketFillTransport())
+    o = v.place_order(OrderRequest("BTC", Side.SELL, 0.05, reduce_only=True))
+    assert o.status == "filled"
+    assert o.price == 60123.5
+    assert o.reduce_only is True
+    assert o.filled_qty == 0.05
+
+
+def test_limit_order_price_not_polluted_by_avg_price():
+    """限价单未成交（avgPrice 缺失/为 0）时仍回读挂单价。"""
+    row = {**OPEN_ORDERS[0], "avgPrice": "0"}
+    order = AsterVenue._to_order(row)
+    assert order.price == 59000.0 and order.status == "open"

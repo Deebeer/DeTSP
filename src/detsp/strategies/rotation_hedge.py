@@ -2,6 +2,9 @@
 
 移植自 Parallax Hedge（MIT）：双腿反向等量、定时轮换、
 按资金费选向、强平距离风控、孤腿抢救。
+可选参数 max_position_qty 的「逐步建仓到上限」语义源自
+perp-dex-tools（非商业许可，个人自用，见 NOTICE）的 hedge
+--max-position，按本策略的双腿口径重组。
 已接统一执行层（core.execution.Executor），归属 owner = 任务名（H4）。
 审计修复（2026-11-03）：资金费统一换算每小时口径再选向（H3）；
 强平距离改用 Executor 公共口径带 mmr、不可评估按危险处理（H7/M5）；
@@ -39,12 +42,22 @@ class RotationParams:
     leverage_a: float = 1.0
     leverage_b: float = 1.0
     maker_wait_seconds: float = 120.0   # maker 挂单最长等待，超时撤单
+    max_position_qty: float = 0.0       # 逐步建仓上限（币，两腿绝对值）：
+    # 0=禁用（原行为：一轮开满 notional 后持有到期轮换）；>0 时首轮
+    # 开仓后在 open 阶段按 accumulate_interval_seconds 间隔逐档同向
+    # 加仓（每档仍为 notional_usd 口径），两腿达到该数量后停止加仓、
+    # 转入正常持有→到期平仓循环。语义源自 perp-dex-tools 的 hedge
+    # --max-position（主所 maker 逐笔建仓到上限），此处按 DeTSP 的
+    # 双腿 taker 口径重组（maker 首轮之后的加仓档统一走 taker）
+    accumulate_interval_seconds: float = 60.0  # 逐步建仓的加仓间隔
 
     def __post_init__(self) -> None:
         if self.venue_a == self.venue_b:
             raise ValueError("对冲两腿不能是同一场所")
         if self.notional_usd <= 0:
             raise ValueError("notional_usd 必须大于 0")
+        if self.max_position_qty < 0:
+            raise ValueError("max_position_qty 不能为负（0=禁用）")
 
 
 def choose_direction(funding_a: float, funding_b: float) -> tuple[str, str]:
@@ -80,6 +93,18 @@ def draw_notional(p: RotationParams, rng: random.Random | None = None) -> float:
 
 def should_rotate(opened_at: float, now: float, hold_seconds: float) -> bool:
     return now - opened_at >= hold_seconds
+
+
+def accumulation_step_qty(current_qty: float, step_qty: float,
+                          max_position_qty: float) -> float:
+    """逐步建仓的单步数量（纯函数）：不超过 max_position_qty 的
+    剩余额度；max<=0（禁用）时原样返回 step_qty；已达上限返回 0。"""
+    if max_position_qty <= 0:
+        return step_qty
+    remaining = max_position_qty - abs(current_qty)
+    if remaining <= 0:
+        return 0.0
+    return min(step_qty, remaining)
 
 
 def in_cooldown(closed_at: float, now: float, cooldown_seconds: float) -> bool:
@@ -131,6 +156,8 @@ class RotationHedgeStrategy:
         self._maker_recorded = 0.0   # 下单时 Executor 已记账的量
         self._maker_pos_before = 0.0  # S2：挂单前该腿持仓（对账基线）
         self._maker_sign = 1.0       # maker 腿方向符号（多 +1 / 空 -1）
+        self._round_qty = 0.0        # 本轮单档数量（逐步建仓的步长）
+        self._last_add_at = -1e18    # 最近一次加仓时间（逐步建仓间隔）
         self.last_error: str = ""
         self.recovery_notes: list[str] = []  # S3 启动对账事件
 
@@ -267,6 +294,9 @@ class RotationHedgeStrategy:
         qty = notional / long_mid
         if qty <= 0:
             return
+        if p.max_position_qty > 0:
+            qty = min(qty, p.max_position_qty)  # 首轮也不超过建仓上限
+        self._round_qty = qty
 
         maker_leg = ""
         if p.arcus_maker:
@@ -347,11 +377,13 @@ class RotationHedgeStrategy:
         self._maker_recorded = 0.0
         self._post_open(now)
 
-    def _post_open(self, now: float) -> None:
+    def _post_open(self, now: float, reset_timer: bool = True) -> None:
         """开仓后复核：用真实持仓重算强平距离，不合格立即双平。
 
         H7/M5：走 Executor 公共口径（带 mmr）；任一腿不可评估
         （无强平价且杠杆未知）按不合格处理，双平。
+        reset_timer=False 用于逐步建仓的加仓档：只复核、不重置
+        本轮的 opened_at / hold_drawn（持有期从首轮开仓起算）。
         """
         corridors = []
         for leg in ("a", "b"):
@@ -371,9 +403,55 @@ class RotationHedgeStrategy:
             self._close_both(now)
             return
         self.open_corridor = worst
-        self.opened_at = now
-        self.hold_drawn = draw_hold_seconds(self.params, self.rng)
+        if reset_timer:
+            self.opened_at = now
+            self.hold_drawn = draw_hold_seconds(self.params, self.rng)
+        self._last_add_at = now
         self.phase = "open"
+
+    def _add_step(self, now: float) -> bool:
+        """逐步建仓加一档（max_position_qty>0 时）：沿现有持仓方向
+        双腿 taker 同量加仓，单档量经 accumulation_step_qty 截断到
+        上限剩余额度。返回 True 表示本 tick 已动作。
+        方向由真实持仓符号决定（多腿为正、空腿为负），不再按资金费
+        重新选向——建仓中途翻向会破坏对冲结构。"""
+        p = self.params
+        legs = self._legs_qty()
+        qa, qb = legs["a"], legs["b"]
+        if qa == 0 or qb == 0 or qa * qb > 0:
+            return False  # 无仓/单腿/同向：交给安全检查处理
+        long_leg = "a" if qa > 0 else "b"
+        short_leg = "b" if long_leg == "a" else "a"
+        cur = min(abs(qa), abs(qb))
+        ex = self.executor
+        long_mid = ex.venue(self._venue_id(long_leg)).book(p.symbol).mid
+        step_base = self._round_qty if self._round_qty > 0 else \
+            draw_notional(p) / long_mid
+        step = accumulation_step_qty(cur, step_base, p.max_position_qty)
+        if step <= 1e-12:
+            return False
+        book_a = ex.venue(p.venue_a).book(p.symbol)
+        book_b = ex.venue(p.venue_b).book(p.symbol)
+        if not basis_ok(book_a.mid, book_b.mid, self.max_basis_pct):
+            return True  # 价差闸门不过：本 tick 不加仓（已决策）
+        worst_est = min(self._est_corridor("a"), self._est_corridor("b"))
+        if worst_est < self.min_corridor_pct:
+            return True  # 强平距离估算不足：不加仓
+        for leg in (long_leg, short_leg):
+            side = Side.BUY if leg == long_leg else Side.SELL
+            req = OrderRequest(symbol=p.symbol, side=side, qty=step,
+                               price=None)
+            res = ex.place(self.owner, self._venue_id(leg), req,
+                           intent="open", corridor_pct=worst_est)
+            if res.status in ("rejected", "unknown"):
+                break
+        legs_now = self._legs_qty()
+        if detect_single_leg(legs_now):
+            # 加仓只成一腿：按真实持仓双平，不留裸腿
+            self._close_both(now)
+            return True
+        self._post_open(now, reset_timer=False)
+        return True
 
     def _maker_final_filled(self) -> float | None:
         """maker 单的最终成交量：优先 poll 终态；poll 不可得时用
@@ -500,6 +578,12 @@ class RotationHedgeStrategy:
                 return
             if should_rotate(self.opened_at, now, self.hold_drawn):
                 self._close_both(now)
+                return
+            # 逐步建仓：未达 max_position_qty 且间隔已到 → 加一档
+            if self.params.max_position_qty > 0 and \
+                    now - self._last_add_at >= \
+                    self.params.accumulate_interval_seconds:
+                self._add_step(now)
             return
 
         if self.phase == "cooldown" and in_cooldown(

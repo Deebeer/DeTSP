@@ -33,7 +33,7 @@ _YAML_RISK_KEYS = {"min_corridor_pct", "close_corridor_pct", "max_consecutive_er
 _YAML_CAPS_KEYS = {"global_usd", "venues", "strategies"}
 _TASK_KEYS = {"name", "strategy", "venue", "symbol", "venue_a", "venue_b",
               "base_venue", "hedge_venue", "params"}
-_TASK_STRATEGIES = ("grid", "rotation_hedge", "premium_arb")
+_TASK_STRATEGIES = ("grid", "rotation_hedge", "premium_arb", "volume_loop")
 
 
 class ConfigError(ValueError):
@@ -201,6 +201,8 @@ def build_config(env: dict[str, str] | None = None, yaml_data: dict | None = Non
         used: set[tuple[str, str]] = set()
         strat = t["strategy"]
         if strat == "grid":
+            used.add((_tf("venue"), _tf("symbol")))
+        elif strat == "volume_loop":
             used.add((_tf("venue"), _tf("symbol")))
         elif strat == "rotation_hedge":
             sym = _tf("symbol")

@@ -95,6 +95,21 @@ def _int_or_none(v) -> int | None:
         return None
 
 
+def _norm_order_status(raw, filled: float, total: float) -> str:
+    """订单状态归一化：REST/SDK 的订单行带 status 字段
+    （perp-dex-tools 的 Lighter 实现直接读 order.status），
+    映射到 DeTSP 口径 open/filled/canceled；字段缺失或不认识
+    时按成交量推断（全成=filled，其余=open）。"""
+    s = str(raw or "").lower()
+    if "cancel" in s or "reject" in s or "expired" in s:
+        return "canceled"
+    if "partial" in s:
+        return "open"  # 部分成交仍在挂单中（DeTSP 口径看 filled_qty）
+    if "fill" in s or (total > 0 and filled >= total):
+        return "filled"
+    return "open"
+
+
 class LighterVenue(SkeletonVenue):
     source = "实盘基于 lighter-sdk 1.1.2（官方）；读接口移植自 Parallax/entropy-arb（MIT）"
 
@@ -296,7 +311,8 @@ class LighterVenue(SkeletonVenue):
                 order_id=str(o["order_index"]), symbol=sym,
                 side=Side.SELL if o.get("is_ask") else Side.BUY,
                 qty=total, price=float(o.get("price") or 0) or None,
-                filled_qty=filled, status="open"))
+                filled_qty=filled,
+                status=_norm_order_status(o.get("status"), filled, total)))
         return out
 
     # ── 交易接口 ────────────────────────────────────────────
@@ -325,7 +341,10 @@ class LighterVenue(SkeletonVenue):
                    else SignerClient.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME)
             expiry = SignerClient.DEFAULT_28_DAY_ORDER_EXPIRY
         m = self._market(req.symbol)
-        base = int(round(req.qty * 10 ** m["size_decimals"]))
+        # 数量向下取整到最小单位（与 perp-dex-tools 实盘实现的
+        # int() 截断口径一致）：保证实际下单量永不超过请求量；
+        # 价格仍四舍五入到 tick（限价来自盘口已对齐，市价保护价同理）
+        base = int(req.qty * 10 ** m["size_decimals"])
         px = int(round(limit_px * 10 ** m["price_decimals"]))
         if base <= 0:
             raise ValueError(f"{self.venue_id} 数量 {req.qty} 对齐精度后为 0")
@@ -415,7 +434,10 @@ class LighterVenue(SkeletonVenue):
 
         for o in self._active_orders_raw():
             if _match(o):
-                return self._row_to_order(o, "open")
+                total = float(o.get("initial_base_amount") or 0)
+                filled = float(o.get("filled_base_amount") or 0)
+                return self._row_to_order(
+                    o, _norm_order_status(o.get("status"), filled, total))
         try:
             rows = self._inactive_orders_raw()
         except Exception:  # noqa: BLE001 — 历史接口不可用 → 对账式兜底

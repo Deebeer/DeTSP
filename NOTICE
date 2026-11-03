@@ -1,6 +1,7 @@
 # NOTICE（署名与来源说明）
 
-DeTSP 借鉴/移植了以下开源项目（均为 MIT 许可，保留其署名）：
+DeTSP 借鉴/移植了以下开源项目（前三家为 MIT 许可；perp-dex-tools
+为非商业许可，本项目个人自用、非商业，依其许可使用，见文末条目）：
 
 - Parallax Hedge — https://github.com/ZAIJIN88/Arcus-Entropy-Lighter-
   Copyright (c) 2026 Parallax Hedge contributors（MIT）
@@ -14,6 +15,22 @@ DeTSP 借鉴/移植了以下开源项目（均为 MIT 许可，保留其署名�
   Copyright (c) 2026 yourQuantGuy（MIT）
   借鉴：Hyperliquid 家族与 Lighter 主网适配、溢价套利引擎、盘口录制/分析。
 
+- perp-dex-tools — https://github.com/your-quantguy/perp-dex-tools
+  Copyright (c) 2024 Binance Scalping Bot / yourQuantGuy
+  许可：Non-Commercial License（非商业许可，全文见
+  LICENSES/perp-dex-tools.txt）。本项目为**个人自用、非商业用途**，
+  依其许可使用以下部分（按 DeTSP 架构重组改写，非整文件复制）：
+  - strategies/volume_loop.py「单所刷量」策略的全部语义
+    （源自 trading_bot.py：maker 开仓 + 止盈平仓、max_orders 上限、
+    wait 分档、grid_step 间距、stop_price / pause_price）；
+  - strategies/rotation_hedge.py 的可选参数 max_position_qty
+    「逐步建仓到上限」语义（源自 hedge/ 的 --max-position）；
+  - venues/aster.py、venues/lighter.py 与其实盘实现的对照校准
+    （Aster 市价单 avgPrice 成交价、Lighter 数量截断与订单状态
+    字段口径）。
+  ⚠ 若将来转为任何商业用途，必须先取得作者单独授权或移除上述
+  部分；分发本项目时须保留本条与 LICENSES/perp-dex-tools.txt。
+
 第二批各 venue 的实现来源明细：
 
 - venues/hl.py：基于 Hyperliquid 官方 SDK（hyperliquid-python-sdk），
@@ -24,11 +41,8 @@ DeTSP 借鉴/移植了以下开源项目（均为 MIT 许可，保留其署名�
   arcus.py（签名/精度/强平价/回执解析）与 exchanges.py、execution.py
   的 REST 读接口与签名下单流程。
 - venues/aster.py：依据 Aster 官方 API 文档（Futures V1 Legacy，
-  HMAC-SHA256）自写，未使用任何第三方项目的代码。
-
-未使用代码的项目：
-
-- perp-dex-tools — https://github.com/your-quantguy/perp-dex-tools
-  该项目为非商业许可（Non-Commercial License）。DeTSP 仅参考其交易所
-  适配接口的设计思想，未复制、改编其任何代码；Aster 适配为依据官方
-  文档自行编写。
+  HMAC-SHA256）自写，后与 perp-dex-tools 的实盘实现对照校准
+  （签名/端点/参数一致；avgPrice、reduceOnly 两处按其口径补齐）。
+- venues/lighter.py 的数量截断与订单状态字段口径、以及
+  strategies/volume_loop.py、rotation_hedge 的 max_position_qty：
+  源自 perp-dex-tools（非商业许可，个人自用），见上方条目。

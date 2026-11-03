@@ -1,6 +1,7 @@
-"""Aster 适配（实盘）：本项目依据 Aster 官方文档自写。
-
-未使用 perp-dex-tools 的任何代码（其为非商业许可）。
+"""Aster 适配（实盘）：本项目依据 Aster 官方文档自写，本批已逐项
+与 perp-dex-tools（your-quantguy，非商业许可，个人自用，见 NOTICE）
+exchanges/aster.py 的实盘实现对照校准（签名串构造、端点与参数名
+一致；市价单成交价取 avgPrice、reduceOnly 回读两处按其口径补齐）。
 
 依据：Aster 官方 API 文档（asterdex/api-docs 与 docs.futures 的
 Futures API (Legacy) V1 文档，2026-11 查阅）：
@@ -228,11 +229,19 @@ class AsterVenue(SkeletonVenue):
         orig = float(o.get("origQty") or 0)
         executed = float(o.get("executedQty") or 0)
         price = float(o.get("price") or 0)
+        if price == 0:
+            # 市价单的 price 字段恒为 0，真实成交价在 avgPrice
+            # （perp-dex-tools 实盘实现同口径）；限价单未成交时
+            # avgPrice 为 0，不影响挂单价回读
+            avg = float(o.get("avgPrice") or 0)
+            if avg > 0:
+                price = avg
         return Order(
             order_id=str(o.get("orderId")), symbol=to_base(o.get("symbol") or ""),
             side=Side.BUY if o.get("side") == "BUY" else Side.SELL,
             qty=orig, price=price or None, filled_qty=executed,
-            status=STATUS_MAP.get(str(o.get("status") or ""), "open"))
+            status=STATUS_MAP.get(str(o.get("status") or ""), "open"),
+            reduce_only=str(o.get("reduceOnly") or "").lower() == "true")
 
     # ── 交易接口 ────────────────────────────────────────────
     def _market_for(self, symbol: str) -> Market | None:

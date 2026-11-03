@@ -164,7 +164,7 @@ class Executor:
         """对账：以场所真实持仓为准（下单结果未知/定期核对时用）。"""
         return self.position(venue_id, symbol)
 
-    # ----- 强平距离公共函数（H7/M5：三策略共用同一套口径）-----
+    # ----- 强平距离公共函数（H7/M5：各策略共用同一套口径）-----
     def market_mmr(self, venue_id: str, symbol: str) -> float:
         """该市场的维持保证金率：交易所给得出就用，未知用保守默认。"""
         for m in self.venues[venue_id].markets():

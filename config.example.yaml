@@ -32,7 +32,7 @@ venues:
   tradexyz:    { mode: paper }
   aster:       { mode: paper }
 
-# 任务列表：引擎按此组装策略（strategy 三选一，params 见各策略参数类）。
+# 任务列表：引擎按此组装策略（strategy 四选一，params 见各策略参数类）。
 # 任务名（name）必填且唯一，它是归属与账本的标识（H4）。
 # 同一 (场所, 币种) 只能被一个任务占用，重复配置在加载时直接报错。
 # 启用示例：去掉对应行首的 "# "，并把占位符换成自己实测/设定的值。
@@ -59,6 +59,24 @@ tasks: []
 #      hold_seconds: <持有时长>
 #      leverage_a: <杠杆，与账户实际设置一致>
 #      leverage_b: <杠杆，与账户实际设置一致>
+#      max_position_qty: 0        # 可选：>0 时逐步建仓到该数量（币）后转平仓循环，0=禁用
+#      accumulate_interval_seconds: 60   # 逐步建仓的加仓间隔
+#  - name: <任务名，如 vol-btc-lighter>
+#    strategy: volume_loop
+#    venue: <venue_id>
+#    symbol: <币种>
+#    params:
+#      qty: <每笔开仓数量>
+#      take_profit_pct: <止盈幅度（%），唯一自动退出，必填>
+#      direction: buy             # buy / sell，固定单方向
+#      max_orders: <未平批次上限>
+#      wait_seconds: <开仓基础间隔>
+#      grid_step_pct: 0           # 止盈单最小间距（%），0=不限制
+#      stop_price: 0              # 退出价，0=禁用（触发后止盈单/持仓保留）
+#      pause_price: 0             # 暂停开仓价，0=禁用
+#      # ⚠ 单所刷量【无止损】：价格反向走远不会自动砍仓，只能靠止盈
+#      # 回归、人工处理或全局停机。live 模式必须至少配一层 caps
+#      # （见上方 caps 段），未配时该任务拒绝启动。
 #  - name: <任务名，如 arb-xxx>
 #    strategy: premium_arb
 #    params:

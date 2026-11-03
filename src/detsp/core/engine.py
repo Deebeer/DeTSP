@@ -4,7 +4,7 @@
 - 骨架模式（第一批）：run_once(ctx) 收集各策略 decide() 的 Action，
   只做归属校验，不执行。
 - 执行模式（第三批）：Engine.from_config(...) 按 config.yaml 的 tasks
-  组装 Executor 与三策略运行时，tick(now) 逐任务调度。
+  组装 Executor 与四策略运行时，tick(now) 逐任务调度。
 
 执行模式规则：
 - 安全动作优先：KillSwitch 触发时任务以 allow_open=False 运行
@@ -81,6 +81,7 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg) -> Task:
     from ..strategies.grid import GridParams, GridStrategy
     from ..strategies.premium_arb import PremiumArbStrategy, PremiumParams
     from ..strategies.rotation_hedge import RotationHedgeStrategy, RotationParams
+    from ..strategies.volume_loop import VolumeLoopStrategy, VolumeParams
 
     name = str(task_cfg.get("name") or task_cfg.get("strategy") or "task")
     stype = task_cfg.get("strategy")
@@ -107,6 +108,13 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg) -> Task:
         runtime = PremiumArbStrategy(
             PremiumParams(**_filter_params(PremiumParams, params_raw)),
             executor=executor, owner=name)
+        runtime.start()
+    elif stype == "volume_loop":
+        venue_id = params_raw.pop("venue", task_cfg.get("venue", ""))
+        symbol = params_raw.pop("symbol", task_cfg.get("symbol", "BTC"))
+        runtime = VolumeLoopStrategy(
+            VolumeParams(**_filter_params(VolumeParams, params_raw)),
+            executor=executor, venue_id=venue_id, symbol=symbol, owner=name)
         runtime.start()
     else:
         raise ValueError(f"未知策略类型：{stype}")

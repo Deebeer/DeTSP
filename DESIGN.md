@@ -1,11 +1,11 @@
 # DeTSP 设计文档
 
-统一永续合约交易系统：一套代码、一个引擎、一个账本，承载三种策略（网格、轮换对冲刷量、溢价套利），接入 7 个交易场所。
+统一永续合约交易系统：一套代码、一个引擎、一个账本，承载四种策略（网格、轮换对冲刷量、溢价套利、单所刷量），接入 7 个交易场所。本项目为个人自用、非商业用途。
 
 ## 1. 目标与边界
 
 - 本地单机运行（默认只监听 127.0.0.1），单用户，不托管、不对外提供服务。
-- 三种策略共用交易所适配、风控、账本与配置，不再各带一套签名/下单/状态。
+- 四种策略共用交易所适配、风控、账本与配置，不再各带一套签名/下单/状态。
 - 先 paper（模拟）跑通，再小额实盘；任何策略不得绕过全局风控直接下单。
 
 ## 2. 交易所清单（7 个）
@@ -23,7 +23,7 @@
 Hyperliquid 家族（本体 / Entropy / trade.xyz）共用 hl.py：同一套 Hyperliquid SDK、同一 API 钱包机制，仅 dex 参数、市场命名与保证金模式不同。
 Lighter 两个部署共用 lighter.py：仅端点、chain id、账户与密钥不同。
 
-## 3. 三种策略（strategies/）
+## 3. 四种策略（strategies/）
 
 ### 3.1 网格 grid.py
 - 等差网格：中性 / 做多 / 做空三模式；区间 [lower, upper] 切 grid_count 格。
@@ -34,6 +34,7 @@ Lighter 两个部署共用 lighter.py：仅端点、chain id、账户与密钥�
 - 在两个场所开方向相反、数量相同的永续仓位，按持有时长轮换开平，以低磨损产生交易量，顺带收取两所资金费差。
 - 开仓方向按两边净资金费比较选边；Arcus 腿可选 maker 挂单（ALO）降费。
 - 风控：开仓前强平距离门槛、两所价差闸门、开仓后复核、持仓监控双腿同平、孤腿无条件市价平。
+- 可选 max_position_qty（>0）：首轮开仓后按 accumulate_interval_seconds 间隔逐档同向加仓（每档仍为 notional 口径、末档截断），两腿达到上限后停止加仓、转入正常持有→到期平仓循环；持有期从首轮开仓起算。语义源自 perp-dex-tools 的 hedge --max-position（非商业许可，个人自用）。
 - 实现移植自 Parallax Hedge（MIT）。
 
 ### 3.3 溢价套利 premium_arb.py
@@ -41,6 +42,14 @@ Lighter 两个部署共用 lighter.py：仅端点、chain id、账户与密钥�
 - 信号带由三参数定义：midline_bps（溢价中枢，必须先录制数据实测，不假设为 0）、upper_bps、lower_bps。
 - 触发判断用可成交价（bid/ask）且扣除双边 taker 手续费；溢价回归时反向平仓。
 - 附盘口录制（1 分钟 CSV）与分析工具思路，移植自 entropy-arb（MIT）。
+
+### 3.4 单所刷量 volume_loop.py
+- 单场所、单方向（buy/sell 固定）：现价附近挂 maker 开仓单（买贴 ask−1 tick / 卖贴 bid+1 tick），成交后按 take_profit_pct 挂 reduce-only 止盈平仓单。
+- 未平批次（未成交止盈单）达 max_orders 上限停开新仓；开仓间隔按未平占比分档放大（wait_seconds 的 1/4~2 倍）；grid_step_pct 约束候选止盈价与已有止盈单的最小间距。
+- stop_price 触发：撤开仓单并退出运行，止盈单与持仓保留（与原实现语义一致）；pause_price 触发只暂停开新仓。开仓单超时撤单，部分成交按最终量挂止盈；另有止盈覆盖检查按持仓均价补挂差额，防仓位裸奔。
+- ⚠ **无止损**（原始语义）：唯一的自动保护是全局强平距离监控与 caps；live 模式默认强制至少一层 caps，未配拒绝启动；最大敞口估算（max_orders × qty × 现价）超任一层 caps 同样拒绝启动。
+- 面板停止语义：撤自有全部挂单、**持仓不自动平**（stop_note 如实标注）。
+- 语义源自 perp-dex-tools（非商业许可，个人自用）的 trading_bot.py，按 DeTSP 架构重组（走 Executor/registry/risk，归属、停机、启动对账与其他策略一致）。
 
 ## 4. 统一适配接口（core/venue.py）
 
@@ -59,7 +68,7 @@ Lighter 两个部署共用 lighter.py：仅端点、chain id、账户与密钥�
 
 多策略共用同一账户是本系统最大风险，必须在引擎层硬拦截：
 
-- 每笔订单、每个持仓在登记表里打 strategy 标签（grid / rotation_hedge / premium_arb）与 (venue, account, symbol) 键。
+- 每笔订单、每个持仓在登记表里打 strategy 标签（任务名）与 (venue, account, symbol) 键。
 - 某策略要接管某 (venue, account, symbol) 前必须 claim；已被其他策略占用则抛 ConflictError，拒绝启动。
 - 撤单/平仓只能操作自己名下的订单与持仓：网格启动时的「撤销该市场全部挂单」只限自有订单；对冲的「孤腿抢救」只认自有腿，不会误平网格仓。
 - 同一 Lighter 账户下各策略必须用不同 api_key_index（nonce 隔离），登记表记录占用。
@@ -77,7 +86,7 @@ Lighter 两个部署共用 lighter.py：仅端点、chain id、账户与密钥�
 ## 7. 统一账本（core/ledger.py）
 
 - SQLite 单库（data/detsp.db），fills 表记录每笔成交：时间、场所、账户、币种、策略、方向、数量、价格、手续费、订单号。
-- 三策略盈亏、磨损（每万美元）、交易量统一从账本聚合；与交易所持仓定期对账（reconcile）。
+- 四策略盈亏、磨损（每万美元）、交易量统一从账本聚合；与交易所持仓定期对账（reconcile）。
 
 ## 8. 引擎（core/engine.py）
 
@@ -100,12 +109,12 @@ Lighter 两个部署共用 lighter.py：仅端点、chain id、账户与密钥�
 
 ## 11. 许可
 
-- 本项目 MIT（见 LICENSE）。
-- 借鉴/移植来源（均为 MIT，署名保留，见 NOTICE）：
-  - Parallax Hedge（ZAIJIN88/Arcus-Entropy-Lighter-）：Arcus、RHC Lighter 的签名、下单、风控、账本实现。
-  - WGALL-ZJ005（ZAIJIN88）：网格逻辑（Node 版逻辑移植到 Python，未复制 Node 代码）。
-  - entropy-arb（your-quantguy）：Hyperliquid 家族与 Lighter 主网适配、溢价套利引擎、盘口录制/分析。
-- perp-dex-tools（your-quantguy）为非商业许可：本项目**仅参考其适配接口设计思想，未使用其任何代码**；Aster 适配为依据官方文档自写。
+- 本项目为**个人自用、非商业用途**；主体 MIT（见 LICENSE）。
+- 借鉴/移植来源（署名保留，见 NOTICE）：
+  - Parallax Hedge（ZAIJIN88/Arcus-Entropy-Lighter-，MIT）：Arcus、RHC Lighter 的签名、下单、风控、账本实现。
+  - WGALL-ZJ005（ZAIJIN88，MIT）：网格逻辑（Node 版逻辑移植到 Python，未复制 Node 代码）。
+  - entropy-arb（your-quantguy，MIT）：Hyperliquid 家族与 Lighter 主网适配、溢价套利引擎、盘口录制/分析。
+  - perp-dex-tools（your-quantguy，**Non-Commercial License 非商业许可**，全文见 LICENSES/perp-dex-tools.txt）：单所刷量策略（volume_loop）语义、轮换对冲的 max_position_qty 逐步建仓语义、Aster/Lighter 适配的对照校准。本项目为个人自用、非商业，依其许可使用并保留署名；若转商业用途须先取得作者单独授权或移除上述部分。
 
 ## 12. 实现状态
 
@@ -113,13 +122,13 @@ Lighter 两个部署共用 lighter.py：仅端点、chain id、账户与密钥�
 |---|---|
 | core（配置/接口/登记/风控/账本/引擎骨架） | 已完成（第一批） |
 | core/execution 统一执行层 | 已完成（第三批）：claim 归属校验、KillSwitch/强平距离/三层上限、成交记账、结果未知不重发先对账、部分成交按实际量。审计修复（S1）：异常翻译统一口径（unknown_outcome_guard）+ Executor 兜底对账定性；强平距离公共函数 position_corridor/estimate_open_corridor（带 mmr，H7/M5）；cancel_unregistered 启动对账撤单（S3） |
-| core/engine 执行调度 | 已完成（第三批）：按 config.yaml 的 tasks 组装三策略，单任务异常隔离、连续错误停用并触发全局停机、安全动作优先（停机时 allow_open=False 照常撤单/平仓）。审计修复：caps 从 config 接线（H1）、state_dir 停机落盘（M3）、任务启动 S3 对账事件汇总 events、面板命令队列串行执行（M4） |
+| core/engine 执行调度 | 已完成（第三批）：按 config.yaml 的 tasks 组装四策略，单任务异常隔离、连续错误停用并触发全局停机、安全动作优先（停机时 allow_open=False 照常撤单/平仓）。审计修复：caps 从 config 接线（H1）、state_dir 停机落盘（M3）、任务启动 S3 对账事件汇总 events、面板命令队列串行执行（M4） |
 | venues/paper 通用模拟 | 已完成 |
 | venues/hl（Hyperliquid 本体 / Entropy / trade.xyz） | live 已完成（第二批）：基于官方 hyperliquid-python-sdk 0.24 的 Info/Exchange；签名/请求构造有 mock 单测，未做实盘小额验证 |
-| venues/lighter（主网 / Robinhood 链） | live 已完成（第二批）：REST 读 + lighter-sdk 1.1.2 签名下单；市价单异步结算，成交以持仓对账为准；未做实盘小额验证 |
+| venues/lighter（主网 / Robinhood 链） | live 已完成（第二批）：REST 读 + lighter-sdk 1.1.2 签名下单；市价单异步结算，成交以持仓对账为准；未做实盘小额验证。第五批对照 perp-dex-tools（SDK 1.0.4 时代实现，仅吸收不冲突的逻辑）：数量换算改截断、订单状态字段归一化 |
 | venues/arcus | live 已完成（第二批）：Ed25519 签名（含载荷字节级单测）、精度、强平价复算、REST 下单/撤单/setLeverage；未做实盘小额验证 |
-| venues/aster | live 已完成（第二批）：依据官方 V1（Legacy）文档自写，HMAC-SHA256 签名有官方示例向量对拍；未做实盘小额验证 |
-| strategies（三策略） | 执行状态机已完成（第三批，paper 端到端集成测试覆盖）：网格铺单/成交补单/区间外 close 与 recover/人工补格；轮换对冲双 taker 与 maker+对冲、到期轮换、孤腿平、开仓后复核；溢价套利双腿 taker、持续门、库存阶梯、对账与净 delta 修正。尚未做实盘小额验证。审计修复：owner=任务名（H4）、资金费每小时口径（H3）、maker 部分成交跟踪（M2）、三策略 tick 强平监控（H7）、启动恢复对账（S3） |
+| venues/aster | live 已完成（第二批）：依据官方 V1（Legacy）文档自写，HMAC-SHA256 签名有官方示例向量对拍；未做实盘小额验证。第五批按 perp-dex-tools 实盘实现对照校准：签名串/端点/参数一致，补市价单 avgPrice 成交价与 reduceOnly 回读 |
+| strategies（四策略） | 执行状态机已完成（第三批，paper 端到端集成测试覆盖）：网格铺单/成交补单/区间外 close 与 recover/人工补格；轮换对冲双 taker 与 maker+对冲、到期轮换、孤腿平、开仓后复核；溢价套利双腿 taker、持续门、库存阶梯、对账与净 delta 修正。尚未做实盘小额验证。审计修复：owner=任务名（H4）、资金费每小时口径（H3）、maker 部分成交跟踪（M2）、三策略 tick 强平监控（H7）、启动恢复对账（S3）。**第五批（perp-dex-tools 并入）**：新增第四策略单所刷量 volume_loop（maker 开仓+止盈退出、max_orders/wait 分档/grid_step/stop/pause，paper 端到端覆盖一轮往返/上限拦截/stop 退出/停机平仓）；轮换对冲加可选 max_position_qty 逐步建仓；Aster 适配按其实盘实现补 avgPrice 成交价与 reduceOnly 回读；Lighter 数量改截断、订单状态字段归一化。187 个测试全绿 |
 | venues/paper | 第三批增强：限价单挂单撮合（改价穿价成交）、poll_order 终态查询、资金费/杠杆可设。审计修复（H6）：价格驱动三级——公开行情只读（venues/quotes）→ 随机游走兜底（可设种子）→ 静态价；未知 symbol 不再 KeyError |
 | venues/dryrun（DRY_RUN 代理） | 已完成（第四批）：live 场所读实盘行情/账户、下单走本地 PaperVenue 模拟并按实盘中价同步撮合价，落实第 9 节 DRY_RUN 语义（组装见 venues/factory.py 的 dry_run 参数） |
 | web 网页面板 | 已完成（第四批）：与引擎**同进程共享对象**（Engine/venues/Ledger 同一批实例，不另开进程读状态文件），标准库 http.server，强制只绑回环地址；接口 /api/overview、/api/tasks、任务 start/stop、/api/killswitch(+reset)、/api/fills；账本连接已做线程安全（引擎线程写、面板线程读）。审计修复（H2/M4）：随机 token（POST 必带 X-API-Token）、Host 回环字面校验、POST Origin 同源校验；启停任务经引擎命令队列串行执行，不在 HTTP 线程组装/下单 |
