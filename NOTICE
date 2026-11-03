@@ -1,0 +1,22 @@
+# NOTICE（署名与来源说明）
+
+DeTSP 借鉴/移植了以下开源项目（均为 MIT 许可，保留其署名）：
+
+- Parallax Hedge — https://github.com/ZAIJIN88/Arcus-Entropy-Lighter-
+  Copyright (c) 2026 Parallax Hedge contributors（MIT）
+  借鉴：Arcus、Lighter Robinhood 链的签名/下单、风控、账本实现。
+
+- WGALL-ZJ005 — https://github.com/ZAIJIN88/WGALL-ZJ005
+  Copyright (c) 2026 WG Grid Bot contributors（MIT）
+  借鉴：网格策略逻辑（原 Node.js 实现，移植到 Python，未复制 Node 代码）。
+
+- entropy-arb — https://github.com/your-quantguy/entropy-arb
+  Copyright (c) 2026 yourQuantGuy（MIT）
+  借鉴：Hyperliquid 家族与 Lighter 主网适配、溢价套利引擎、盘口录制/分析。
+
+未使用代码的项目：
+
+- perp-dex-tools — https://github.com/your-quantguy/perp-dex-tools
+  该项目为非商业许可（Non-Commercial License）。DeTSP 仅参考其交易所
+  适配接口的设计思想，未复制、改编其任何代码；Aster 适配为依据官方
+  文档自行编写。

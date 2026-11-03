@@ -1,0 +1,19 @@
+# DeTSP 策略与风控参数示例：复制为 config.yaml 后修改。
+# 加载时严格校验，未知键会直接报错（见 core/config.py）。
+
+engine:
+  cycle_seconds: 20
+
+risk:
+  min_corridor_pct: 3.0     # 开仓门槛：估算强平距离低于此值不开仓
+  close_corridor_pct: 1.5   # 平仓线：任一腿强平距离低于此值双腿同平
+  max_consecutive_errors: 3
+
+venues:
+  arcus:       { mode: paper }
+  lighter:     { mode: paper }
+  lighter_rh:  { mode: paper }
+  hyperliquid: { mode: paper }
+  entropy:     { mode: paper }
+  tradexyz:    { mode: paper }
+  aster:       { mode: paper }

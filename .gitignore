@@ -1,0 +1,18 @@
+# 密钥与本地状态，绝不提交
+.env
+*.key
+*.pem
+secrets/
+
+# 运行数据
+data/
+logs/
+*.db
+.state.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
