@@ -14,9 +14,9 @@
 engine:
   cycle_seconds: 20
 
-# 面板「数据」页的观察列表（币种）；不写时用默认
+# 面板各策略页机会区的观察列表（币种）；不写时用默认
 # BTC / ETH / SOL / HYPE / AAPL / SNDK。注意 Entropy、trade.xyz
-# 只有股票类标的，加密币在那两所会显示无数据，属正常。
+# 只有股票类标的，加密币在那两所会显示「未上市」，属正常。
 # watchlist: [BTC, ETH, SOL, HYPE, AAPL, SNDK]
 
 risk:
@@ -54,7 +54,7 @@ tasks: []
 #      symbol: <币种>
 #      lower_price: <区间下限，占位符>
 #      upper_price: <区间上限，占位符>
-#      grid_count: <格数>
+#      grid_count: 20             # 格数（WGALL 原仓表单默认 20）
 #      qty_per_grid: <每格数量>
 #      mode: long_short           # long / short / long_short
 #      out_of_range_action: close # close 平双腿停机 / reduce_only 只减仓回收
@@ -82,9 +82,13 @@ tasks: []
 #      execution_mode: taker      # taker 双腿立即成交 / maker 主腿
 #      # 先挂单等成交（源自 perp-dex-tools 的主腿执行方式，省手续费
 #      # 但可能不成交）；平仓永远走 taker 保证退出
-#      maker_offset_ticks: 0      # maker 挂价向盘口内侧偏移 tick 数
-#      maker_timeout_seconds: 30  # maker 开仓单超时撤单放弃本轮
+#      maker_offset_ticks: 1      # maker 挂价向盘口内侧偏移 tick 数（perp-dex-tools 原仓口径 = BBO 内侧 1 tick）
+#      maker_timeout_seconds: 5   # maker 开仓单超时撤单放弃本轮（perp-dex-tools --fill-timeout 默认 5）
 #      persist_seconds: 0.3       # 信号须持续此时长才触发（防单 tick 幻影溢价）
+#      cooldown_seconds: 0        # 两次执行的最小间隔（entropy-arb 原仓默认 0 = 不限）
+#      min_order_notional_usd: 10 # 单笔名义下限：切片低于此值跳过不下单（entropy-arb 原仓 sizing 口径）
+#      inventory_scale_bps: 10    # 库存阶梯：满仓时同向加仓的附加门槛（entropy-arb 原仓 inventory）
+#      inventory_floor_frac: 0.5  # 库存阶梯起算仓位比例（持仓超过上限的此比例后开始加门槛）
 #      reconcile_seconds: 15      # 与场所持仓对账周期
 #      settle_grace_seconds: 20   # 开仓结算宽限期：宽限内对账不削腿（防异步结算误削），建议 ≥ 对账周期
 #      max_slippage_bps: 20       # delta 修正（削腿）的滑点保护上限（bps），超限本轮不削
@@ -97,13 +101,13 @@ tasks: []
 #      venue_a: <venue_id>
 #      venue_b: <venue_id>
 #      notional_usd: <单边金额>
-#      hold_seconds: <持有时长>
-#      hold_min_seconds: 0        # 可选：与 hold_max_seconds 配合，>0 时每轮在区间内随机抽持有时长
-#      hold_max_seconds: 0
+#      hold_seconds: 3600         # 固定持有时长（区间模式关闭时用）
+#      hold_min_seconds: 3600     # 区间持有下限（Parallax 原仓表单默认最短 1 小时）；>0 且上限大于它时每轮随机抽
+#      hold_max_seconds: 7200     # 区间持有上限（Parallax 原仓表单默认最长 2 小时）
 #      notional_min_usd: 0        # 可选：与 notional_max_usd 配合，>0 时每轮在区间内随机抽金额
 #      notional_max_usd: 0
-#      cooldown_seconds: 60       # 平仓后的冷却
-#      arcus_maker: false         # 可选：任一腿是 Arcus 时该腿走 maker 挂单开仓（另一腿 taker 对冲）
+#      cooldown_seconds: 30       # 平仓后的冷却（Parallax 原仓默认 30）
+#      arcus_maker: true          # 可选：任一腿是 Arcus 时该腿走 maker 挂单开仓（Parallax 任务表单默认限价；另一腿 taker 对冲）
 #      maker_wait_seconds: 120    # maker 挂单最长等待（秒），超时撤单按最终量对冲
 #      settle_grace_seconds: 10   # 开仓结算宽限期：宽限内不做单腿定性（防异步结算误平）
 #      max_slippage_bps: 20       # 双腿不平时削腿的滑点保护上限（bps），超限本轮不削
@@ -122,7 +126,7 @@ tasks: []
 #      min_entry_edge_bps_per_hour: <入场门槛：组合每小时净收资金费优势（bps）>
 #      exit_edge_bps_per_hour: <退出门槛，必须小于入场门槛（迟滞）>
 #      exit_confirm_checks: 3     # 优势连续低于退出门槛几次才平仓
-#      check_seconds: 60          # 资金费检查周期
+#      check_seconds: 30          # 资金费检查周期（Parallax 原仓费率刷新 30 秒口径）
 #      max_hold_seconds: 0        # 最长持有（秒），0=不限
 #      reopen: true               # 平仓后优势恢复是否自动重开
 #      cooldown_seconds: 300      # 平仓后的重开冷却

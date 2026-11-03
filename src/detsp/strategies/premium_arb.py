@@ -37,12 +37,23 @@ class PremiumParams:
     hedge_taker_fee_bps: float = 0.0
     max_position_usd: float = 1000.0
     max_order_notional_usd: float = 500.0
+    min_order_notional_usd: float = 10.0  # 单笔名义下限（entropy-arb
+    # sizing.min_order_notional_usd=10）：切片低于此值跳过不下单
     take_fraction: float = 0.5  # 吃对手盘深度的比例
     persist_seconds: float = 0.3
+    cooldown_seconds: float = 0.0   # 两次执行的最小间隔（entropy-arb
+    # execution.cooldown_sec=0，默认不限制）
+    # 库存阶梯（entropy-arb inventory）：持仓超过 max_position 的
+    # floor_frac 后，同向加仓门槛线性上浮至 scale_bps（满仓时）
+    inventory_scale_bps: float = 10.0
+    inventory_floor_frac: float = 0.5   # 代码兜底口径（原仓 config.py
+    # 默认 0.5；其 example 示例文件写 0，两处不一致时从代码口径）
     # 执行模式（maker 主腿来自 perp-dex-tools 的 hedge 执行方式）
     execution_mode: str = "taker"   # taker / maker
-    maker_offset_ticks: int = 0     # maker 挂价向盘口内侧偏移的 tick 数
-    maker_timeout_seconds: float = 30.0  # maker 开仓单最长等待
+    maker_offset_ticks: int = 1     # maker 挂价向盘口内侧偏移的 tick
+    # 数（perp-dex-tools 主腿挂价 = BBO 内侧 1 tick）
+    maker_timeout_seconds: float = 5.0  # maker 开仓单最长等待
+    # （perp-dex-tools --fill-timeout 默认 5 秒）
     # 执行层字段（默认值不影响纯函数测试）
     symbol: str = "BTC"
     base_venue: str = ""        # 基准腿 venue_id（如 entropy）
@@ -84,6 +95,14 @@ class PremiumParams:
             raise ValueError("max_position_usd 必须大于 0")
         if self.max_order_notional_usd <= 0:
             raise ValueError("max_order_notional_usd 必须大于 0")
+        if self.min_order_notional_usd < 0:
+            raise ValueError("min_order_notional_usd 不能为负")
+        if self.cooldown_seconds < 0:
+            raise ValueError("cooldown_seconds 不能为负")
+        if self.inventory_scale_bps < 0:
+            raise ValueError("inventory_scale_bps 不能为负")
+        if not 0 <= self.inventory_floor_frac < 1:
+            raise ValueError("inventory_floor_frac 须在 [0, 1)")
         if self.reconcile_seconds <= 0:
             raise ValueError("reconcile_seconds 必须大于 0")
         if self.base_taker_fee_bps < 0 or self.hedge_taker_fee_bps < 0:
@@ -163,8 +182,17 @@ def slice_notional(depth_notional: float, p: PremiumParams) -> float:
 
 
 def inventory_surcharge_bps(position_usd: float, p: PremiumParams,
-                            scale_bps: float = 10.0, floor_frac: float = 0.5) -> float:
-    """库存阶梯：仓位超过上限的 floor_frac 后，额外要求的溢价线性增加。"""
+                            scale_bps: float | None = None,
+                            floor_frac: float | None = None) -> float:
+    """库存阶梯：仓位超过上限的 floor_frac 后，额外要求的溢价线性增加。
+
+    scale_bps / floor_frac 缺省取参数字段 inventory_scale_bps /
+    inventory_floor_frac（entropy-arb inventory 口径）；显式传参时
+    以传参为准（兼容旧调用）。"""
+    if scale_bps is None:
+        scale_bps = p.inventory_scale_bps
+    if floor_frac is None:
+        floor_frac = p.inventory_floor_frac
     if p.max_position_usd <= 0:
         return 0.0
     frac = abs(position_usd) / p.max_position_usd
@@ -229,6 +257,7 @@ class PremiumArbStrategy:
         self.owner = owner or self.name
         self._claimed = False
         self._armed: dict[str, float] = {}   # 信号 -> 首次出现时间
+        self._last_fire = -1e18      # 上次实际执行（下单）时刻，冷却用
         self._last_reconcile = -1e18
         self._maker: _MakerOpen | None = None
         self._settle_until = -1e18   # 结算宽限截止（G1）：此时间前
@@ -365,12 +394,15 @@ class PremiumArbStrategy:
                  corridor_pct=corr_hedge)
         self._settle_until = now + p.settle_grace_seconds
         self._last_reconcile = -1e18  # 宽限期满后下一 tick 先对账确认
+        self._last_fire = now
 
     def _fire(self, signal: str, now: float) -> None:
         p = self.params
         qty, notional = self._slice_qty()
         if qty <= 0:
             return
+        if notional < p.min_order_notional_usd:
+            return  # 切片名义低于下限（dust），跳过不下单（原仓口径）
         base_qty = self._pos_qty(p.base_venue)
         base_book = self.executor.venue(p.base_venue).book(p.symbol)
         # 仓位上限：加仓后 base 腿名义不超过 max_position_usd（减仓不受限）
@@ -408,6 +440,7 @@ class PremiumArbStrategy:
                        corridor_pct=corr_base)
         if res.status == "filled":
             filled = res.filled_qty if res.filled_qty > 0 else qty
+            self._last_fire = now
             self._hedge_after_maker(signal, filled, now)
             return
         if res.status == "unknown":
@@ -418,6 +451,7 @@ class PremiumArbStrategy:
                 order_id=f"unknown:{p.base_venue}", signal=signal,
                 side=side, qty=qty, price=price, started=now,
                 baseline=baseline, recorded=0.0, partial=0.0)
+            self._last_fire = now
             return
         if res.order is None:
             self.last_error = f"maker 开仓单下单失败：{res.detail or res.status}"
@@ -427,6 +461,7 @@ class PremiumArbStrategy:
             order_id=res.order.order_id, signal=signal, side=side,
             qty=qty, price=price, started=now, baseline=baseline,
             recorded=res.filled_qty, partial=res.filled_qty)
+        self._last_fire = now
 
     def _hedge_after_maker(self, signal: str, filled_qty: float,
                            now: float) -> None:
@@ -620,6 +655,9 @@ class PremiumArbStrategy:
         if signal is None or block_fire:
             self._armed.clear()
             return
+        if now - self._last_fire < p.cooldown_seconds:
+            return  # 执行冷却中（cooldown_seconds>0 时生效）：信号
+            # 保留计时，间隔满后若信号仍在即可触发
         since = self._armed.setdefault(signal, now)
         if now - since >= p.persist_seconds:
             self._armed.clear()

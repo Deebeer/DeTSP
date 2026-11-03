@@ -122,7 +122,9 @@ def test_rotation_gate_blocks_suspect():
     venues = _carry_venues(fb=0.06)
     ex = _executor(venues)
     p = RotationParams(symbol="BTC", venue_a="arcus", venue_b="lighter",
-                       notional_usd=300, leverage_a=5, leverage_b=5)
+                       notional_usd=300, leverage_a=5, leverage_b=5,
+                       arcus_maker=False, hold_min_seconds=0,
+                       hold_max_seconds=0)
     s = RotationHedgeStrategy(p, executor=ex, owner="rot")
     s.start(now=0)
     s.tick(now=0)
@@ -280,7 +282,9 @@ def test_rotation_grace_waits_for_async_leg():
     b.set_funding("BTC", 0.0005)
     ex = _executor({"arcus": a, "lighter": b})
     p = RotationParams(symbol="BTC", venue_a="arcus", venue_b="lighter",
-                       notional_usd=300, leverage_a=5, leverage_b=5)
+                       notional_usd=300, leverage_a=5, leverage_b=5,
+                       arcus_maker=False, hold_min_seconds=0,
+                       hold_max_seconds=0)
     s = RotationHedgeStrategy(p, executor=ex, owner="rot")
     s.start(now=0)
     s.tick(now=0)
@@ -311,7 +315,9 @@ def test_rotation_adopts_position_found_in_idle():
     venues = _carry_venues()
     ex = _executor(venues)
     p = RotationParams(symbol="BTC", venue_a="arcus", venue_b="lighter",
-                       notional_usd=300, leverage_a=5, leverage_b=5)
+                       notional_usd=300, leverage_a=5, leverage_b=5,
+                       arcus_maker=False, hold_min_seconds=0,
+                       hold_max_seconds=0)
     s = RotationHedgeStrategy(p, executor=ex, owner="rot")
     s.start(now=0)
     # 外部在两腿各开一份对冲仓（idle 阶段出现仓位）
@@ -375,7 +381,8 @@ def _grid_strategy(balance=10_000.0, price=100.0, **kw):
 
 
 def test_grid_margin_precheck_and_price_sanity():
-    s, *_ = _grid_strategy(balance=50.0)  # 单腿名义 100 > 可用 50
+    s, *_ = _grid_strategy(balance=50.0, leverage_grid=1.0,
+                           leverage_hedge=1.0)  # 单腿名义 100 > 可用 50
     with pytest.raises(RuntimeError, match="保证金预检"):
         s.start()
     s2, *_ = _grid_strategy(price=300.0)  # 现价 > upper×2=220

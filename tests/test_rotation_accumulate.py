@@ -37,6 +37,8 @@ def _build(max_position_qty):
         "name": "hedge", "strategy": "rotation_hedge",
         "params": {"symbol": "BTC", "venue_a": "arcus", "venue_b": "lighter",
                    "notional_usd": 300, "hold_seconds": 60,
+                   "hold_min_seconds": 0, "hold_max_seconds": 0,
+                   "arcus_maker": False,
                    "cooldown_seconds": 60, "leverage_a": 5, "leverage_b": 5,
                    "max_position_qty": max_position_qty,
                    "accumulate_interval_seconds": 10}}]}

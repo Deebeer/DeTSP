@@ -65,7 +65,9 @@ _FIELD_META: dict[str, dict[str, dict]] = {
         "leverage_grid": {"label": "网格腿杠杆（与账户实际一致）",
                           "group": "对冲与风控"},
         "leverage_hedge": {"label": "对冲腿杠杆（与账户实际一致）",
-                           "group": "对冲与风控"},
+                           "group": "对冲与风控",
+                           "help": "WGALL 原仓没有对冲腿，默认随网格腿"
+                                   "取 3（原仓表单默认杠杆）。"},
         "hedge_deadband_qty": {"label": "对冲死区（币，残差小于它不对冲）",
                                "group": "对冲与风控"},
         "max_unhedged_seconds": {"label": "裸露超时强制对冲（秒，0=禁用）",
@@ -90,7 +92,11 @@ _FIELD_META: dict[str, dict[str, dict]] = {
         "hold_max_seconds": {"label": "持有时长上限（秒）", "group": "轮换节奏"},
         "cooldown_seconds": {"label": "平仓后冷却（秒）", "group": "轮换节奏"},
         "notional_min_usd": {"label": "金额下限（USD，>0 时与上限间随机）",
-                             "group": "轮换节奏"},
+                             "group": "轮换节奏",
+                             "help": "与原仓差异：Parallax 默认金额留空="
+                                     "按两所可用容量开满（安全系数 0.95）；"
+                                     "DeTSP 任务必须给固定 notional_usd，"
+                                     "不做按容量开满（安全差异）。"},
         "notional_max_usd": {"label": "金额上限（USD）", "group": "轮换节奏"},
         "max_position_qty": {"label": "逐步建仓上限（币，0=禁用）",
                              "group": "轮换节奏"},
@@ -104,18 +110,34 @@ _FIELD_META: dict[str, dict[str, dict]] = {
         "settle_grace_seconds": {"label": "开仓结算宽限期（秒）",
                                  "group": "执行与风控"},
         "max_slippage_bps": {"label": "削腿滑点保护上限（bps）",
-                             "group": "执行与风控"},
+                             "group": "执行与风控",
+                             "help": "与原仓差异：Parallax 下单滑点上限"
+                                     " ORDER_SLIPPAGE_BPS=10；本字段只管"
+                                     "双腿不平时的削腿修正单，保留 20 "
+                                     "给薄盘口成交余量（安全差异）。"},
     },
     "premium_arb": {
         "base_venue": {"label": "基准腿场所", "group": "场所与标的", **_VENUE},
         "hedge_venue": {"label": "对冲腿场所", "group": "场所与标的", **_VENUE},
         "symbol": {"label": "币种（如 BTC）", "group": "场所与标的"},
-        "midline_bps": {"label": "溢价中枢（bps，必须实测）", "group": "溢价带"},
-        "upper_bps": {"label": "中枢上方入场带（bps）", "group": "溢价带"},
-        "lower_bps": {"label": "中枢下方入场带（bps）", "group": "溢价带"},
+        "midline_bps": {"label": "溢价中枢（bps，必须实测）", "group": "溢价带",
+                        "help": "原仓 example 参考值 0，但那只是示例占位："
+                                "中枢必须用录制+analyze 实测，不许照抄。"},
+        "upper_bps": {"label": "中枢上方入场带（bps）", "group": "溢价带",
+                      "help": "原仓 example 参考值 4（示例，须按实测波动调整）。"},
+        "lower_bps": {"label": "中枢下方入场带（bps）", "group": "溢价带",
+                      "help": "原仓 example 参考值 4（示例，须按实测波动调整）。"},
         "persist_seconds": {"label": "信号持续确认（秒）", "group": "溢价带"},
+        "cooldown_seconds": {"label": "两次执行最小间隔（秒，0=不限）",
+                             "group": "溢价带"},
         "max_position_usd": {"label": "最大持仓名义（USD）", "group": "风控"},
         "max_order_notional_usd": {"label": "单笔名义上限（USD）", "group": "风控"},
+        "min_order_notional_usd": {"label": "单笔名义下限（USD，低于不下单）",
+                                   "group": "风控"},
+        "inventory_scale_bps": {"label": "库存阶梯满仓附加门槛（bps）",
+                                "group": "风控"},
+        "inventory_floor_frac": {"label": "库存阶梯起算仓位比例（0~1）",
+                                 "group": "风控"},
         "take_fraction": {"label": "吃对手盘深度比例（0~1）", "group": "风控"},
         "base_taker_fee_bps": {"label": "基准腿 taker 费率（bps）", "group": "执行"},
         "hedge_taker_fee_bps": {"label": "对冲腿 taker 费率（bps）", "group": "执行"},
@@ -127,8 +149,16 @@ _FIELD_META: dict[str, dict[str, dict]] = {
         "reconcile_seconds": {"label": "持仓对账周期（秒）", "group": "执行"},
         "leverage_base": {"label": "基准腿杠杆（与账户实际一致）", "group": "风控"},
         "leverage_hedge": {"label": "对冲腿杠杆（与账户实际一致）", "group": "风控"},
-        "settle_grace_seconds": {"label": "开仓结算宽限期（秒）", "group": "执行"},
-        "max_slippage_bps": {"label": "削腿滑点保护上限（bps）", "group": "执行"},
+        "settle_grace_seconds": {"label": "开仓结算宽限期（秒）", "group": "执行",
+                                 "help": "与原仓差异：entropy-arb 的 "
+                                         "settle_timeout 是 5~10 秒的等成交"
+                                         "确认；本字段是防异步结算误削腿的"
+                                         "状态机宽限，保留 20 秒（安全差异）。"},
+        "max_slippage_bps": {"label": "削腿滑点保护上限（bps）", "group": "执行",
+                             "help": "与原仓 hedge_slippage_bps=20 一致；"
+                                     "原仓开仓腿滑点保护 leg_slippage_bps=50 "
+                                     "未单独移植（DeTSP 开仓走市价单+未知"
+                                     "结果对账口径）。"},
     },
     "funding_carry": {
         "venue_a": {"label": "场所 A", "group": "场所与标的", **_VENUE},
@@ -149,7 +179,10 @@ _FIELD_META: dict[str, dict[str, dict]] = {
         "settle_grace_seconds": {"label": "开仓结算宽限期（秒）",
                                  "group": "执行与风控"},
         "max_slippage_bps": {"label": "削腿滑点保护上限（bps）",
-                             "group": "执行与风控"},
+                             "group": "执行与风控",
+                             "help": "与原仓差异：Parallax 下单滑点上限"
+                                     "为 10 bps；本字段只管削腿修正单，"
+                                     "保留 20 给薄盘口成交余量（安全差异）。"},
     },
 }
 
@@ -177,9 +210,12 @@ PAGE_META: dict[str, dict] = {
         "opportunity": "funding",
         "name_prefix": "rotation",
         "primary": ("symbol", "notional_usd", "leverage_a", "leverage_b",
-                    "hold_seconds"),
+                    "hold_min_seconds", "hold_max_seconds"),
         "note": "方向由策略按资金费自动选（多费率低的一所、空费率"
-                "高的一所），持有时长到点自动平仓轮换。",
+                "高的一所）；持有时长默认按 Parallax 原仓表单在最短"
+                " 1 小时 ~ 最长 2 小时之间每轮随机抽取，到点自动平仓"
+                "轮换（最长 ≤ 最短或最短填 0 时关闭随机，改用高级"
+                "配置里的固定 hold_seconds）。",
     },
     "premium_arb": {
         "venue_fields": ("base_venue", "hedge_venue"),
@@ -243,6 +279,8 @@ def strategy_specs() -> list[dict]:
                 "group": meta.get("group", "参数"),
                 "primary": f.name in primary,
             }
+            if "help" in meta:
+                item["help"] = meta["help"]
             if item["type"] == "enum":
                 item["options"] = [
                     {"value": v, "label": lbl}

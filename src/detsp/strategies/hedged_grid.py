@@ -25,13 +25,15 @@ class HedgedGridParams:
     symbol: str
     lower_price: float              # 网格区间下限
     upper_price: float              # 网格区间上限
-    grid_count: int                 # 格数 >= 2
     qty_per_grid: float             # 每格数量（币）
+    grid_count: int = 20            # 格数（WGALL 表单默认 20，至少 2）
     mode: str = "long_short"        # long / short / long_short（双向）
     out_of_range_action: str = "close"  # close 平双腿停机 /
     # reduce_only 只挂只减仓回收阶梯（不加仓、不是止损）
-    leverage_grid: float = 1.0      # 网格腿杠杆（与账户实际设置一致）
-    leverage_hedge: float = 1.0     # 对冲腿杠杆（同上）
+    leverage_grid: float = 3.0      # 网格腿杠杆（与账户实际设置一致；
+    # 默认 3 对齐 WGALL 表单默认杠杆）
+    leverage_hedge: float = 3.0     # 对冲腿杠杆（WGALL 无对冲腿参数，
+    # 随网格腿取同一默认 3）
     hedge_deadband_qty: float = 0.0  # 对冲死区（币）：净仓位绝对值
     # 小于它时不对冲，避免为碎量频繁下单磨损
     max_unhedged_seconds: float = 0.0  # 裸露超时（秒）：残差超死区

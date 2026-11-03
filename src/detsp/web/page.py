@@ -1,19 +1,22 @@
 """面板单页 HTML（内嵌，无外部资源依赖）。
 
-布局（用户定版）：左侧固定边栏 + 主区域分页，不整页刷新。边栏
-自上而下：总览 / 中性网格 / 轮换对冲刷量 / 溢价套利 / 资金费套利 /
-数据 / 设置 / 账本，底部有通用「＋ 新建任务」。
+布局（用户定版）：左侧窄边栏 + 主区域分页，不整页刷新。边栏自上
+而下只有：总览 / 中性网格 / 轮换对冲刷量 / 溢价套利 / 资金费套利 /
+设置 / 账本——没有独立「数据」页，也没有通用新建任务入口：新建
+任务只能从各策略页的开仓区发起；/api/market 行情接口保留，数据
+只供各策略页的机会区使用。
 
 每个策略页同构，由通用渲染器按 /api/strategy-specs 的规格
 （含 page 元数据：两腿字段与标签、primary 常用字段、机会类型）
 生成，自上而下六个区块：交易平台（两腿场所下拉）→ 策略机会
 （/api/market 排行按所选两腿过滤，点行回填）→ 保证金（两腿可用
-余额，来自 /api/overview）→ 开仓区（primary 字段 + 大号运行按钮，
+余额，来自 /api/overview）→ 开仓区（primary 字段 + 运行按钮，
 一键按自动任务名创建并启动）→ 高级配置（其余字段，折叠）→
 本策略任务（状态/持仓/今日成交/启停改删/平仓）。
 
-总览（场所权益/持仓/挂单、今日成交、未实现盈亏、KillSwitch）、
-数据（公开行情全表与排行）、账本（最近成交）、设置（密钥只报
+视觉：极客终端风——近黑底、直角、等宽字体、高密度表格、状态用
+小圆点 + 大写英文小标签。总览（场所权益/持仓/挂单、今日成交、
+未实现盈亏、KillSwitch）、账本（最近成交）、设置（密钥只报
 已填/未填、绝不回显值）保持原有功能。任务编辑仍走弹窗（与策略
 页共用 specs 动态表单渲染/收集函数）。配置文件里的任务在面板
 只可启停，面板任务才可删改，界面上如实标注来源。
@@ -25,61 +28,71 @@ PAGE_HTML = """<!DOCTYPE html>
 <meta charset="utf-8">
 <title>DeTSP 交易面板</title>
 <style>
-body{font-family:system-ui,"Microsoft YaHei",sans-serif;margin:20px;background:#0f1420;color:#e6e9ef}
-h1{font-size:20px} h2{font-size:16px;margin-top:24px}
-table{border-collapse:collapse;width:100%;margin:8px 0}
-th,td{border:1px solid #2a3247;padding:5px 8px;font-size:13px;text-align:left;vertical-align:top}
-th{background:#1a2133}
-button{background:#2456a6;color:#fff;border:0;padding:5px 12px;border-radius:4px;cursor:pointer}
-button.stop{background:#8a3b3b} button.kill{background:#b02020;font-weight:bold}
-button.mini{padding:2px 8px;font-size:12px;margin:2px 2px 2px 0}
-.warn{background:#5a1f1f;border:1px solid #b02020;padding:8px 12px;border-radius:4px}
-.ok{color:#7dd87d}.bad{color:#ff8080}.muted{color:#9aa4b8}
-pre{background:#161c2b;padding:8px;overflow:auto;font-size:12px;margin:0}
-.tag{border:1px solid #2a3247;border-radius:3px;padding:0 5px;font-size:11px;color:#9aa4b8}
-#overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:10}
-#modal{background:#161c2b;max-width:560px;margin:40px auto;padding:16px 20px;border-radius:8px;max-height:85vh;overflow:auto}
-#modal h3{margin-top:0}
-fieldset{border:1px solid #2a3247;border-radius:4px;margin:10px 0}
-fieldset legend{color:#9aa4b8;font-size:12px;padding:0 6px}
-#modal fieldset{border:1px solid #2a3247;margin:10px 0;border-radius:4px}
-#modal legend{color:#9aa4b8;font-size:12px;padding:0 6px}
-.fld{display:block;margin:7px 0;font-size:13px}
-.fld input[type=number],.fld input[type=text],.fld select,#mName{width:100%;box-sizing:border-box;background:#0f1420;color:#e6e9ef;border:1px solid #2a3247;border-radius:4px;padding:5px 8px;margin-top:3px}
-#modal select{background:#0f1420;color:#e6e9ef;border:1px solid #2a3247;border-radius:4px;padding:5px 8px}
+:root{--bg:#0b0e11;--panel:#11161c;--line:#232a32;--txt:#c9d1d9;--mut:#8b949e;--acc:#3fb950;--red:#f85149;--yel:#d29922}
+body{font-family:ui-monospace,"JetBrains Mono",Consolas,"Courier New",monospace;margin:0;background:var(--bg);color:var(--txt);font-size:13px;line-height:1.55;font-variant-numeric:tabular-nums}
+h1{font-size:17px;color:#e6edf3} h2{font-size:15px;margin:16px 0 8px;color:#e6edf3;letter-spacing:.03em}
+h3{font-size:13px}
+a{color:var(--acc)}
+table{border-collapse:collapse;width:100%;margin:6px 0}
+th,td{border:1px solid var(--line);padding:4px 8px;font-size:12px;text-align:left;vertical-align:top}
+th{background:#0d1117;color:var(--mut);text-transform:uppercase;letter-spacing:.06em;font-size:11px;font-weight:600}
+tbody tr:nth-child(even){background:rgba(255,255,255,.016)}
+button{background:transparent;color:var(--txt);border:1px solid #30363d;padding:4px 12px;border-radius:0;cursor:pointer;font:inherit;font-size:12px}
+button:hover{background:var(--txt);color:#0b0e11;border-color:var(--txt)}
+button.stop{border-color:#5a2b2b;color:#ff9d97}
+button.stop:hover{background:var(--red);border-color:var(--red);color:#0b0e11}
+button.kill{border-color:var(--red);color:var(--red);font-weight:bold}
+button.kill:hover{background:var(--red);color:#0b0e11}
+button.mini{padding:1px 8px;font-size:11px;margin:2px 2px 2px 0}
+.warn{background:rgba(248,81,73,.07);border:1px solid #5a2b2b;padding:8px 12px}
+.ok{color:var(--acc)}.bad{color:var(--red)}.muted{color:var(--mut)}
+pre{background:#0d1117;border:1px solid var(--line);padding:8px;overflow:auto;font-size:12px;margin:0}
+.tag{border:1px solid var(--line);padding:0 5px;font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;background:#484f58;vertical-align:1px}
+.dot.g{background:var(--acc)}.dot.r{background:var(--red)}.dot.y{background:var(--yel)}
+.st{font-size:11px;letter-spacing:.06em;white-space:nowrap}
+#overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10}
+#modal{background:var(--panel);border:1px solid var(--line);max-width:560px;margin:40px auto;padding:16px 20px;max-height:85vh;overflow:auto}
+#modal h3{margin-top:0;color:#e6edf3}
+fieldset{border:1px solid var(--line);margin:10px 0;padding:8px 12px}
+fieldset legend{color:var(--mut);font-size:11px;padding:0 6px;text-transform:uppercase;letter-spacing:.05em}
+.fld{display:block;margin:7px 0;font-size:12px}
+.fld input[type=number],.fld input[type=text],.fld select,#mName{width:100%;box-sizing:border-box;background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:5px 8px;margin-top:3px;font:inherit}
+.fhelp{font-size:11px;color:var(--mut);line-height:1.5;margin-top:2px}
+#modal select{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:5px 8px;font:inherit}
 #mErr{white-space:pre-wrap}
-#layout{display:flex;gap:20px;align-items:flex-start}
-#sidebar{width:172px;flex:0 0 172px;position:sticky;top:20px;display:flex;flex-direction:column;gap:4px}
-#sidebar .sideTitle{font-size:19px;font-weight:bold;margin:2px 0 10px}
-#sidebar button{text-align:left;background:#1a2133;padding:9px 12px;font-size:14px}
-#sidebar button.on{background:#2456a6}
-#sidebar .sideSep{border-top:1px solid #2a3247;margin:8px 0 4px}
-#sidebar #newBtn{background:#2456a6;text-align:center;margin-top:10px}
-#sidebar .sideNote{font-size:11px;color:#9aa4b8;line-height:1.6;margin-top:10px}
-#main{flex:1;min-width:0}
+#layout{display:flex;align-items:stretch}
+#sidebar{width:168px;flex:0 0 168px;background:#0d1117;border-right:1px solid var(--line);padding:14px 10px;position:sticky;top:0;height:100vh;display:flex;flex-direction:column;gap:2px}
+#sidebar .sideTitle{font-size:14px;font-weight:bold;margin:0 4px 12px;color:#e6edf3;letter-spacing:.05em}
+#sidebar button{text-align:left;background:transparent;border:1px solid transparent;border-left:2px solid transparent;padding:6px 10px;font-size:13px;color:var(--mut)}
+#sidebar button:hover{background:#161b22;color:var(--txt)}
+#sidebar button.on{color:var(--acc);border-left-color:var(--acc);background:rgba(63,185,80,.06)}
+#sidebar .sideSep{border-top:1px solid var(--line);margin:8px 0}
+#sidebar .sideNote{font-size:11px;color:var(--mut);line-height:1.6;margin-top:12px}
+#main{flex:1;min-width:0;padding:4px 22px 30px}
 .page{display:none}.page.on{display:block}
-.block{border:1px solid #2a3247;border-radius:6px;padding:12px 14px;margin:14px 0}
-.block h3{margin:2px 0 10px;font-size:15px}
-label.inl{display:inline-block;margin:0 18px 4px 0;font-size:13px}
-label.inl select{display:block;margin-top:4px;background:#0f1420;color:#e6e9ef;border:1px solid #2a3247;border-radius:4px;padding:5px 8px;min-width:170px}
-.pform select,.aform select,.pform input,.aform input{background:#0f1420;color:#e6e9ef;border:1px solid #2a3247;border-radius:4px;padding:5px 8px}
+.block{border:1px solid var(--line);background:var(--panel);padding:10px 14px;margin:12px 0}
+.block h3{margin:0 0 8px;font-size:12px;color:#e6edf3;letter-spacing:.05em}
+.block h3::before{content:"[ ";color:var(--acc)}
+.block h3::after{content:" ]";color:var(--acc)}
+label.inl{display:inline-block;margin:0 18px 4px 0;font-size:12px}
+label.inl select{display:block;margin-top:4px;background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:5px 8px;min-width:170px;font:inherit}
+.pform select,.aform select,.pform input,.aform input{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:5px 8px;font:inherit}
 .pform .fld input,.pform .fld select,.aform .fld input,.aform .fld select{width:100%;box-sizing:border-box;margin-top:3px}
 .pform{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:0 16px}
-.runBtn{font-size:16px;padding:10px 30px;font-weight:bold}
+.runBtn{background:var(--acc);color:#06130a;border-color:var(--acc);font-size:14px;padding:9px 30px;font-weight:bold}
+.runBtn:hover{background:transparent;color:var(--acc);border-color:var(--acc)}
 .runErr{white-space:pre-wrap}
-.marginLine{font-size:15px;margin:4px 0}
-tr.best td{background:#1d2f1d}
-tr.selrow td{background:#1d2a47}
-td.na{color:#5c6578}
-.chip{background:#1a2133;margin:2px 4px 2px 0}
-.chip.on{background:#2456a6}
+.marginLine{font-size:14px;margin:4px 0}
+tr.best td{background:rgba(63,185,80,.09)}
+tr.selrow td{background:rgba(63,185,80,.17)}
+td.na{color:#484f58}
+.chip{background:transparent;border:1px solid #30363d;margin:2px 4px 2px 0}
+.chip.on{background:var(--acc);color:#06130a;border-color:var(--acc)}
 details{margin:6px 0}
-details summary{cursor:pointer;color:#9aa4b8;font-size:13px}
-details div{font-size:13px;padding:6px 4px;line-height:1.7}
-.sec input{background:#0f1420;color:#e6e9ef;border:1px solid #2a3247;border-radius:4px;padding:5px 8px;width:100%;box-sizing:border-box;margin-top:3px}
-.mktviews{margin:10px 0}
-.mktviews button{background:#1a2133;margin-right:6px}
-.mktviews button.on{background:#2456a6}
+details summary{cursor:pointer;color:var(--mut);font-size:12px}
+details div{font-size:12px;padding:6px 4px;line-height:1.7}
+.sec input{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:5px 8px;width:100%;box-sizing:border-box;margin-top:3px;font:inherit}
 </style>
 </head>
 <body>
@@ -92,12 +105,10 @@ details div{font-size:13px;padding:6px 4px;line-height:1.7}
 <button data-page="strat-premium_arb">溢价套利</button>
 <button data-page="strat-funding_carry">资金费套利</button>
 <div class="sideSep"></div>
-<button data-page="market">数据</button>
 <button data-page="settings">设置</button>
 <button data-page="fills">账本</button>
-<button id="newBtn">＋ 新建任务</button>
-<p class="sideNote">边栏底部「＋ 新建任务」是通用入口（弹窗选策略）；
-每个策略页里则直接在本页选标的、一键运行。</p>
+<p class="sideNote">新建任务只能从各策略页的开仓区发起；
+配置文件里的任务在本页与各策略页里启停。</p>
 </nav>
 <main id="main">
 
@@ -119,43 +130,6 @@ token 校验（防跨站借道），但<b>不等于登录鉴权</b>：不要改�
 <section class="page" id="page-strat-rotation_hedge"></section>
 <section class="page" id="page-strat-premium_arb"></section>
 <section class="page" id="page-strat-funding_carry"></section>
-
-<section class="page" id="page-market">
-<h2>数据（公开行情，不用密钥）</h2>
-<p class="muted">全所总表与机会排行；策略页里有按策略过滤好的同一份数据，
-这里看全貌。资金费已统一换算为每小时 bps；标「混口径」的组合只是
-参考——策略选向时会拒绝用不同时点口径的费率相减开仓。<br>
-数据时间：<b id="mktTime">-</b>　<button class="mini" id="mktRefresh">刷新</button>
-<span class="muted">（打开数据/策略页时每 30 秒自动刷新）</span></p>
-<div class="mktviews" id="viewBtns">
-<button data-view="spread" class="on">价差排行（溢价套利）</button>
-<button data-view="funding">资金费差排行（资金费套利 / 轮换对冲）</button>
-<button data-view="grid">网格区间（中性网格）</button>
-</div>
-<div id="view-spread" class="mktview">
-<h3>价差排行（溢价套利：在便宜的所买、贵的所卖）</h3>
-<table id="spreadTbl"><thead><tr>
-<th>币种</th><th>买入（低价所）</th><th>卖出（高价所）</th><th>价差 bps</th><th></th><th>操作</th>
-</tr></thead><tbody></tbody></table>
-</div>
-<div id="view-funding" class="mktview" style="display:none">
-<h3>资金费差排行（资金费套利 / 轮换对冲：多费率低的所、空费率高的所）</h3>
-<table id="fundTbl"><thead><tr>
-<th>币种</th><th>做多（低费率）</th><th>做空（高费率）</th><th>净费差 bps/小时</th><th>口径</th><th>操作</th>
-</tr></thead><tbody></tbody></table>
-</div>
-<div id="view-grid" class="mktview" style="display:none">
-<h3>中性网格：选币看 24 小时区间</h3>
-<p>币种 <select id="gridSym"></select>
-场所 <select id="gridVenue"><option value="hyperliquid">hyperliquid</option>
-<option value="entropy">entropy</option><option value="tradexyz">tradexyz</option></select>
-<button class="mini" id="gridGo">查看区间</button>
-<span class="muted">（K 线只有 Hyperliquid 家族有公开接口）</span></p>
-<div id="gridOut"></div>
-</div>
-<h3>全表（每币种 × 7 所：价格 / 资金费 bps·小时）</h3>
-<div id="mktMatrix"></div>
-</section>
 
 <section class="page" id="page-settings">
 <h2>设置（密钥）</h2>
@@ -179,7 +153,7 @@ token 校验（防跨站借道），但<b>不等于登录鉴权</b>：不要改�
 </div>
 
 <div id="overlay"><div id="modal">
-<h3 id="mTitle">新建任务</h3>
+<h3 id="mTitle">编辑任务</h3>
 <p class="fld">策略
 <select id="mStrategy"></select></p>
 <p class="muted" id="mBlurb"></p>
@@ -213,7 +187,7 @@ function specOf(st){return SPECS.find(s=>s.strategy===st)}
 
 // 单个字段渲染（弹窗表单与策略页共用）。symbolSelect 时币种渲染成
 // 下拉（选项由 fillSymbolSelects 按观察列表填充），否则文本框。
-function renderField(f, v, symbolSelect){
+function renderFieldRaw(f, v, symbolSelect){
 if(f.type==="bool")
 return '<label class="fld"><input type="checkbox" data-f="'+f.name+'"'+(v?" checked":"")+"> "+esc(f.label)+"</label>";
 if(f.type==="enum")
@@ -225,6 +199,12 @@ return '<label class="fld">'+esc(f.label)+(f.required?" *":"")+'<select data-f="
 const t=(f.type==="int"||f.type==="float")?"number":"text";
 const step=f.type==="int"?"1":"any";
 return '<label class="fld">'+esc(f.label)+(f.required?" *":"")+'<input type="'+t+'" step="'+step+'" data-f="'+f.name+'" value="'+(v==null?"":esc(v))+'"></label>';
+}
+
+// 带 help 的包装：字段说明（如与原仓默认的差异及原因）渲染在字段下方
+function renderField(f, v, symbolSelect){
+const html=renderFieldRaw(f, v, symbolSelect);
+return f.help?html+'<div class="fhelp">'+esc(f.help)+"</div>":html;
 }
 
 function fieldsHtml(fields, values, symbolSelect){
@@ -282,7 +262,6 @@ $("#overlay").style.display="block";
 }
 function closeModal(){$("#overlay").style.display="none"}
 
-$("#newBtn").addEventListener("click",()=>openModal(null));
 $("#mCancel").addEventListener("click",closeModal);
 $("#mStrategy").addEventListener("change",e=>buildForm(e.target.value,null));
 $("#mSave").addEventListener("click",async()=>{
@@ -323,12 +302,14 @@ alert(r.ok?r.note:(r.error||"平仓失败"));
 refresh();
 }
 }
-else if(act==="newtask"){
-let pf=null;
-try{pf=JSON.parse(b.dataset.prefill||"null")}catch(e){}
-openModal(null, pf);
-}
 });
+
+// 状态显示：小圆点 + 大写英文小标签（终端风）
+function statusHtml(st){
+const map={running:["g","RUNNING"],stopped:["","IDLE"],error:["r","ERROR"]};
+const m=map[st]||["y",String(st||"-").toUpperCase()];
+return '<span class="st"><span class="dot '+m[0]+'"></span>'+esc(m[1])+"</span>";
+}
 
 // ---------- 总览 / 任务 / 成交刷新（5 秒） ----------
 function taskPositions(name){
@@ -354,7 +335,7 @@ $("#mode").textContent="（"+(ov.dry_run?"DRY_RUN 只决策不下单":"实盘模
 const ks=ov.killswitch;
 $("#killbox").innerHTML=ks.halted
 ? '<p class="bad">⛔ 全局停机中：'+esc(ks.reason)+' <button data-act="killreset">解除停机</button></p>'
-: '<p class="ok">运行中</p><button class="kill" data-act="kill">⛔ 全局停机</button>';
+: '<p class="ok"><span class="dot g"></span>RUNNING</p><button class="kill" data-act="kill">⛔ 全局停机</button>';
 $("#tvol").textContent=fmt(ov.today.volume);
 $("#tfee").textContent=fmt(ov.today.fees,4);
 $("#tcnt").textContent=ov.today.fills;
@@ -386,7 +367,7 @@ function switchPage(name){
 CURPAGE=name;
 document.querySelectorAll("#sidebar button[data-page]").forEach(b=>b.classList.toggle("on",b.dataset.page===name));
 document.querySelectorAll(".page").forEach(p=>p.classList.toggle("on",p.id==="page-"+name));
-if(name==="market"||name.indexOf("strat-")===0){loadMarket(false)}
+if(name.indexOf("strat-")===0){loadMarket(false)}
 if(name==="settings"&&!SECLOADED){loadSecrets()}
 }
 document.querySelectorAll("#sidebar button[data-page]").forEach(b=>b.addEventListener("click",()=>switchPage(b.dataset.page)));
@@ -642,9 +623,9 @@ btns+='<button class="mini" data-act="edit" data-name="'+esc(t.name)+'">编辑</
 btns+='<button class="mini stop" data-act="del" data-name="'+esc(t.name)+'">删除</button>';
 }
 return "<tr><td>"+esc(t.name)+"</td><td>"+esc(sym)+"</td><td>"+
-(t.source==="panel"?"面板":"配置文件")+"</td><td>"+esc(t.status)+"</td><td>"+posHtml+
+(t.source==="panel"?"面板":"配置文件")+"</td><td>"+statusHtml(t.status)+"</td><td>"+posHtml+
 "</td><td>"+(tf.n?tf.n+" 笔 / $"+fmt(tf.vol):"-")+"</td><td>"+esc(t.last_error||"")+"</td><td>"+btns+"</td></tr>";
-}).join("")||'<tr><td colspan="8" class="muted">暂无该策略任务，用上方开仓区一键运行，或边栏底部「＋ 新建任务」。</td></tr>';
+}).join("")||'<tr><td colspan="8" class="muted">暂无该策略任务，用上方开仓区一键运行。</td></tr>';
 }
 
 // 一键运行：组装参数 → 自动任务名 → 创建并启动
@@ -680,65 +661,17 @@ if(cur) el.value=cur;
 });
 }
 
-// ---------- 数据页（全表与排行，保持原功能） ----------
+// ---------- 行情数据（无独立页面：只供各策略页机会区使用） ----------
 const KIND_CN={predicted:"下期预测",current:"当期",last_settled:"上期已结算",unknown:"未知"};
-function showView(v){
-document.querySelectorAll(".mktview").forEach(x=>x.style.display="none");
-$("#view-"+v).style.display="block";
-document.querySelectorAll("#viewBtns button").forEach(b=>b.classList.toggle("on",b.dataset.view===v));
-}
-document.querySelectorAll("#viewBtns button").forEach(b=>b.addEventListener("click",()=>showView(b.dataset.view)));
-function prefillBtn(strategy,params,label){
-const pf=esc(JSON.stringify({strategy:strategy,params:params}));
-return '<button class="mini" data-act="newtask" data-prefill="'+pf+'">'+(label||"用此标的新建任务")+"</button>";
-}
 async function loadMarket(force){
 try{
 const d=await (await fetch("/api/market"+(force?"?force=1":""))).json();
 MKT=d;
-$("#mktTime").textContent=new Date(d.updated_at*1000).toLocaleString();
-const firstClean=d.funding_ranking.findIndex(r=>!r.mixed);
-$("#spreadTbl tbody").innerHTML=d.spread_ranking.map((r,i)=>
-'<tr'+(i===0?' class="best"':"")+'><td>'+esc(r.symbol)+"</td><td>"+esc(r.buy_venue)+"</td><td>"+esc(r.sell_venue)+
-"</td><td>"+fmt(r.spread_bps,2)+"</td><td>"+(i===0?"当前最优":"")+"</td><td>"+
-prefillBtn("premium_arb",{base_venue:r.buy_venue,hedge_venue:r.sell_venue,symbol:r.symbol})+"</td></tr>").join("")
-|| '<tr><td colspan="6" class="muted">暂无足够数据（至少要两个所有价格）</td></tr>';
-$("#fundTbl tbody").innerHTML=d.funding_ranking.map((r,i)=>
-'<tr'+(i===firstClean?' class="best"':"")+'><td>'+esc(r.symbol)+"</td><td>"+esc(r.long_venue)+"</td><td>"+esc(r.short_venue)+
-"</td><td>"+fmt(r.edge_bps_h,3)+"</td><td>"+(r.mixed?'<span class="bad">混口径（仅参考）</span>':esc(KIND_CN[r.rate_kind]||r.rate_kind))+
-"</td><td>"+(i===firstClean?"当前最优 ":"")+
-prefillBtn("funding_carry",{venue_a:r.long_venue,venue_b:r.short_venue,symbol:r.symbol},"建资金费套利")+" "+
-prefillBtn("rotation_hedge",{venue_a:r.long_venue,venue_b:r.short_venue,symbol:r.symbol},"建轮换对冲")+"</td></tr>").join("")
-|| '<tr><td colspan="6" class="muted">暂无足够数据</td></tr>';
-const vids=["arcus","lighter","lighter_rh","hyperliquid","entropy","tradexyz","aster"];
-$("#mktMatrix").innerHTML='<table><thead><tr><th>币种</th>'+vids.map(v=>"<th>"+v+"</th>").join("")+"<th>最大价差</th><th>最优费差</th></tr></thead><tbody>"+
-d.symbols.map(s=>"<tr><td><b>"+esc(s.symbol)+"</b></td>"+vids.map(v=>{
-const c=s.venues[v];
-if(!c||c.status==="not_listed")return '<td class="na">未上市</td>';
-if(c.status==="error")return '<td class="na" title="'+esc(c.reason||"数据暂时取不到")+'">数据异常</td>';
-return "<td>"+(c.price==null?"-":fmt(c.price,c.price<10?4:2))+"<br><span class='muted'>"+
-(c.funding_bps_h==null?"费率 -":fmt(c.funding_bps_h,3)+" bps/h · "+esc(KIND_CN[c.rate_kind]||c.rate_kind||""))+"</span></td>"}).join("")+
-"<td>"+(s.best_spread?fmt(s.best_spread.spread_bps,2)+" bps<br><span class='muted'>"+esc(s.best_spread.buy_venue)+" → "+esc(s.best_spread.sell_venue)+"</span>":"-")+"</td>"+
-"<td>"+(s.best_funding?fmt(s.best_funding.edge_bps_h,3)+" bps/h<br><span class='muted'>多 "+esc(s.best_funding.long_venue)+" / 空 "+esc(s.best_funding.short_venue)+(s.best_funding.mixed?" · 混口径":"")+"</span>":"-")+"</td></tr>").join("")+
-"</tbody></table>"+(Object.keys(d.venue_errors||{}).length?'<p class="bad">暂时取不到数据的场所：'+
-Object.entries(d.venue_errors).map(e=>esc(e[0])).join("、")+"（已在表中标为「数据异常」，不影响其他场所）</p>":"");
-const gs=$("#gridSym");
-if(!gs.options.length){gs.innerHTML=d.watchlist.map(s=>'<option value="'+esc(s)+'">'+esc(s)+"</option>").join("")}
 fillSymbolSelects();
 SPECS.forEach(spec=>{applyListingGuards(spec.strategy); renderOpp(spec.strategy)});
-}catch(e){$("#mktTime").textContent="加载失败，请稍后重试"}
+}catch(e){/* 行情暂时取不到：机会区保留上次渲染，下个周期重试 */}
 }
-$("#mktRefresh").addEventListener("click",()=>loadMarket(true));
-$("#gridGo").addEventListener("click",async()=>{
-const v=$("#gridVenue").value,s=$("#gridSym").value;
-$("#gridOut").innerHTML="查询中…";
-const d=await (await fetch("/api/market/candles?venue="+encodeURIComponent(v)+"&symbol="+encodeURIComponent(s))).json();
-if(!d.ok){$("#gridOut").innerHTML='<p class="bad">'+esc(d.error||"不可用")+"</p>";return}
-$("#gridOut").innerHTML="<p>"+esc(s)+" 近 24 小时：最高 <b>"+fmt(d.high,d.high<10?4:2)+"</b>，最低 <b>"+fmt(d.low,d.low<10?4:2)+
-"</b>。建议网格区间（高低各扩 2%）：<b>"+fmt(d.suggested_lower,d.suggested_lower<10?4:2)+" ~ "+fmt(d.suggested_upper,d.suggested_upper<10?4:2)+"</b></p>"+
-prefillBtn("hedged_grid",{grid_venue:v,symbol:s,lower_price:d.suggested_lower,upper_price:d.suggested_upper});
-});
-setInterval(()=>{if(CURPAGE==="market"||CURPAGE.indexOf("strat-")===0)loadMarket(false)},30000);
+setInterval(()=>{if(CURPAGE.indexOf("strat-")===0)loadMarket(false)},30000);
 
 // ---------- 设置页（密钥） ----------
 const GUIDES={
@@ -753,7 +686,7 @@ const d=await (await fetch("/api/settings/secrets")).json();
 SECLOADED=true;
 if(d.error){$("#secGroups").innerHTML='<p class="bad">'+esc(d.error)+"</p>";return}
 $("#secGroups").innerHTML=d.groups.map(g=>
-'<fieldset class="sec" style="border:1px solid #2a3247;border-radius:4px;margin:10px 0"><legend>'+esc(g.title)+"</legend>"+
+'<fieldset class="sec"><legend>'+esc(g.title)+"</legend>"+
 (GUIDES[g.key]?'<details><summary>怎么获取？</summary><div>'+GUIDES[g.key]+"</div></details>":"")+
 g.fields.map(f=>'<label class="fld">'+esc(f.label)+
 (f.required===true?' <span class="bad">*</span>':"")+(f.required==="one_of"?' <span class="muted">(二选一必填)</span>':"")+

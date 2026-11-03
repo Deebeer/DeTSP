@@ -25,6 +25,7 @@ def rotation_yaml(maker=False):
         "name": "hedge", "strategy": "rotation_hedge",
         "params": {"symbol": "BTC", "venue_a": "arcus", "venue_b": "lighter",
                    "notional_usd": 300, "hold_seconds": 60,
+                   "hold_min_seconds": 0, "hold_max_seconds": 0,
                    "cooldown_seconds": 60, "leverage_a": 5, "leverage_b": 5,
                    "arcus_maker": maker}}]}
 

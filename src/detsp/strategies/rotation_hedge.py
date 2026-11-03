@@ -37,15 +37,17 @@ class RotationParams:
     venue_a: str
     venue_b: str
     notional_usd: float                 # 单边开仓金额
-    hold_seconds: float = 3600.0        # 固定持有时长（与区间二选一）
-    hold_min_seconds: float = 0.0       # 区间持有：>0 时启用随机抽取
-    hold_max_seconds: float = 0.0
-    cooldown_seconds: float = 60.0
+    hold_seconds: float = 3600.0        # 固定持有时长（区间模式关闭时用）
+    hold_min_seconds: float = 3600.0    # 区间持有下限：默认对齐 Parallax
+    hold_max_seconds: float = 7200.0    # 原仓表单（最短 1h / 最长 2h 随机）
+    cooldown_seconds: float = 30.0      # 平仓后冷却（Parallax TaskState 默认 30）
     notional_min_usd: float = 0.0       # 金额区间：>0 时启用随机抽取
     notional_max_usd: float = 0.0
-    arcus_maker: bool = False           # Arcus 腿走 maker 挂单
-    leverage_a: float = 1.0
-    leverage_b: float = 1.0
+    arcus_maker: bool = True            # Arcus 腿走 maker 挂单（Parallax
+    # 任务表单默认「限价」；其 .env 全局默认 false 只是未在表单选过时
+    # 的兜底，本字段是任务级口径，从表单默认）
+    leverage_a: float = 6.0             # Parallax 表单默认杠杆 6
+    leverage_b: float = 6.0
     maker_wait_seconds: float = 120.0   # maker 挂单最长等待，超时撤单
     max_position_qty: float = 0.0       # 逐步建仓上限（币，两腿绝对值）：
     # 0=禁用（原行为：一轮开满 notional 后持有到期轮换）；>0 时首轮

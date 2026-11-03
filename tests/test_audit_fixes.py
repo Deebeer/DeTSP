@@ -149,7 +149,9 @@ def test_s1_rotation_first_leg_timeout_no_duplicate():
     y = {"tasks": [{"name": "hedge", "strategy": "rotation_hedge",
                     "params": {"symbol": "BTC", "venue_a": "arcus",
                                "venue_b": "lighter", "notional_usd": 300,
-                               "hold_seconds": 60, "cooldown_seconds": 60,
+                               "hold_seconds": 60, "hold_min_seconds": 0,
+                               "hold_max_seconds": 0, "arcus_maker": False,
+                               "cooldown_seconds": 60,
                                "leverage_a": 5, "leverage_b": 5}}]}
     cfg = build_config(env={}, yaml_data=y)
     engine = Engine.from_config(cfg, {"arcus": a, "lighter": b},
@@ -370,7 +372,9 @@ def test_s3_rotation_initializes_from_existing_positions():
     y = {"tasks": [{"name": "hedge", "strategy": "rotation_hedge",
                     "params": {"symbol": "BTC", "venue_a": "arcus",
                                "venue_b": "lighter", "notional_usd": 300,
-                               "hold_seconds": 60, "cooldown_seconds": 60,
+                               "hold_seconds": 60, "hold_min_seconds": 0,
+                               "hold_max_seconds": 0, "arcus_maker": False,
+                               "cooldown_seconds": 60,
                                "leverage_a": 5, "leverage_b": 5}}]}
     cfg = build_config(env={}, yaml_data=y)
     engine = Engine.from_config(cfg, {"arcus": a, "lighter": b},
@@ -429,7 +433,9 @@ def test_h3_rotation_direction_uses_hourly_rates():
     y = {"tasks": [{"name": "hedge", "strategy": "rotation_hedge",
                     "params": {"symbol": "BTC", "venue_a": "arcus",
                                "venue_b": "lighter", "notional_usd": 300,
-                               "hold_seconds": 60, "cooldown_seconds": 60,
+                               "hold_seconds": 60, "hold_min_seconds": 0,
+                               "hold_max_seconds": 0, "arcus_maker": False,
+                               "cooldown_seconds": 60,
                                "leverage_a": 5, "leverage_b": 5}}]}
     cfg = build_config(env={}, yaml_data=y)
     engine = Engine.from_config(cfg, {"arcus": a, "lighter": b},

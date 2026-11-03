@@ -1,10 +1,13 @@
-"""左侧边栏 + 每策略一页改版测试。
+"""左侧边栏 + 每策略一页改版测试（第三轮：边栏瘦身 + 极客风）。
 
-覆盖：边栏入口与四个策略页容器存在且顺序正确；「资金费套利」
-改名一致性（specs 标题与页面文案无旧名残留，键名 funding_carry
-不变）；specs 的 page 元数据自洽（primary / venue_fields 都是
-真实字段、互不重叠、字段 primary 标记与 page.primary 列表一致）；
-/api/strategy-specs 把 page 元数据带给前端。
+覆盖：边栏入口与四个策略页容器存在且顺序正确（边栏只有总览 /
+四策略 / 设置 / 账本，无「数据」入口、无通用新建任务按钮、无
+数据页）；极客风主题关键样式（近黑底、终端绿、等宽字体、直角）；
+「资金费套利」改名一致性（specs 标题与页面文案无旧名残留，键名
+funding_carry 不变）；specs 的 page 元数据自洽（primary /
+venue_fields 都是真实字段、互不重叠、字段 primary 标记与
+page.primary 列表一致）；/api/strategy-specs 把 page 元数据带
+给前端。
 """
 
 import json
@@ -25,7 +28,7 @@ from detsp.web.server import PanelState, serve
 
 SIDEBAR_PAGES = ["overview", "strat-hedged_grid", "strat-rotation_hedge",
                  "strat-premium_arb", "strat-funding_carry",
-                 "market", "settings", "fills"]
+                 "settings", "fills"]
 
 
 # ── 边栏与策略页容器 ────────────────────────────────────────
@@ -35,10 +38,33 @@ def test_sidebar_entries_and_order():
     end = PAGE_HTML.index("</nav>")
     sidebar = PAGE_HTML[start:end]
     pos = [sidebar.index(f'data-page="{p}"') for p in SIDEBAR_PAGES]
-    assert pos == sorted(pos), "边栏顺序必须是 总览/四策略/数据/设置/账本"
+    assert pos == sorted(pos), "边栏顺序必须是 总览/四策略/设置/账本"
     for label in ("总览", "中性网格", "轮换对冲刷量", "溢价套利",
-                  "资金费套利", "数据", "设置", "账本"):
+                  "资金费套利", "设置", "账本"):
         assert label in sidebar
+
+
+def test_sidebar_slimmed_no_market_no_newtask():
+    # 第三轮瘦身：边栏没有「数据」入口、没有通用新建任务按钮，
+    # 数据页整体删除（/api/market 接口保留供策略页机会区用）
+    assert 'data-page="market"' not in PAGE_HTML
+    assert 'id="page-market"' not in PAGE_HTML
+    assert 'id="newBtn"' not in PAGE_HTML
+    assert 'id="spreadTbl"' not in PAGE_HTML
+
+
+def test_geek_theme_tokens():
+    # 极客终端风：近黑底、面板面、终端绿强调、等宽字体、直角
+    assert "#0b0e11" in PAGE_HTML
+    assert "#11161c" in PAGE_HTML
+    assert "#3fb950" in PAGE_HTML
+    assert "ui-monospace" in PAGE_HTML
+    assert "border-radius:0" in PAGE_HTML
+    # 旧蓝圆角主题不得残留
+    assert "#2456a6" not in PAGE_HTML
+    assert "border-radius:4px" not in PAGE_HTML
+    # 状态标签：圆点 + 大写英文
+    assert "RUNNING" in PAGE_HTML and "statusHtml" in PAGE_HTML
 
 
 def test_strategy_page_containers_exist():
@@ -105,7 +131,8 @@ def test_page_meta_consistency():
 def test_primary_fields_per_strategy():
     by = {s["strategy"]: set(s["page"]["primary"])
           for s in strategy_specs()}
-    assert "hold_seconds" in by["rotation_hedge"]
+    assert {"hold_min_seconds", "hold_max_seconds"} <= \
+        by["rotation_hedge"]
     assert "notional_usd" in by["rotation_hedge"]
     assert "notional_usd" in by["funding_carry"]
     assert "min_entry_edge_bps_per_hour" in by["funding_carry"]

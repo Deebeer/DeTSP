@@ -44,14 +44,16 @@ class CarryParams:
     venue_b: str
     symbol: str
     notional_usd: float                 # 单边开仓金额
-    leverage: float = 1.0               # 两腿杠杆（与账户实际一致）
+    leverage: float = 6.0               # 两腿杠杆（与账户实际一致；
+    # 默认 6 对齐 Parallax 资金费选向的表单默认杠杆）
     min_entry_edge_bps_per_hour: float = 1.0   # 入场门槛：组合净收
     # 资金费优势 ≥ 此值（bps/小时）才开仓
     exit_edge_bps_per_hour: float = 0.0        # 退出门槛（< 入场
     # 门槛，构成迟滞，防止在门槛附近反复开平）
     exit_confirm_checks: int = 3        # 优势连续低于退出门槛的
     # 检查次数达到此值才平仓（防单次抖动误平）
-    check_seconds: float = 60.0         # 资金费检查周期
+    check_seconds: float = 30.0         # 资金费检查周期（对齐
+    # Parallax 费率快照刷新 FUNDING_REFRESH_SECONDS=30）
     max_hold_seconds: float = 0.0       # 最长持有（秒），0=不限
     reopen: bool = True                 # 平仓后优势恢复是否自动重开
     cooldown_seconds: float = 300.0     # 平仓后的重开冷却
