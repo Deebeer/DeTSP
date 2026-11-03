@@ -148,7 +148,7 @@ Lighter 两个部署共用 lighter.py：仅端点、chain id、账户与密钥�
 | strategies（四策略） | **策略层推倒重写（用户定案）**：删除普通网格 grid 与单所刷量 volume_loop，新四策略全部为双腿对冲结构——中性网格（网格腿铺单/成交补单/区间外 close 与 reduce_only 回收/人工补格 + 对冲腿按净持仓调平、死区与裸露超时强制对冲、双腿强平监控、双腿总名义 caps 硬校验）；溢价套利（保留价差带/持续门/库存阶梯/对账净 delta 修正，新增 execution_mode=maker 主腿开仓：全成对冲跟上、部分成按最终量对冲、超时撤单放弃，平仓仍双腿 taker）；轮换对冲（行为等价保留：双 taker 与 maker+对冲、到期轮换、孤腿平、开仓后复核、逐步建仓）；资金费 carry（全新：资金费优势入场门槛 + 退出迟滞确认、检查周期、最长持有、冷却重开、启动对账净 delta 修正后接管）。四策略面板停止语义统一为撤自有挂单 + 平全部持仓。审查修复（2026-11-04，三批全修，见审查汇总.md 修复记录）：费率闸门与逐所口径标注、结算宽限期、市价单成交发现、削腿滑点保护、网格启动预检/skipBand/增量记账、引擎停用收尾等全部落地。214 个测试全绿。尚未做实盘小额验证 |
 | venues/paper | 第三批增强：限价单挂单撮合（改价穿价成交）、poll_order 终态查询、资金费/杠杆可设。审计修复（H6）：价格驱动三级——公开行情只读（venues/quotes）→ 随机游走兜底（可设种子）→ 静态价；未知 symbol 不再 KeyError |
 | venues/dryrun（DRY_RUN 代理） | 已完成（第四批）：live 场所读实盘行情/账户、下单走本地 PaperVenue 模拟并按实盘中价同步撮合价，落实第 9 节 DRY_RUN 语义（组装见 venues/factory.py 的 dry_run 参数） |
-| web 网页面板 | 已完成（第四批）：与引擎**同进程共享对象**（Engine/venues/Ledger 同一批实例，不另开进程读状态文件），标准库 http.server，强制只绑回环地址；接口 /api/overview、/api/tasks、任务 start/stop、/api/killswitch(+reset)、/api/fills；账本连接已做线程安全（引擎线程写、面板线程读）。审计修复（H2/M4）：随机 token（POST 必带 X-API-Token）、Host 回环字面校验、POST Origin 同源校验；启停任务经引擎命令队列串行执行，不在 HTTP 线程组装/下单 |
+| web 网页面板 | 已完成（第四批）：与引擎**同进程共享对象**（Engine/venues/Ledger 同一批实例，不另开进程读状态文件），标准库 http.server，强制只绑回环地址；接口 /api/overview、/api/tasks、任务 start/stop、/api/killswitch(+reset)、/api/fills；账本连接已做线程安全（引擎线程写、面板线程读）。审计修复（H2/M4）：随机 token（POST 必带 X-API-Token）、Host 回环字面校验、POST Origin 同源校验；启停任务经引擎命令队列串行执行，不在 HTTP 线程组装/下单。**交互化（见第 13 节）**：参数规格单一事实源（strategies/specs）驱动动态表单与校验；面板任务增删改 + 持久化（data/panel_tasks.yaml）与合并加载；总览持仓归属标注与手动平仓；场所 mode 与密钥有意不放面板 |
 | 程序入口与一键启动 | 已完成（第四批）：`python -m detsp`（--config/--env/--paper/--no-web/--db/--reset-killswitch）；一键启动.bat（纯 ASCII）+ start.ps1、start.sh，首次自动建 venv 装依赖并生成 .env/config.yaml。审计修复（M3）：live 真金模式启动前校验预检通过标记（指纹绑定 config+密钥） |
 | tools 盘口录制/溢价分析 | 已完成（第四批）：detsp.tools.recorder 每秒采样、每分钟一行 CSV（双边盘口与溢价 OHLC/均值、可成交 edge）；detsp.tools.analyze 输出溢价分布、候选带触发次数与建议 midline/upper/lower（扣费口径） |
 | core/preflight 实盘预检 | 已完成（第四批）：`python -m detsp.preflight`，逐所查凭据齐全（不打印值）、签名自检（只签不发）、时钟偏差（>30 秒失败）、行情连通、账户快照（live）、精度与最小量；paper 只跑离线项；任一失败退出码非 0。审计修复（M3）：含 live 场所且预检通过时写 data/preflight-ok.json（时间 + config 指纹），供主入口 live 启动门校验。审查修复：新增资金费专项——费率周期自检（全市场快照地板价年化反查结算周期，异常按失败处理）与费率符号抽查提示（见下方费率口径表注） |
@@ -184,3 +184,38 @@ Lighter 两个部署共用 lighter.py：仅端点、chain id、账户与密钥�
 - Lighter：accountActiveOrders 需要认证令牌（已用 signer 生成）；市价单成交确认走对账，不做同步等待。
 - Hyperliquid：markets 的 price_step 用官方价格规则允许的最细小数位近似（HL 无统一 tick 概念）。
 
+
+## 13. 面板任务与交互操作（web/）
+
+面板是可交互的操作台，不只是状态展示：
+
+- **参数规格单一事实源**（strategies/specs.py）：四个策略的 Params
+  dataclass 是字段与默认值的唯一定义，规格在其之上叠加中文说明、
+  分组与枚举/场所类型；面板表单（GET /api/strategy-specs）与参数
+  校验（validate_params，config 组装 build_task 与面板新建/编辑
+  共用）都从这份规格生成，杜绝两处口径漂移。一致性测试保证规格
+  字段与 Params 字段/默认值/必填性恒等。
+- **两类任务**：config.yaml 里的任务（来源 config）面板只能启停；
+  面板新建的任务（来源 panel）可编辑/删除。面板任务独立存
+  data/panel_tasks.yaml（原子写：临时文件 + rename），面板不回写
+  config.yaml。
+- **合并加载规则**：引擎启动先组装 config 任务，再由
+  Engine.load_panel_tasks 合并面板任务。面板任务与 config 任务
+  重名 → 跳过并在系统事件报错（面板列表里以来源 panel、状态
+  error 并存展示，可编辑/删除）；占用 (venue,symbol) 冲突、参数
+  非法、超 caps → 只跳过该条并记 errors + 事件，绝不拖垮 config
+  任务。
+- **运行时增删**：Engine.add_task_dynamic / remove_task_dynamic
+  与启动组装走同一条 build_task 路径（同一套规格校验、归属冲突、
+  caps、启动对账语义）；删除时统一释放该任务的全部归属 claim。
+  面板侧守卫：运行中不许删（先停）、有持仓不许删（先平）。
+  编辑运行中任务 = 先停（撤单+平仓）再按新参数重组；重组失败不
+  保存新参数，旧参数保留可一键启动恢复。全部面板写操作经引擎
+  命令队列串行执行，并记入系统事件（engine.events）。
+- **手动平仓**：总览持仓带归属标注。平仓走 Executor.close_position：
+  有归属按任务名义平（任务仍在运行时界面明确提示可能被任务重新
+  开仓/对账处理）；无归属是手动操作，界面明确标注「平掉该场所
+  该币种全部持仓」，平后立即释放临时 claim。
+- **安全边界（有意不做）**：场所 mode（paper/live）切换不放面板
+  （切实盘仍走改配置 + 预检门，防手滑）；.env 密钥不进面板
+  （不回显、不可编辑）。

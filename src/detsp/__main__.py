@@ -27,6 +27,7 @@ from pathlib import Path
 from .core.config import VENUE_IDS, build_config, load_env_file, load_yaml_config
 from .core.engine import Engine
 from .core.ledger import Ledger
+from .core.panel_tasks import PANEL_TASKS_NAME, load_panel_tasks
 from .core.preflight import PREFLIGHT_MARK_NAME, check_preflight_mark
 from .venues.factory import build_venues
 from .web.server import PanelState, serve, web_settings
@@ -86,8 +87,19 @@ def main(argv: list[str] | None = None) -> int:
     task_cfgs = {}
     for t in app_config.tasks:
         task_cfgs[str(t.get("name") or t.get("strategy"))] = t
+    # 面板任务（data/panel_tasks.yaml）：与 config 任务合并加载；
+    # 文件坏了只跳过面板任务并提示，不拖垮主程序
+    panel_path = state_dir / PANEL_TASKS_NAME
+    try:
+        panel_cfgs_list = load_panel_tasks(panel_path)
+    except Exception as e:  # noqa: BLE001 — 面板任务文件损坏降级处理
+        print(f"[DeTSP] 面板任务文件读取失败（已忽略）：{e}", flush=True)
+        panel_cfgs_list = []
     state = PanelState(engine=engine, venues=venues, ledger=ledger,
-                       app_config=app_config, task_cfgs=task_cfgs)
+                       app_config=app_config, task_cfgs=task_cfgs,
+                       panel_store_path=panel_path)
+    for name, err in state.attach_panel_tasks(panel_cfgs_list).items():
+        print(f"[DeTSP] 面板任务 {name} 加载失败（已隔离）：{err}", flush=True)
 
     server = None
     if not args.no_web:

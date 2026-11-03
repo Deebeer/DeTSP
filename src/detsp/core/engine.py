@@ -46,14 +46,28 @@ class Task:
     disabled: bool = False
 
 
-def _filter_params(cls, raw: dict) -> dict:
-    """只把 dataclass 认识的字段传给参数类，未知键报错（严格校验）。"""
-    import dataclasses
-    known = {f.name for f in dataclasses.fields(cls)}
-    unknown = set(raw) - known
-    if unknown:
-        raise ValueError(f"{cls.__name__} 含未知参数：{sorted(unknown)}")
-    return {k: v for k, v in raw.items() if k in known}
+def task_occupied_keys(task_cfg: dict) -> set[tuple[str, str]]:
+    """一条 task 占用的 (venue, symbol) 集合（口径与 core.config 的
+    启动冲突校验一致：双腿策略占两个场所）。字段可能写在 task
+    顶层或 params 里，两处都看（与 build_task 的合并口径一致）。"""
+    def _tf(key: str) -> str:
+        if task_cfg.get(key):
+            return str(task_cfg[key])
+        return str((task_cfg.get("params") or {}).get(key) or "")
+
+    strat = task_cfg.get("strategy")
+    sym = _tf("symbol")
+    used: set[tuple[str, str]] = set()
+    if strat == "hedged_grid":
+        used.add((_tf("grid_venue"), sym))
+        used.add((_tf("hedge_venue"), sym))
+    elif strat in ("rotation_hedge", "funding_carry"):
+        used.add((_tf("venue_a"), sym))
+        used.add((_tf("venue_b"), sym))
+    elif strat == "premium_arb":
+        used.add((_tf("base_venue"), sym))
+        used.add((_tf("hedge_venue"), sym))
+    return used
 
 
 def build_task(task_cfg: dict, executor: Executor, risk_cfg) -> Task:
@@ -67,6 +81,7 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg) -> Task:
     from ..strategies.hedged_grid import HedgedGridParams, HedgedGridStrategy
     from ..strategies.premium_arb import PremiumArbStrategy, PremiumParams
     from ..strategies.rotation_hedge import RotationHedgeStrategy, RotationParams
+    from ..strategies.specs import validate_params
 
     available = "hedged_grid / premium_arb / rotation_hedge / funding_carry"
     name = str(task_cfg.get("name") or task_cfg.get("strategy") or "task")
@@ -81,24 +96,29 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg) -> Task:
     if stype in ("grid", "volume_loop"):
         raise ValueError(
             f"策略 {stype} 已移除，可用策略：{available}")
+    # 参数校验走 strategies.specs 的单一事实源（与面板表单同一份
+    # 规格）：未知字段/缺必填/类型不符都在这里逐项报错
+    clean = validate_params(str(stype), params_raw) \
+        if stype in ("hedged_grid", "premium_arb", "rotation_hedge",
+                     "funding_carry") else None
     if stype == "hedged_grid":
         runtime = HedgedGridStrategy(
-            HedgedGridParams(**_filter_params(HedgedGridParams, params_raw)),
+            HedgedGridParams(**clean),
             executor=executor, owner=name)
         runtime.start()
     elif stype == "rotation_hedge":
         runtime = RotationHedgeStrategy(
-            RotationParams(**_filter_params(RotationParams, params_raw)),
+            RotationParams(**clean),
             executor=executor, risk_cfg=risk_cfg, owner=name)
         runtime.start()
     elif stype == "premium_arb":
         runtime = PremiumArbStrategy(
-            PremiumParams(**_filter_params(PremiumParams, params_raw)),
+            PremiumParams(**clean),
             executor=executor, owner=name)
         runtime.start()
     elif stype == "funding_carry":
         runtime = FundingCarryStrategy(
-            CarryParams(**_filter_params(CarryParams, params_raw)),
+            CarryParams(**clean),
             executor=executor, risk_cfg=risk_cfg, owner=name)
         runtime.start()
     else:
@@ -115,6 +135,11 @@ class Engine:
     executor: Executor | None = None
     tasks: list[Task] = field(default_factory=list)
     max_consecutive_errors: int = 3
+    # 组装动态任务时用的风控配置（from_config 时存入；rotation /
+    # carry 的运行时需要它，面板新建任务也走同一份）
+    risk_cfg: object = None
+    # 面板任务名集合（与 config 任务区分：只有它们能在面板删改）
+    panel_task_names: set[str] = field(default_factory=set)
     # S3：启动恢复对账等事件（面板可见）
     events: list[str] = field(default_factory=list)
     # M4：面板命令队列——HTTP 线程只投递，引擎主循环串行执行
@@ -184,7 +209,7 @@ class Engine:
                             kill_switch=kill_switch, caps=caps,
                             min_corridor_pct=app_config.risk.min_corridor_pct)
         engine = cls(registry=registry, kill_switch=kill_switch,
-                     executor=executor,
+                     executor=executor, risk_cfg=app_config.risk,
                      max_consecutive_errors=app_config.risk.max_consecutive_errors)
         if kill_switch.halted:
             engine.events.append(
@@ -200,6 +225,83 @@ class Engine:
                 tname = str(task_cfg.get("name") or task_cfg.get("strategy"))
                 engine.errors[tname] = str(e)
         return engine
+
+    # ----- 运行时动态任务（面板增删改） -----
+    def add_task_dynamic(self, task_cfg: dict) -> Task:
+        """运行时组装并加入一个新任务（面板新建/编辑重组用）。
+
+        与启动组装走同一条 build_task 路径：参数规格校验、归属
+        冲突、caps 与启动对账语义完全一致。失败抛 ValueError，
+        消息逐项说清（占用冲突/参数非法/上限超限），调用方原样
+        回给面板，不吞不改。任务名与现有任务或已失败任务重名
+        直接拒绝（先删/改名再建）。
+        """
+        if self.executor is None:
+            raise ValueError("引擎未就绪（executor 未组装）")
+        name = str(task_cfg.get("name") or "")
+        if not name:
+            raise ValueError("任务名必填")
+        if any(t.name == name for t in self.tasks) or name in self.errors:
+            raise ValueError(f"任务名已存在：{name}（重名任务请先删除或改名）")
+        task = build_task(task_cfg, self.executor, self.risk_cfg)
+        self.tasks.append(task)
+        self.panel_task_names.add(name)
+        for note in getattr(task.runtime, "recovery_notes", []) or []:
+            self.events.append(f"[{name}] {note}")
+        return task
+
+    def load_panel_tasks(self, cfgs: list[dict]) -> dict[str, str]:
+        """启动时合并加载面板任务（data/panel_tasks.yaml）。
+
+        与 config 任务同路径组装；单个面板任务失败（参数坏了、
+        与 config 任务占用冲突等）只记 errors + 系统事件并跳过，
+        绝不拖垮 config 任务。返回 {任务名: 错误} 供启动日志打印。
+        名字先登记进 panel_task_names——组装失败的面板任务也要
+        能在面板里编辑修正或删除。
+        """
+        errs: dict[str, str] = {}
+        for cfg in cfgs or []:
+            name = str(cfg.get("name") or "")
+            if not name:
+                continue
+            self.panel_task_names.add(name)
+            if any(t.name == name for t in self.tasks) or name in errs \
+                    or name in self.errors:
+                # 与 config 任务（或先加载的面板任务）重名：跳过，
+                # 不许顶掉任何在跑的任务
+                msg = f"与已有任务重名（{name}），面板任务已跳过"
+                self.errors[name] = msg
+                errs[name] = msg
+                self.events.append(f"[面板任务 {name}] 加载失败已跳过：{msg}")
+                continue
+            try:
+                task = build_task(cfg, self.executor, self.risk_cfg)
+                self.tasks.append(task)
+                for note in getattr(task.runtime, "recovery_notes", []) or []:
+                    self.events.append(f"[{name}] {note}")
+            except Exception as e:  # 合并加载隔离：只废这一个面板任务
+                self.errors[name] = str(e)
+                errs[name] = str(e)
+                self.events.append(f"[面板任务 {name}] 加载失败已跳过：{e}")
+        return errs
+
+    def remove_task_dynamic(self, name: str) -> bool:
+        """从调度列表移除任务（调用方须先停止并确认无持仓）。
+
+        同步清掉错误记录、面板任务登记与该任务的全部归属 claim
+        （停止动作未必释放 claim，如 rotation 保留 claim 以便重启
+        续管；任务既已删除，claim 必须释放，否则该 (venue,symbol)
+        会被一个不存在的任务永久占用）。返回是否曾在列表中。
+        """
+        before = len(self.tasks)
+        self.tasks = [t for t in self.tasks if t.name != name]
+        self.errors.pop(name, None)
+        self.panel_task_names.discard(name)
+        if self.executor is not None:
+            registry = self.executor.registry
+            for k in registry.keys_of(name):
+                registry.release(k, name)
+        return len(self.tasks) != before
 
     def tick(self, now: float | None = None) -> None:
         """跑一轮执行调度：面板命令队列 → 市价单成交发现 → 逐任务
