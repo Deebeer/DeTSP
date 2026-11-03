@@ -119,11 +119,17 @@ Lighter 两个部署共用 lighter.py：仅端点、chain id、账户与密钥�
 | venues/aster | live 已完成（第二批）：依据官方 V1（Legacy）文档自写，HMAC-SHA256 签名有官方示例向量对拍；未做实盘小额验证 |
 | strategies（三策略） | 执行状态机已完成（第三批，paper 端到端集成测试覆盖）：网格铺单/成交补单/区间外 close 与 recover/人工补格；轮换对冲双 taker 与 maker+对冲、到期轮换、孤腿平、开仓后复核；溢价套利双腿 taker、持续门、库存阶梯、对账与净 delta 修正。尚未做实盘小额验证 |
 | venues/paper | 第三批增强：限价单挂单撮合（改价穿价成交）、poll_order 终态查询、资金费/杠杆可设 |
+| venues/dryrun（DRY_RUN 代理） | 已完成（第四批）：live 场所读实盘行情/账户、下单走本地 PaperVenue 模拟并按实盘中价同步撮合价，落实第 9 节 DRY_RUN 语义（组装见 venues/factory.py 的 dry_run 参数） |
+| web 网页面板 | 已完成（第四批）：与引擎**同进程共享对象**（Engine/venues/Ledger 同一批实例，不另开进程读状态文件），标准库 http.server，强制只绑回环地址、无鉴权；接口 /api/overview、/api/tasks、任务 start/stop、/api/killswitch(+reset)、/api/fills；账本连接已做线程安全（引擎线程写、面板线程读） |
+| 程序入口与一键启动 | 已完成（第四批）：`python -m detsp`（--config/--env/--paper/--no-web/--db）；一键启动.bat（纯 ASCII）+ start.ps1、start.sh，首次自动建 venv 装依赖并生成 .env/config.yaml |
+| tools 盘口录制/溢价分析 | 已完成（第四批）：detsp.tools.recorder 每秒采样、每分钟一行 CSV（双边盘口与溢价 OHLC/均值、可成交 edge）；detsp.tools.analyze 输出溢价分布、候选带触发次数与建议 midline/upper/lower（扣费口径） |
+| core/preflight 实盘预检 | 已完成（第四批）：`python -m detsp.preflight`，逐所查凭据齐全（不打印值）、签名自检（只签不发）、时钟偏差（>30 秒失败）、行情连通、账户快照（live）、精度与最小量；paper 只跑离线项；任一失败退出码非 0 |
 
-第三批已知限制：
-- Book 无深度数据：溢价套利切片名义直接取 max_order_notional_usd（slice_notional 的深度参数以此代入），实盘接深度后再改。
-- 网格/轮换对冲的成交发现依赖 poll_order：paper 为完整终态查询；live 适配默认实现只查挂单列表，实盘运行时挂单消失需结合持仓对账判断（执行层对账已具备，live 轮询细节待实盘验证批）。
-- KillSwitch 语义：触发后各任务撤单并平仓停机（不只是禁止开仓）。
+**计划内功能至此全部完成。** 遗留项（均为计划外/需真实账户验证）：
+- 7 所实盘小额验证（全部 live 适配只过了 mock 单测与本地签名自检，未用真实账户下过单）。
+- Aster V3（EIP-712）迁移评估：当前实现 V1（Legacy）HMAC，官方主推 V3，V1 密钥可用性以平台政策为准。
+- Arcus 按 clientId 撤单的 HTTP body 形状核实（签名载荷已验证，body 按 orderId 版对称组装）。
+- 溢价套利深度切片：Book 接口无深度数据，切片名义暂以 max_order_notional_usd 代入 slice_notional，接深度数据后再改。
 
 已知未核实/限制：
 - Aster：官方现主推 V3（EIP-712），本项目按既定方案实现 V1 HMAC；V1 密钥可用性以平台当前政策为准。exchangeInfo 不含最大杠杆（记 0=未知）；按 clientId 撤单未实现（官方 V1 撤单按 orderId+symbol，已实现）。
