@@ -410,7 +410,8 @@ root.innerHTML=
 '<div class="block"><h3>交易平台</h3>'+
 '<label class="inl">'+esc(pg.venue_labels[0])+' <select class="vA"></select></label>'+
 '<label class="inl">'+esc(pg.venue_labels[1])+' <select class="vB"></select></label>'+
-'<span class="muted">切换场所后，下方机会表与保证金跟着刷新。</span></div>'+
+'<span class="muted">切换场所后，下方机会表与保证金跟着刷新。</span>'+
+'<p class="bad listNote"></p></div>'+
 '<div class="block"><h3>'+esc(oppTitle)+'</h3><div class="opp"><p class="muted">行情加载中…</p></div></div>'+
 '<div class="block"><h3>保证金</h3><div class="margin"><p class="muted">加载中…</p></div></div>'+
 '<div class="block"><h3>开仓</h3><div class="pform">'+
@@ -426,6 +427,7 @@ primary.map(f=>renderField(f,f.default,true)).join("")+"</div>"+
 '</tr></thead><tbody></tbody></table></div>';
 const S={spec:spec, root:root, showAll:false, selSymbol:"",
 vA:root.querySelector(".vA"), vB:root.querySelector(".vB"),
+listNote:root.querySelector(".listNote"),
 opp:root.querySelector(".opp"), margin:root.querySelector(".margin"),
 pform:root.querySelector(".pform"), aform:root.querySelector(".aform"),
 runErr:root.querySelector(".runErr"), runOk:root.querySelector(".runOk"),
@@ -438,7 +440,7 @@ const onVenue=()=>{renderOpp(st); renderMargin(st); if(pg.opportunity==="grid")l
 S.vA.addEventListener("change",onVenue);
 S.vB.addEventListener("change",onVenue);
 const symEl=S.pform.querySelector('[data-f="symbol"]');
-if(symEl) symEl.addEventListener("change",()=>{S.selSymbol=symEl.value; if(pg.opportunity==="grid")loadGridCandles(st); renderOpp(st)});
+if(symEl) symEl.addEventListener("change",()=>{S.selSymbol=symEl.value; applyListingGuards(st); renderOpp(st); if(pg.opportunity==="grid")loadGridCandles(st)});
 S.opp.addEventListener("click",e=>{
 const tr=e.target.closest("tr[data-sym]"); if(!tr) return;
 pickOppRow(st, tr.dataset.sym, tr.dataset.va, tr.dataset.vb);
@@ -467,8 +469,43 @@ const S=SPAGES[st]; if(!S) return;
 if(va) S.vA.value=va;
 if(vb) S.vB.value=vb;
 if(sym) setPageSymbol(S, sym);
+applyListingGuards(st);
 renderOpp(st); renderMargin(st);
 if(S.spec.page.opportunity==="grid") loadGridCandles(st);
+}
+
+// 上市联动：选定币种后，未上市该标的的场所在两腿下拉里置灰禁用
+// 并标（未上市）；已选腿若未上市，自动切到一所上市的并给页面提示。
+// 数据异常（error）只是暂时取不到，不禁用。
+function symVenueStatus(sym, vid){
+if(!MKT) return null;
+const row=MKT.symbols.find(x=>x.symbol===sym);
+if(!row) return null;
+const c=row.venues[vid];
+return c?c.status:null;
+}
+function applyListingGuards(st){
+const S=SPAGES[st]; if(!S||!MKT) return;
+const sym=pageSymbol(S); if(!sym) return;
+const notes=[];
+[S.vA, S.vB].forEach(sel=>{
+[...sel.options].forEach(o=>{
+const nl=symVenueStatus(sym, o.value)==="not_listed";
+o.disabled=nl;
+o.textContent=nl?o.value+"（未上市）":o.value;
+});
+});
+const fixLeg=(sel, other)=>{
+const cur=sel.options[sel.selectedIndex];
+if(!cur||!cur.disabled) return;
+const alt=[...sel.options].find(o=>!o.disabled&&o.value!==other.value)
+||[...sel.options].find(o=>!o.disabled);
+if(alt){notes.push(cur.value+" 未上市 "+sym+"，已自动切换为 "+alt.value);
+sel.value=alt.value}
+};
+fixLeg(S.vA, S.vB); fixLeg(S.vB, S.vA);
+if(S.listNote) S.listNote.textContent=notes.join("；");
+if(notes.length){renderMargin(st)}
 }
 
 // 机会表过滤：行两腿与所选两腿是同一对（任一方向）
@@ -520,11 +557,14 @@ let priceLine='<p class="muted">行情加载中…</p>';
 if(MKT){
 const row=MKT.symbols.find(x=>x.symbol===sym);
 const cell=row&&row.venues[S.vA.value];
-priceLine="<p>"+esc(sym)+" 在 "+esc(S.vA.value)+" 现价：<b>"+
-(cell&&cell.price!=null?fmt(cell.price,cell.price<10?4:2):"无数据")+"</b></p>";
+let txt;
+if(!cell||cell.status==="error") txt='<span title="'+esc((cell&&cell.reason)||"数据暂时取不到")+'">数据异常</span>';
+else if(cell.status==="not_listed") txt="未上市";
+else txt=fmt(cell.price,cell.price<10?4:2);
+priceLine="<p>"+esc(sym)+" 在 "+esc(S.vA.value)+" 现价：<b>"+txt+"</b></p>";
 }
 S.opp.innerHTML="<p>"+chips+"</p>"+priceLine+'<div class="gridInfo"></div>';
-S.opp.querySelectorAll("[data-chip]").forEach(c=>c.addEventListener("click",()=>{setPageSymbol(S,c.dataset.chip); renderGridOpp(st)}));
+S.opp.querySelectorAll("[data-chip]").forEach(c=>c.addEventListener("click",()=>{setPageSymbol(S,c.dataset.chip); applyListingGuards(st); renderGridOpp(st)}));
 renderGridInfo(st);
 }
 
@@ -563,7 +603,7 @@ const d=await (await fetch("/api/market/candles?venue="+encodeURIComponent(venue
 S.gridData={key:key, ok:!!d.ok, high:d.high, low:d.low,
 suggested_lower:d.suggested_lower, suggested_upper:d.suggested_upper,
 error:d.error};
-}catch(e){S.gridData={key:key, ok:false, error:String(e)}}
+}catch(e){S.gridData={key:key, ok:false, error:"网络异常，K线暂时取不到"}}
 S.gridFetching="";
 renderGridInfo(st);
 }
@@ -632,7 +672,10 @@ document.querySelectorAll("select.symSel").forEach(el=>{
 const cur=el.value;
 const vals=list.slice();
 if(cur&&vals.indexOf(cur)<0) vals.unshift(cur);
-el.innerHTML=vals.map(s=>'<option value="'+esc(s)+'">'+esc(s)+"</option>").join("");
+el.innerHTML=vals.map(s=>{
+const row=MKT&&MKT.symbols&&MKT.symbols.find(x=>x.symbol===s);
+const cnt=row&&row.listed_venues?row.listed_venues.length:null;
+return '<option value="'+esc(s)+'">'+esc(s)+(cnt==null?"":"（"+cnt+"/7 所上市）")+"</option>"}).join("");
 if(cur) el.value=cur;
 });
 }
@@ -671,18 +714,19 @@ const vids=["arcus","lighter","lighter_rh","hyperliquid","entropy","tradexyz","a
 $("#mktMatrix").innerHTML='<table><thead><tr><th>币种</th>'+vids.map(v=>"<th>"+v+"</th>").join("")+"<th>最大价差</th><th>最优费差</th></tr></thead><tbody>"+
 d.symbols.map(s=>"<tr><td><b>"+esc(s.symbol)+"</b></td>"+vids.map(v=>{
 const c=s.venues[v];
-if(!c)return '<td class="na">无数据</td>';
+if(!c||c.status==="not_listed")return '<td class="na">未上市</td>';
+if(c.status==="error")return '<td class="na" title="'+esc(c.reason||"数据暂时取不到")+'">数据异常</td>';
 return "<td>"+(c.price==null?"-":fmt(c.price,c.price<10?4:2))+"<br><span class='muted'>"+
 (c.funding_bps_h==null?"费率 -":fmt(c.funding_bps_h,3)+" bps/h · "+esc(KIND_CN[c.rate_kind]||c.rate_kind||""))+"</span></td>"}).join("")+
 "<td>"+(s.best_spread?fmt(s.best_spread.spread_bps,2)+" bps<br><span class='muted'>"+esc(s.best_spread.buy_venue)+" → "+esc(s.best_spread.sell_venue)+"</span>":"-")+"</td>"+
 "<td>"+(s.best_funding?fmt(s.best_funding.edge_bps_h,3)+" bps/h<br><span class='muted'>多 "+esc(s.best_funding.long_venue)+" / 空 "+esc(s.best_funding.short_venue)+(s.best_funding.mixed?" · 混口径":"")+"</span>":"-")+"</td></tr>").join("")+
-"</tbody></table>"+(Object.keys(d.venue_errors||{}).length?'<p class="bad">取数失败的场所：'+
-Object.entries(d.venue_errors).map(e=>esc(e[0])).join("、")+"（已标无数据，不影响其他场所）</p>":"");
+"</tbody></table>"+(Object.keys(d.venue_errors||{}).length?'<p class="bad">暂时取不到数据的场所：'+
+Object.entries(d.venue_errors).map(e=>esc(e[0])).join("、")+"（已在表中标为「数据异常」，不影响其他场所）</p>":"");
 const gs=$("#gridSym");
 if(!gs.options.length){gs.innerHTML=d.watchlist.map(s=>'<option value="'+esc(s)+'">'+esc(s)+"</option>").join("")}
 fillSymbolSelects();
-SPECS.forEach(spec=>renderOpp(spec.strategy));
-}catch(e){$("#mktTime").textContent="加载失败："+e}
+SPECS.forEach(spec=>{applyListingGuards(spec.strategy); renderOpp(spec.strategy)});
+}catch(e){$("#mktTime").textContent="加载失败，请稍后重试"}
 }
 $("#mktRefresh").addEventListener("click",()=>loadMarket(true));
 $("#gridGo").addEventListener("click",async()=>{

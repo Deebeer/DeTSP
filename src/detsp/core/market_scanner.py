@@ -11,6 +11,21 @@
   只有混口径组合时才返回并标 mixed=True，前端据此不打
   「当前最优」、只作参考。
 
+两类组合只纳入「两腿都 ok」的格：状态非 ok（未上市/数据异常）
+或缺价格/缺费率的格一律不参与，避免拿半残数据算出假机会。
+
+**每格三态（status）**——把「没上市」与「取数失败」分开（用户
+实测痛点：SNDK 在 Hyperliquid 本体根本未上市，却与故障一样
+显示「无数据」）：
+- ``ok``：该所上市此标的且有价（费率可缺，缺了单标费率 -）；
+- ``not_listed``：该所的市场清单里没有此标的（未上市）；
+- ``error``：接口异常或上市却取不到价，reason 给中文短句。
+上市清单来自各所自己的市场列表（HL 家族各 dex 的 meta
+universe、Lighter orderBooks、Aster exchangeInfo、
+Arcus /v1/markets），随扫描一并缓存；K 线接口也先查它，未
+上市直接回中文短句、不打上游（上游对未上市 coin 会回 500，
+该英文原文绝不能甩给用户）。
+
 数据源（全部公开接口，与 venues/quotes.py 同源）：
 - HL 家族（hyperliquid/entropy/tradexyz）：POST /info
   metaAndAssetCtxs（标记价 + 当期费率），另以 predictedFundings
@@ -47,6 +62,20 @@ LIGHTER_BASES = {
 HL_DEX = {"hyperliquid": "", "entropy": "io", "tradexyz": "xyz"}
 _LIGHTER_FUNDING_INTERVAL = 28800.0   # Lighter 费率周期 8 小时
 _ASTER_FUNDING_INTERVAL = 28800.0     # Aster 结算周期 8 小时
+
+# 面向用户的中文短句：上游异常原文（英文/堆栈）只进内部，绝不外露
+ERR_VENUE_DOWN = "行情接口暂时异常"
+ERR_NO_PRICE = "价格暂时取不到"
+ERR_NO_DATA = "数据暂时取不到"
+ERR_NO_CANDLES = "K线数据暂时取不到，请稍后重试"
+ERR_NOT_LISTED = "该平台未上市此标的"
+
+
+def _log(msg: str) -> None:
+    """内部细节只进标准错误日志，不进任何 API 输出。"""
+    import sys
+
+    print(f"[market_scanner] {msg}", file=sys.stderr)
 
 
 def _f(value) -> float | None:
@@ -135,6 +164,9 @@ class MarketScanner:
         self._quotes = quotes        # PublicQuoteProvider（lighter 取价）
         self._cache: tuple[float, dict] | None = None
         self._lighter_maps: dict[str, dict[str, int]] = {}
+        # 逐所上市清单 {venue_id: set(symbol)}，随 scan 一并刷新；
+        # 某所抓取失败时该所不写入（=清单未知，不当未上市处理）
+        self._listings: dict[str, set[str]] = {}
 
     # ----- HTTP -----
     def _client(self):
@@ -156,7 +188,8 @@ class MarketScanner:
             return None
 
     # ----- 各所抓取：返回 {symbol: {"price":…, "funding": FundingInfo}} -----
-    def _fetch_hl_family(self, errors: dict[str, str]) -> dict[str, dict[str, dict]]:
+    def _fetch_hl_family(self, errors: dict[str, str],
+                         listings: dict[str, set[str]]) -> dict[str, dict[str, dict]]:
         out: dict[str, dict[str, dict]] = {v: {} for v in HL_DEX}
         for vid, dex in HL_DEX.items():
             try:
@@ -165,8 +198,15 @@ class MarketScanner:
                 r.raise_for_status()
                 meta, ctxs = r.json()
             except Exception as e:  # noqa: BLE001 — 子所级失败隔离
-                errors[vid] = f"{type(e).__name__}: {e}"[:200]
+                errors[vid] = ERR_VENUE_DOWN
+                _log(f"{vid} metaAndAssetCtxs 失败：{type(e).__name__}: {e}")
                 continue
+            # 上市清单 = 该 dex 的 universe 全集（下架标记的除外）
+            listings[vid] = {
+                _plain(str(a.get("name") or "")).upper()
+                for a in meta.get("universe", [])
+                if isinstance(a, dict) and not a.get("isDelisted")}
+            listings[vid].discard("")
             for a, ctx in zip(meta.get("universe", []), ctxs or []):
                 sym = _plain(str(a.get("name") or "")).upper()
                 if sym not in self.watchlist:
@@ -214,7 +254,7 @@ class MarketScanner:
             pass
         return out
 
-    def _fetch_aster(self) -> dict[str, dict]:
+    def _fetch_aster(self, listings: dict[str, set[str]]) -> dict[str, dict]:
         r = self._client().get(f"{ASTER_BASE}/fapi/v1/premiumIndex")
         r.raise_for_status()
         out: dict[str, dict] = {}
@@ -233,9 +273,28 @@ class MarketScanner:
                     interval_seconds=_ASTER_FUNDING_INTERVAL,
                     rate_kind="last_settled") if rate is not None else None,
             }
+        # 上市清单走 exchangeInfo（status=TRADING 的 USDT 永续）；
+        # 该接口单独失败时退回「premiumIndex 有条目即上市」，不拖垮主数据
+        listed: set[str] | None = None
+        try:
+            re_ = self._client().get(f"{ASTER_BASE}/fapi/v1/exchangeInfo")
+            re_.raise_for_status()
+            listed = set()
+            for row in re_.json().get("symbols", []) or []:
+                if not isinstance(row, dict):
+                    continue
+                raw = str(row.get("symbol") or "")
+                status = row.get("status")
+                if raw.upper().endswith("USDT") and \
+                        (status is None or str(status).upper() == "TRADING"):
+                    listed.add(raw[:-4].upper())
+        except Exception as e:  # noqa: BLE001 — 清单失败只降级判定口径
+            _log(f"aster exchangeInfo 失败：{type(e).__name__}: {e}")
+        listings["aster"] = listed if listed is not None else set(out)
         return out
 
-    def _fetch_lighter(self, vid: str) -> dict[str, dict]:
+    def _fetch_lighter(self, vid: str,
+                       listings: dict[str, set[str]]) -> dict[str, dict]:
         base = LIGHTER_BASES[vid]
         if vid not in self._lighter_maps:
             r = self._client().get(f"{base}/orderBooks")
@@ -244,6 +303,8 @@ class MarketScanner:
                 str(b.get("symbol", "")).upper(): int(b["market_id"])
                 for b in (r.json() or {}).get("order_books", [])
                 if b.get("status") == "active" and b.get("market_id") is not None}
+        # 上市清单 = orderBooks 里 active 的市场全集
+        listings[vid] = set(self._lighter_maps[vid])
         id2sym = {i: s for s, i in self._lighter_maps[vid].items()}
         r = self._client().get(f"{base}/funding-rates")
         r.raise_for_status()
@@ -269,11 +330,16 @@ class MarketScanner:
                 cell["price"] = price
         return out
 
-    def _fetch_arcus(self) -> dict[str, dict]:
+    def _fetch_arcus(self, listings: dict[str, set[str]]) -> dict[str, dict]:
         r = self._client().get(f"{ARCUS_BASE}/v1/markets")
         r.raise_for_status()
         payload = r.json()
         rows = payload.get("markets") if isinstance(payload, dict) else payload
+        # 上市清单 = /v1/markets 的 baseAsset 全集
+        listings["arcus"] = {
+            str(raw.get("baseAsset") or "").upper()
+            for raw in rows or [] if isinstance(raw, dict)}
+        listings["arcus"].discard("")
         out: dict[str, dict] = {}
         for raw in rows or []:
             if not isinstance(raw, dict):
@@ -320,49 +386,84 @@ class MarketScanner:
             return self._cache[1]
         per_venue: dict[str, dict[str, dict]] = {}
         errors: dict[str, str] = {}
+        listings: dict[str, set[str]] = {}
 
         def _grab(vid: str, fn) -> None:
             try:
                 per_venue[vid] = fn()
             except Exception as e:  # noqa: BLE001 — 单所失败隔离
                 per_venue[vid] = {}
-                errors[vid] = f"{type(e).__name__}: {e}"[:200]
+                errors[vid] = ERR_VENUE_DOWN
+                _log(f"{vid} 抓取失败：{type(e).__name__}: {e}")
 
         hl_errors: dict[str, str] = {}
-        hl = self._fetch_hl_family(hl_errors)
+        hl = self._fetch_hl_family(hl_errors, listings)
         for vid in HL_DEX:
             per_venue[vid] = hl.get(vid, {})
         errors.update(hl_errors)
-        _grab("aster", self._fetch_aster)
-        _grab("arcus", self._fetch_arcus)
+        _grab("aster", lambda: self._fetch_aster(listings))
+        _grab("arcus", lambda: self._fetch_arcus(listings))
         for vid in LIGHTER_BASES:
-            _grab(vid, lambda v=vid: self._fetch_lighter(v))
+            _grab(vid, lambda v=vid: self._fetch_lighter(v, listings))
+        self._listings = listings
 
         symbols_out = []
         spread_ranking, funding_ranking = [], []
         for sym in self.watchlist:
-            venues_cell: dict[str, dict | None] = {}
+            venues_cell: dict[str, dict] = {}
             prices: dict[str, float | None] = {}
             rates: dict[str, tuple[float, str]] = {}
+            listed_venues: list[str] = []
             for vid in ("arcus", "lighter", "lighter_rh", "hyperliquid",
                         "entropy", "tradexyz", "aster"):
                 cell = (per_venue.get(vid) or {}).get(sym)
-                if not cell or (cell.get("price") is None
-                                and cell.get("funding") is None):
-                    venues_cell[vid] = None
-                    continue
-                finfo: FundingInfo | None = cell.get("funding")
+                finfo: FundingInfo | None = cell.get("funding") if cell else None
                 bps_h = None
                 if finfo is not None:
                     bps_h = round(_bps_per_hour(finfo.rate,
                                                 finfo.interval_seconds), 4)
-                    rates[vid] = (bps_h, finfo.rate_kind)
+                listed_set = listings.get(vid)
+                is_listed = listed_set is not None and sym in listed_set
+                if is_listed:
+                    listed_venues.append(vid)
+                # 三态判定：场所故障 → 未上市 → 上市却无价/无数据 → ok
+                if vid in errors:
+                    venues_cell[vid] = {
+                        "status": "error", "reason": errors[vid],
+                        "price": None, "funding_bps_h": None,
+                        "rate_kind": None}
+                    continue
+                if listed_set is not None and not is_listed:
+                    venues_cell[vid] = {
+                        "status": "not_listed",
+                        "price": None, "funding_bps_h": None,
+                        "rate_kind": None}
+                    continue
+                if cell is None or (cell.get("price") is None
+                                    and finfo is None):
+                    venues_cell[vid] = {
+                        "status": "error",
+                        "reason": ERR_NO_PRICE if is_listed else ERR_NO_DATA,
+                        "price": None, "funding_bps_h": bps_h,
+                        "rate_kind": finfo.rate_kind if finfo else None}
+                    continue
+                if cell.get("price") is None:
+                    # 上市、有费率但取不到价：半残格，标异常且不进排行
+                    venues_cell[vid] = {
+                        "status": "error", "reason": ERR_NO_PRICE,
+                        "price": None, "funding_bps_h": bps_h,
+                        "rate_kind": finfo.rate_kind if finfo else None}
+                    continue
                 venues_cell[vid] = {
+                    "status": "ok",
                     "price": cell.get("price"),
                     "funding_bps_h": bps_h,
                     "rate_kind": finfo.rate_kind if finfo else None,
                 }
+                # 排行只纳入 ok 的格：价差要两腿都有价、费差还要有费率
                 prices[vid] = cell.get("price")
+                if bps_h is not None and finfo is not None:
+                    rates[vid] = (bps_h, finfo.rate_kind)
             spread = best_spread(prices)
             funding = best_funding_pair(rates)
             if spread:
@@ -370,6 +471,8 @@ class MarketScanner:
             if funding:
                 funding_ranking.append({"symbol": sym, **funding})
             symbols_out.append({"symbol": sym, "venues": venues_cell,
+                                "listed_venues": listed_venues,
+                                "listed_count": len(listed_venues),
                                 "best_spread": spread,
                                 "best_funding": funding})
         spread_ranking.sort(key=lambda x: -x["spread_bps"])
@@ -386,18 +489,37 @@ class MarketScanner:
         return result
 
     # ----- 24 小时高低（中性网格定区间用）-----
+    def _ensure_listings(self) -> None:
+        """K 线判定上市前先保证上市清单可用（过期就顺带扫一次）。"""
+        now = time.time()
+        if self._cache and now - self._cache[0] < self._cache_seconds \
+                and self._listings:
+            return
+        try:
+            self.scan()
+        except Exception as e:  # noqa: BLE001 — 扫描失败则清单未知，保守放行
+            _log(f"candles 前置扫描失败：{type(e).__name__}: {e}")
+
     def candles(self, venue_id: str, symbol: str) -> dict:
         """近 24 小时 1 小时 K 线的高低与建议区间（高低各扩 2%）。
 
         只有 HL 家族有已核实的官方公开 K 线接口（candleSnapshot）；
-        其他场所如实返回不可用。
+        其他场所如实返回不可用。先查上市清单：未上市直接回中文
+        短句、不打上游（上游对未上市 coin 回 500，原文绝不外露）；
+        子所 coin 名带 dex 前缀（xyz:SNDK / io:AAPL，活接口实测）。
         """
         symbol = str(symbol or "").upper()
         base = {"venue": venue_id, "symbol": symbol}
         if venue_id not in HL_DEX:
             return {**base, "ok": False,
                     "error": "该场所没有已核实的公开 K 线接口，"
-                             "请用 Hyperliquid 家族场所看区间"}
+                             "请把网格腿切到 Hyperliquid 家族"
+                             "（hyperliquid / entropy / tradexyz）看区间"}
+        self._ensure_listings()
+        listed = self._listings.get(venue_id)
+        if listed is not None and symbol not in listed:
+            return {**base, "ok": False, "not_listed": True,
+                    "error": ERR_NOT_LISTED}
         dex = HL_DEX[venue_id]
         coin = f"{dex}:{symbol}" if dex else symbol
         end = int(time.time() * 1000)
@@ -409,15 +531,16 @@ class MarketScanner:
                         "startTime": start, "endTime": end}})
             r.raise_for_status()
             rows = r.json() or []
-        except Exception as e:  # noqa: BLE001
-            return {**base, "ok": False, "error": f"K 线获取失败：{e}"}
+        except Exception as e:  # noqa: BLE001 — 原文只进日志
+            _log(f"candles {venue_id}/{symbol} 失败："
+                 f"{type(e).__name__}: {e}")
+            return {**base, "ok": False, "error": ERR_NO_CANDLES}
         highs = [h for h in (_f(row.get("h")) for row in rows
                              if isinstance(row, dict)) if h]
         lows = [lo for lo in (_f(row.get("l")) for row in rows
                               if isinstance(row, dict)) if lo]
         if not highs or not lows:
-            return {**base, "ok": False,
-                    "error": f"{venue_id} 没有 {symbol} 的 K 线（可能未上市）"}
+            return {**base, "ok": False, "error": ERR_NO_CANDLES}
         high, low = max(highs), min(lows)
         return {**base, "ok": True, "hours": 24, "candles": len(rows),
                 "high": high, "low": low,

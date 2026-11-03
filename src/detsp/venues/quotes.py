@@ -30,7 +30,10 @@ class PublicQuoteProvider:
         self._timeout = timeout
         self._http = http  # 测试可注入假 httpx.Client
         self._cache: dict[tuple[str, str], tuple[float, float]] = {}
-        self._lighter_markets: dict[str, int] | None = None
+        # market_id 映射必须按部署分开缓存：主网与 Robinhood 链的
+        # 同一 symbol 的 market_id 不同（如 SOL 主网 2 / RH 3），
+        # 共用一份会串到别的币的价格（实测 RH SOL 取到 HYPE 的价）
+        self._lighter_markets: dict[str, dict[str, int]] = {}
 
     def mid(self, venue_id: str, symbol: str) -> float | None:
         key = (venue_id, symbol.upper())
@@ -80,14 +83,14 @@ class PublicQuoteProvider:
         if venue_id in ("lighter", "lighter_rh"):
             base = LIGHTER_BASE if venue_id == "lighter" else \
                 "https://api.rh.lighter.xyz/api/v1"
-            if self._lighter_markets is None:
+            if venue_id not in self._lighter_markets:
                 r = self._client().get(f"{base}/orderBooks")
                 r.raise_for_status()
-                self._lighter_markets = {
+                self._lighter_markets[venue_id] = {
                     str(b.get("symbol", "")).upper(): int(b["market_id"])
                     for b in (r.json() or {}).get("order_books", [])
                     if b.get("status") == "active"}
-            mid_id = self._lighter_markets.get(symbol)
+            mid_id = self._lighter_markets[venue_id].get(symbol)
             if mid_id is None:
                 return None
             r = self._client().get(f"{base}/orderBookOrders",
