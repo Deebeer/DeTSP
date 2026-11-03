@@ -33,7 +33,7 @@ STRATEGY_TITLES = {
     "hedged_grid": "中性网格",
     "rotation_hedge": "轮换对冲刷量",
     "premium_arb": "溢价套利",
-    "funding_carry": "资金费 carry",
+    "funding_carry": "资金费套利",
 }
 
 STRATEGY_BLURBS = {
@@ -154,6 +154,61 @@ _FIELD_META: dict[str, dict[str, dict]] = {
 }
 
 
+# 策略页（左侧边栏布局）元数据：每策略一页，页面由通用渲染器按
+# 本表生成。venue_fields/venue_labels 是页面顶部「交易平台」区的
+# 两腿场所下拉；primary 是「开仓区」的常用字段（其余字段进折叠的
+# 「高级配置」）；opportunity 决定「策略机会」区看哪张排行；
+# name_prefix 是面板一键运行的自动任务名前缀。
+PAGE_META: dict[str, dict] = {
+    "hedged_grid": {
+        "venue_fields": ("grid_venue", "hedge_venue"),
+        "venue_labels": ("网格腿", "对冲腿"),
+        "opportunity": "grid",
+        "name_prefix": "grid",
+        "primary": ("symbol", "lower_price", "upper_price", "grid_count",
+                    "qty_per_grid", "leverage_grid", "leverage_hedge"),
+        "note": "区间上下限默认填机会区给出的建议区间（近 24 小时"
+                "高低各扩 2%），可改；杠杆只用于校验与显示，须与"
+                "账户里实际设置的一致（程序不自动改杠杆）。",
+    },
+    "rotation_hedge": {
+        "venue_fields": ("venue_a", "venue_b"),
+        "venue_labels": ("A腿", "B腿"),
+        "opportunity": "funding",
+        "name_prefix": "rotation",
+        "primary": ("symbol", "notional_usd", "leverage_a", "leverage_b",
+                    "hold_seconds"),
+        "note": "方向由策略按资金费自动选（多费率低的一所、空费率"
+                "高的一所），持有时长到点自动平仓轮换。",
+    },
+    "premium_arb": {
+        "venue_fields": ("base_venue", "hedge_venue"),
+        "venue_labels": ("基准腿", "对冲腿"),
+        "opportunity": "spread",
+        "name_prefix": "arb",
+        "primary": ("symbol", "max_position_usd", "execution_mode",
+                    "midline_bps", "upper_bps", "lower_bps",
+                    "leverage_base", "leverage_hedge"),
+        "note": "溢价带（中枢/上带/下带）必须先实测再填：用录制器"
+                "采集盘口后跑 analyze 得建议值（见使用说明第 6 节），"
+                "不要凭感觉填。执行模式 maker = 主腿先挂单、成交后"
+                "对冲腿跟上；taker = 双腿立即吃单；平仓恒为 taker。",
+    },
+    "funding_carry": {
+        "venue_fields": ("venue_a", "venue_b"),
+        "venue_labels": ("A腿", "B腿"),
+        "opportunity": "funding",
+        "name_prefix": "carry",
+        "primary": ("symbol", "notional_usd", "leverage",
+                    "min_entry_edge_bps_per_hour",
+                    "exit_edge_bps_per_hour"),
+        "note": "方向由策略按资金费自动选（多费率低的一所、空费率"
+                "高的一所）；净费差达到入场门槛才开仓，跌破退出"
+                "门槛并连续确认后平仓。",
+    },
+}
+
+
 def _infer_type(f: "dataclasses.Field", meta: dict) -> str:
     if "type" in meta:
         return meta["type"]
@@ -172,6 +227,8 @@ def strategy_specs() -> list[dict]:
     out = []
     for stype, cls in PARAMS_CLASSES.items():
         meta_all = _FIELD_META.get(stype, {})
+        page = PAGE_META[stype]
+        primary = set(page["primary"])
         fields = []
         for f in dataclasses.fields(cls):
             meta = meta_all.get(f.name, {})
@@ -184,6 +241,7 @@ def strategy_specs() -> list[dict]:
                 "required": required,
                 "default": None if required else f.default,
                 "group": meta.get("group", "参数"),
+                "primary": f.name in primary,
             }
             if item["type"] == "enum":
                 item["options"] = [
@@ -195,6 +253,14 @@ def strategy_specs() -> list[dict]:
             "title": STRATEGY_TITLES[stype],
             "blurb": STRATEGY_BLURBS[stype],
             "fields": fields,
+            "page": {
+                "venue_fields": list(page["venue_fields"]),
+                "venue_labels": list(page["venue_labels"]),
+                "opportunity": page["opportunity"],
+                "name_prefix": page["name_prefix"],
+                "primary": list(page["primary"]),
+                "note": page["note"],
+            },
         })
     return out
 

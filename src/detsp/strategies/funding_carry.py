@@ -1,4 +1,4 @@
-"""资金费 carry 策略：参数 + 纯函数资金费优势计算 + 执行状态机。
+"""资金费套利 策略：参数 + 纯函数资金费优势计算 + 执行状态机。
 
 来源：Parallax Hedge（ZAIJIN88/Arcus-Entropy-Lighter-，MIT）的
 资金费选向模块独立成策略——轮换对冲里它只负责「开仓时选哪边
@@ -121,7 +121,7 @@ def current_edge_bps_per_hour(long_leg: str, hourly_a: float,
 
 
 class FundingCarryStrategy:
-    """资金费 carry 执行状态机。
+    """资金费套利 执行状态机。
 
     阶段：flat（空仓等入场）→ open（双腿持有吃费）→ 平仓后
     cooldown（冷却结束且 reopen=True 才允许再入场）。
