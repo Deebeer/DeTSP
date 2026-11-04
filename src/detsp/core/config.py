@@ -32,7 +32,7 @@ _YAML_TOP_KEYS = {"engine", "risk", "venues", "tasks", "caps", "watchlist"}
 _YAML_RISK_KEYS = {"min_corridor_pct", "close_corridor_pct", "max_consecutive_errors"}
 _YAML_CAPS_KEYS = {"global_usd", "venues", "strategies"}
 _TASK_KEYS = {"name", "strategy", "venue", "symbol", "venue_a", "venue_b",
-              "base_venue", "hedge_venue", "grid_venue", "params"}
+              "base_venue", "hedge_venue", "grid_venue", "params", "run_mode"}
 _TASK_STRATEGIES = ("hedged_grid", "rotation_hedge", "premium_arb",
                     "funding_carry")
 _TASK_REMOVED = ("grid", "volume_loop")   # 已移除的旧策略名，单独报错
@@ -173,7 +173,8 @@ def build_config(env: dict[str, str] | None = None, yaml_data: dict | None = Non
 
     tasks: list[dict] = []
     seen_names: set[str] = set()
-    seen_keys: set[tuple[str, str]] = set()
+    # 已占用键用列表保存（通配感知冲突判定要逐个比对，见下方）
+    seen_keys: list[tuple[str, str]] = []
     for i, t in enumerate(yaml_data.get("tasks") or []):
         if not isinstance(t, dict):
             raise ConfigError(f"tasks[{i}] 必须是映射")
@@ -190,6 +191,12 @@ def build_config(env: dict[str, str] | None = None, yaml_data: dict | None = Non
                 f"合法值：{_TASK_STRATEGIES}")
         if "params" in t and not isinstance(t["params"], dict):
             raise ConfigError(f"tasks[{i}].params 必须是映射")
+        # 运行模式：manual=自主（单笔）/ auto=全自动（监督器选标
+        # 循环）；缺省 manual，写了就必须合法
+        if "run_mode" in t and t["run_mode"] not in ("manual", "auto"):
+            raise ConfigError(
+                f"tasks[{i}].run_mode 非法：{t['run_mode']}，"
+                f"合法值：('manual', 'auto')")
         # H4：任务名必填且唯一（它就是归属 owner 与账本 strategy 口径）
         name = str(t.get("name") or "")
         if not name:
@@ -208,24 +215,28 @@ def build_config(env: dict[str, str] | None = None, yaml_data: dict | None = Non
 
         used: set[tuple[str, str]] = set()
         strat = t["strategy"]
+        # 全自动任务动态选标，占整个场所：symbol 记通配 "*"
+        sym = "*" if t.get("run_mode") == "auto" else _tf("symbol")
         if strat == "hedged_grid":
-            sym = _tf("symbol")
             used.add((_tf("grid_venue"), sym))
             used.add((_tf("hedge_venue"), sym))
         elif strat in ("rotation_hedge", "funding_carry"):
-            sym = _tf("symbol")
             used.add((_tf("venue_a"), sym))
             used.add((_tf("venue_b"), sym))
         elif strat == "premium_arb":
-            sym = _tf("symbol")
             used.add((_tf("base_venue"), sym))
             used.add((_tf("hedge_venue"), sym))
-        dup = used & seen_keys
+        # 通配感知冲突：同 venue 且 symbol 相等、或任一侧为 "*"
+        # （全自动任务）即冲突——auto 任务的两个场所不许再被占
+        dup = {k for k in used
+               if any(k[0] == sk[0]
+                      and (k[1] == sk[1] or k[1] == "*" or sk[1] == "*")
+                      for sk in seen_keys)}
         if dup:
             raise ConfigError(
                 f"tasks[{i}]（{name}）与已有任务占用同一 (venue,symbol)："
                 f"{sorted(dup)}，归属冲突，拒绝启动")
-        seen_keys |= used
+        seen_keys.extend(used)
         tasks.append(dict(t))
 
     watchlist: list[str] = []

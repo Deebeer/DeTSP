@@ -77,8 +77,13 @@ def main(argv: list[str] | None = None) -> int:
     venues = build_venues(app_config, force_paper=args.paper,
                           dry_run=app_config.dry_run)
     ledger = Ledger(args.db)
+    # 行情扫描器全进程只建一份：引擎（全自动任务选标）与面板
+    # （数据展示）共用同一个实例，避免两份缓存口径不一致
+    from .core.market_scanner import MarketScanner
+
+    scanner = MarketScanner(watchlist=app_config.watchlist or None)
     engine = Engine.from_config(app_config, venues, ledger=ledger,
-                                state_dir=state_dir)
+                                state_dir=state_dir, scanner=scanner)
     for note in engine.events:
         print(f"[DeTSP] {note}", flush=True)
     for name, err in engine.errors.items():
@@ -97,7 +102,8 @@ def main(argv: list[str] | None = None) -> int:
         panel_cfgs_list = []
     state = PanelState(engine=engine, venues=venues, ledger=ledger,
                        app_config=app_config, task_cfgs=task_cfgs,
-                       panel_store_path=panel_path, env_path=args.env)
+                       panel_store_path=panel_path, env_path=args.env,
+                       market_scanner=scanner)
     for name, err in state.attach_panel_tasks(panel_cfgs_list).items():
         print(f"[DeTSP] 面板任务 {name} 加载失败（已隔离）：{err}", flush=True)
 

@@ -160,6 +160,8 @@ class FundingCarryStrategy:
         self._opened_once = False    # reopen=False 时用过即止的标记
         self._pending_open: dict | None = None  # 开仓待确认（结算
         # 宽限期内）：{"long_leg", "until"}，见 _resolve_pending
+        self.single_cycle = False
+        self.cycle_done = False
         self.last_error: str = ""
         self.recovery_notes: list[str] = []  # 启动对账事件
 
@@ -223,6 +225,8 @@ class FundingCarryStrategy:
         self.phase = "cooldown"
         self.cooldown_until = now + self.params.cooldown_seconds
         self._last_check = now
+        if self.single_cycle and self._opened_once:
+            self.cycle_done = True
 
     # ----- 生命周期 -----
     def start(self, now: float = 0.0) -> None:
@@ -429,7 +433,7 @@ class FundingCarryStrategy:
 
     # ----- 主循环 -----
     def tick(self, now: float = 0.0, allow_open: bool = True) -> None:
-        if self.executor is None or self.stopped:
+        if self.executor is None or self.stopped or self.cycle_done:
             return
         self._ensure_claims()
         p = self.params
@@ -481,7 +485,7 @@ class FundingCarryStrategy:
             self.phase = "flat"
 
         # flat：等入场检查周期
-        if self._opened_once and not p.reopen:
+        if self._opened_once and (self.single_cycle or not p.reopen):
             return  # reopen=False：平过一次就不再自动重开
         if now - self._last_check < p.check_seconds:
             return

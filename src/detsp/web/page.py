@@ -19,7 +19,11 @@ Top 5 合并、按机会值 % 降序，点行跳策略页并带入两腿与
 每个策略页同构，由通用渲染器按 /api/strategy-specs 的规格
 （含 page 元数据：两腿字段、主金额、primary、预设三档、运作
 方式文案）生成，流程仿 Mob Exchange 的 Delta 中性配置面板，
-自上而下：页头（策略名 + 说明 + 「运作方式」折叠）→ 订单腿
+自上而下：页头（策略名 + 说明 + 「运作方式」折叠）→ 运行模式
+（第九轮：自主/全自动两段切换，各配大白话说明；切全自动时
+选市场的币种下拉禁用并注明由系统自动选标，提交带 run_mode，
+任务列表与策略记录的任务名带模式徽标、全自动任务显示当前
+标的与已循环轮数）→ 订单腿
 （先选两所，每行带该所可用余额与该标的最高杠杆/保证金模式）
 → 金额（自由输入；网格是目标总名义，反推每格量）→ 选市场
 （统计行「共同 N · A所上市 X · B所上市 Y」+ 币种下拉 + 所选
@@ -129,8 +133,8 @@ label.inl select{display:block;margin-top:4px;background:var(--bg);color:var(--t
 .amtMain{flex:0 1 320px}
 .amtMain .fld{font-size:13px;color:var(--mut)}
 .amtMain input{font-size:19px;padding:7px 10px}
-.presetRow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
-.presetRow button.on{background:var(--acc);color:var(--onacc);border-color:var(--acc);font-weight:bold}
+.presetRow,.modeRow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.presetRow button.on,.modeRow button.on{background:var(--acc);color:var(--onacc);border-color:var(--acc);font-weight:bold}
 .pickRow{cursor:pointer}
 .pickRow:hover td{background:rgba(63,185,80,.08)}
 .symWrap{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
@@ -512,7 +516,7 @@ function renderRecords(){
 const oT=$("#recOpen tbody"), cT=$("#recClosed tbody");
 if(!oT||!cT||!RECORDS) return;
 oT.innerHTML=RECORDS.open.map(r=>"<tr><td>"+esc(stratTitle(r.strategy))+"</td><td>"+
-(r.task?esc(r.task):'<span class="tag">无归属</span>')+"</td><td>"+esc(r.venue)+"</td><td>"+esc(r.symbol)+
+(r.task?esc(r.task)+modeBadge(r.task):'<span class="tag">无归属</span>')+"</td><td>"+esc(r.venue)+"</td><td>"+esc(r.symbol)+
 "</td><td>"+sideHtml(r.side)+"</td><td>"+fmt(r.qty, r.qty<1?6:4)+"</td><td>"+
 fmt(r.entry_price, r.entry_price<10?4:2)+"</td><td>"+
 '<button class="mini stop" data-act="close" data-venue="'+esc(r.venue)+'" data-symbol="'+esc(r.symbol)+'" data-owner="'+esc(r.task||"")+'">平仓</button>'+
@@ -645,11 +649,15 @@ const presetBtns=["conservative","neutral","aggressive","custom"].map(k=>
 root.innerHTML=
 "<h2>"+esc(spec.title)+'</h2><p class="muted">'+esc(spec.blurb)+"</p>"+
 '<details class="block howBox"><summary>运作方式</summary><ol>'+steps+"</ol></details>"+
+'<div class="block"><h3>运行模式</h3>'+
+'<div class="modeRow"><button data-mode="manual" class="on">自主模式</button><button data-mode="auto">全自动模式</button></div>'+
+'<p class="muted modeDesc"></p></div>'+
 '<div class="block"><h3>订单腿</h3><div class="legs">'+legRow(0)+legRow(1)+"</div>"+
 '<p class="muted">先选两所：下面的「选市场」会列出这两所共同上市的全部标的并按策略排序。方向由所选标的的机会自动定；金额与下方主金额联动（两腿自动配平，只读），数量按现价实时换算；每条腿下方显示该所可用余额（权益）与该标的在该所的最高杠杆/保证金模式（各所各标的不同、有的仅逐仓；未知则显示未知），随数据刷新更新。</p></div>'+
 '<div class="block"><h3>金额</h3>'+amtHtml+"</div>"+
 '<div class="block"><span class="upd pairsUpd"></span><h3>选市场</h3>'+
 '<div class="pairsStats muted"></div>'+
+'<p class="muted autoPickNote" style="display:none">全自动模式：标的由系统自动选——每次开仓都按当前策略口径选排第一的共同标的，下方下拉不用选。</p>'+
 '<div class="symWrap"><label>币种 <select class="symSel" data-f="symbol"></select></label></div>'+
 '<div class="pairPrices muted"></div>'+
 '<div class="symData"></div>'+
@@ -669,7 +677,7 @@ presetBtns+"</div>"+
 '<div class="block"><h3>运行中仓位</h3><table class="ttasks"><thead><tr>'+
 "<th>名称</th><th>标的</th><th>来源</th><th>状态</th><th>持仓</th><th>今日成交</th><th>最近错误</th><th>操作</th>"+
 '</tr></thead><tbody></tbody></table></div>';
-const S={spec:spec, root:root, selSymbol:"", candles:{}, candleFetching:{},
+const S={spec:spec, root:root, runMode:"manual", selSymbol:"", candles:{}, candleFetching:{},
 pairsRows:[], pairsMeta:null, pairKey:"", pairSeq:0, pairsStale:false,
 totalManual:false,
 pendingSymbol:"", pendingPrefill:null, presetName:"neutral", applying:false,
@@ -694,6 +702,8 @@ S.vA.addEventListener("change",onVenue);
 S.vB.addEventListener("change",onVenue);
 S.symSel.addEventListener("change",()=>{S.selSymbol=S.symSel.value; renderPairPrices(st); renderSymData(st); renderLegs(st); renderPreview(st); updateGridSug(st); syncGridTotal(st)});
 root.querySelectorAll("[data-preset]").forEach(b=>b.addEventListener("click",()=>applyPreset(st, b.dataset.preset)));
+root.querySelectorAll("[data-mode]").forEach(b=>b.addEventListener("click",()=>setRunMode(st, b.dataset.mode)));
+setRunMode(st, "manual");
 const gt=root.querySelector(".gridTotalInp");
 if(gt) gt.addEventListener("input",()=>{S.totalManual=true; gridTotalToQty(st)});
 root.addEventListener("input",e=>{
@@ -718,6 +728,31 @@ const el=S.root.querySelector('[data-f="'+name+'"]');
 if(el&&el.value!==""){const v=Number(el.value); return isNaN(v)?null:v}
 const f=fieldOf(S.spec, name);
 return f?f.default:null;
+}
+
+// ---------- 运行模式（自主 / 全自动，第九轮） ----------
+// 自主：自己选标、开一笔、手动或按条件平仓、平完结束；
+// 全自动：只定两所/金额/门槛，系统自动选标→开仓→平仓→冷却→
+// 再选标循环，点停止才停。切换只影响新建任务的提交参数。
+const MODE_DESCS={
+manual:"自主模式：自己选标的、点运行开一笔；平仓靠手动点平仓，或按配置里的条件自动平仓；平完这一笔任务就结束，不自动重开、不自动换标。",
+auto:"全自动模式：只定两所、金额和门槛，点运行后系统自动选当前最好的标的开仓，按条件平仓、冷却后自动重新选标开下一笔，一直循环，点停止才停。"};
+function setRunMode(st, mode){
+const S=SPAGES[st]; if(!S) return;
+S.runMode=mode==="auto"?"auto":"manual";
+S.root.querySelectorAll("[data-mode]").forEach(b=>b.classList.toggle("on", b.dataset.mode===S.runMode));
+const desc=S.root.querySelector(".modeDesc");
+if(desc) desc.textContent=MODE_DESCS[S.runMode];
+const note=S.root.querySelector(".autoPickNote");
+if(note) note.style.display=S.runMode==="auto"?"":"none";
+if(S.symSel) S.symSel.disabled=S.runMode==="auto";
+renderPreview(st);
+}
+// 任务的模式徽标（任务列表与策略记录共用）
+function modeBadge(name){
+const t=TASKS.find(x=>x.name===name);
+if(!t) return "";
+return ' <span class="tag">'+(t.run_mode==="auto"?"全自动":"自主")+"</span>";
 }
 
 // ---------- 共同标的（pairs）：选两所后拉全量共同上市并排序 ----------
@@ -1104,11 +1139,15 @@ return mm==="isolated_only"
 ? '<p style="color:var(--yel)">⚠ '+esc(L.vid)+" 该标的仅逐仓（isolated only），账户须为逐仓模式。</p>"
 : "";
 }).join("");
+const modeTxt=S.runMode==="auto"
+?"运行模式：全自动——系统自动选标、开仓、平仓、再选标循环，点停止才停。"
+:"运行模式：自主——开一笔，手动或按条件平仓，平完这一笔任务结束。";
 S.previewEl.innerHTML="<table><thead><tr><th>腿</th><th>平台</th><th>标记价</th><th>预估执行价</th><th>名义</th><th>所需保证金</th></tr></thead><tbody>"+
 rowsHtml+"</tbody></table>"+
 '<p>总名义：<b>'+(totN!=null?"$"+fmt(totN):"-")+'</b>　总保证金：<b>'+(totM!=null?"$"+fmt(totM):"-")+"</b></p>"+
 "<p>"+avail+"</p>"+
 '<p class="muted">所需保证金按各腿所填杠杆计算；程序不自动改杠杆，交易所的实际上限见订单腿。</p>'+
+'<p class="muted">'+modeTxt+"</p>"+
 levWarns+levModes+ind;
 }
 
@@ -1117,7 +1156,9 @@ function renderStratTasks(st){
 const S=SPAGES[st]; if(!S) return;
 const list=TASKS.filter(t=>t.strategy===st);
 S.tbody.innerHTML=list.map(t=>{
-const sym=(t.params&&t.params.params&&t.params.params.symbol)||"-";
+const sym=t.run_mode==="auto"
+?((t.current_symbol||"选标中")+"（已循环 "+(t.cycles_completed||0)+" 轮）")
+:((t.params&&t.params.params&&t.params.params.symbol)||"-");
 const poss=taskPositions(t.name);
 const posHtml=poss.length?poss.map(p=>esc(p.venue)+" "+esc(p.symbol)+" "+p.qty+" @ "+p.entry_price+
 ' <button class="mini stop" data-act="close" data-venue="'+esc(p.venue)+'" data-symbol="'+esc(p.symbol)+'" data-owner="'+esc(t.name)+'">平仓</button>').join("<br>"):"-";
@@ -1129,7 +1170,7 @@ if(t.source==="panel"){
 btns+='<button class="mini" data-act="edit" data-name="'+esc(t.name)+'">编辑</button>';
 btns+='<button class="mini stop" data-act="del" data-name="'+esc(t.name)+'">删除</button>';
 }
-return "<tr><td>"+esc(t.name)+"</td><td>"+esc(sym)+"</td><td>"+
+return "<tr><td>"+esc(t.name)+modeBadge(t.name)+"</td><td>"+esc(sym)+"</td><td>"+
 (t.source==="panel"?"面板":"配置文件")+"</td><td>"+statusHtml(t.status)+"</td><td>"+posHtml+
 "</td><td>"+(tf.n?tf.n+" 笔 / $"+fmt(tf.vol):"-")+"</td><td>"+esc(t.last_error||"")+"</td><td>"+btns+"</td></tr>";
 }).join("")||'<tr><td colspan="8" class="muted">暂无该策略任务，用上方配置填好后点运行。</td></tr>';
@@ -1143,11 +1184,13 @@ const params={};
 params[pg.venue_fields[0]]=S.vA.value;
 params[pg.venue_fields[1]]=S.vB.value;
 Object.assign(params, collectFrom(S.root, spec));
+if(S.runMode==="auto"&&!params.symbol)
+params.symbol=(S.pairsRows&&S.pairsRows.length&&S.pairsRows[0].symbol)||"BTC";  // 全自动时 symbol 只是占位，后端选标时忽略
 const now=new Date();
 const pad=n=>String(n).padStart(2,"0");
 const name=pg.name_prefix+"-"+(params.symbol||"NA")+"-"+pad(now.getHours())+pad(now.getMinutes())+pad(now.getSeconds());
 S.runErr.textContent=""; S.runOk.textContent="";
-const r=await postJson("/api/tasks/create",{name:name, strategy:st, params:params});
+const r=await postJson("/api/tasks/create",{name:name, strategy:st, params:params, run_mode:S.runMode});
 if(!r.ok){S.runErr.textContent=r.error||"创建失败"; return}
 S.runOk.textContent="已创建并运行："+r.task;
 refresh();

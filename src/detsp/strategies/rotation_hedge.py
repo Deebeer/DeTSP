@@ -181,6 +181,9 @@ class RotationHedgeStrategy:
         # "until", "mode": "round"/"add"}，见 _resolve_pending
         self._round_qty = 0.0        # 本轮单档数量（逐步建仓的步长）
         self._last_add_at = -1e18    # 最近一次加仓时间（逐步建仓间隔）
+        self.single_cycle = False
+        self.cycle_done = False
+        self._has_opened = False
         self.last_error: str = ""
         self.recovery_notes: list[str] = []  # S3 启动对账事件
 
@@ -207,6 +210,7 @@ class RotationHedgeStrategy:
         # （孤腿会被平、双腿到期轮换），不假设是本进程开的仓
         legs = self._legs_qty()
         if legs["a"] != 0 or legs["b"] != 0:
+            self._has_opened = True
             self.phase = "open"
             self.opened_at = now
             self.hold_drawn = draw_hold_seconds(self.params, self.rng)
@@ -246,6 +250,8 @@ class RotationHedgeStrategy:
                                      self.params.symbol, qty=qty)
 
     def _finish_round(self, now: float) -> None:
+        if self.single_cycle and self._has_opened:
+            self.cycle_done = True
         self.phase = "cooldown"
         self.closed_at = now
         self.open_corridor = None
@@ -519,6 +525,7 @@ class RotationHedgeStrategy:
             self.hold_drawn = draw_hold_seconds(self.params, self.rng)
         self._last_add_at = now
         self.phase = "open"
+        self._has_opened = True
 
     def _add_step(self, now: float) -> bool:
         """逐步建仓加一档（max_position_qty>0 时）：沿现有持仓方向
@@ -698,7 +705,7 @@ class RotationHedgeStrategy:
 
     # ----- 主循环 -----
     def tick(self, now: float = 0.0, allow_open: bool = True) -> None:
-        if self.executor is None or self.stopped:
+        if self.executor is None or self.stopped or self.cycle_done:
             return
         self._ensure_claims()
 

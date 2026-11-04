@@ -44,10 +44,16 @@ venues:
 # 任务名（name）必填且唯一，它是归属与账本的标识。
 # 同一 (场所, 币种) 只能被一个任务占用（双腿策略占两个场所），
 # 重复配置在加载时直接报错。
+# run_mode（任务顶层字段，可选）：manual = 自主（自己选标、开
+# 一笔、平完结束，不自动重开）；auto = 全自动（只定两所/金额/
+# 门槛，系统自动选标→开仓→平仓→冷却→再选标循环，点停止才停）。
+# 缺省 manual；全自动任务按「该场所任意币种」占位，与同场所的
+# 其他任务都算冲突。
 # 启用示例：去掉对应行首的 "# "，并把占位符换成自己实测/设定的值。
 tasks: []
 #  - name: <任务名，如 hgrid-btc-arcus>
 #    strategy: hedged_grid        # 中性网格：WGALL 网格 + Parallax 对锁
+#    run_mode: manual          # 运行模式：manual 自主（开一笔、平完结束）/ auto 全自动（自动选标循环）
 #    params:
 #      grid_venue: <venue_id>     # 网格腿
 #      hedge_venue: <venue_id>    # 对冲腿（与网格腿净仓位反向等量）
@@ -70,6 +76,7 @@ tasks: []
 #      # 太密时磨损会吃掉网格利润；死区太小也会频繁调平。
 #  - name: <任务名，如 arb-entropy-rh>
 #    strategy: premium_arb        # 溢价套利：entropy-arb 价差带逻辑
+#    run_mode: manual          # 运行模式：manual 自主（开一笔、平完结束）/ auto 全自动（自动选标循环）
 #    params:
 #      symbol: <币种>
 #      base_venue: <venue_id>     # 基准腿
@@ -96,6 +103,7 @@ tasks: []
 #      leverage_hedge: <杠杆，与账户实际设置一致>
 #  - name: <任务名，如 hedge-arcus-lighter>
 #    strategy: rotation_hedge     # 轮换对冲刷量：Parallax
+#    run_mode: manual          # 运行模式：manual 自主（开一笔、平完结束）/ auto 全自动（自动选标循环）
 #    params:
 #      symbol: <币种>
 #      venue_a: <venue_id>
@@ -117,6 +125,7 @@ tasks: []
 #      accumulate_interval_seconds: 60   # 逐步建仓的加仓间隔
 #  - name: <任务名，如 carry-arcus-lighter>
 #    strategy: funding_carry      # 资金费 carry：Parallax 资金费选向独立成策略
+#    run_mode: manual          # 运行模式：manual 自主（开一笔、平完结束）/ auto 全自动（自动选标循环）
 #    params:
 #      symbol: <币种>
 #      venue_a: <venue_id>

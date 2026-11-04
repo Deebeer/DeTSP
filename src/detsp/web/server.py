@@ -329,12 +329,26 @@ class PanelState:
         for t in self.engine.tasks:
             seen.add(t.name)
             cfg = self.task_cfgs.get(t.name, {})
+            run_mode = getattr(t, "run_mode", None) or \
+                cfg.get("run_mode") or "manual"
+            rt = t.runtime
+            is_auto = run_mode == "auto"
             out.append({
                 "id": t.name, "name": t.name, "strategy": t.strategy_type,
                 "status": self._task_status(t),
                 "source": self._source(t.name),
                 "last_error": t.last_error or self.engine.errors.get(t.name, ""),
                 "params": {k: v for k, v in cfg.items() if k != "name"},
+                # 运行模式（第九轮）：auto 任务的当前标的/阶段/轮数
+                # 取自监督器运行时；manual 任务 auto_* 为空/0
+                "run_mode": run_mode,
+                "auto_phase": getattr(rt, "auto_phase", "")
+                if is_auto else "",
+                "current_symbol": getattr(rt, "current_symbol", None)
+                if is_auto else None,
+                "cycles_completed": int(
+                    getattr(rt, "cycles_completed", 0) or 0)
+                if is_auto else 0,
             })
         for name, cfg in self.task_cfgs.items():
             if name not in seen:   # 组装失败的任务也要在面板可见
@@ -346,6 +360,9 @@ class PanelState:
                     "source": self._source(name),
                     "last_error": self.engine.errors.get(name, "组装失败"),
                     "params": {k: v for k, v in cfg.items() if k != "name"},
+                    "run_mode": cfg.get("run_mode") or "manual",
+                    "auto_phase": "", "current_symbol": None,
+                    "cycles_completed": 0,
                 })
         for name, cfg in self.panel_cfgs.items():
             if name in self.panel_skip_errors:
@@ -359,6 +376,9 @@ class PanelState:
                     "last_error": self.panel_skip_errors.get(
                         name, "未加载"),
                     "params": {k: v for k, v in cfg.items() if k != "name"},
+                    "run_mode": cfg.get("run_mode") or "manual",
+                    "auto_phase": "", "current_symbol": None,
+                    "cycles_completed": 0,
                 })
         return out
 
@@ -402,8 +422,10 @@ class PanelState:
         if cfg is None or self.engine.executor is None or self.app_config is None:
             return {"ok": False, "error": f"任务不存在或引擎未就绪：{name}"}
         try:
-            new_task = build_task(cfg, self.engine.executor,
-                                  self.app_config.risk)
+            new_task = build_task(
+                cfg, self.engine.executor, self.app_config.risk,
+                scanner=getattr(self.engine, "market_scanner", None)
+                or self.market_scanner)
         except Exception as e:
             return {"ok": False, "error": f"启动失败：{e}"}
         for note in getattr(new_task.runtime, "recovery_notes", []) or []:
@@ -425,10 +447,13 @@ class PanelState:
         except TimeoutError:
             return {"ok": False, "error": "引擎主循环繁忙，命令超时，请重试"}
 
-    def create_task(self, name, strategy, params) -> dict:
-        return self._run(lambda: self._do_create_task(name, strategy, params))
+    def create_task(self, name, strategy, params,
+                    run_mode="manual") -> dict:
+        return self._run(lambda: self._do_create_task(
+            name, strategy, params, run_mode))
 
-    def _do_create_task(self, name, strategy, params) -> dict:
+    def _do_create_task(self, name, strategy, params,
+                        run_mode="manual") -> dict:
         name = str(name or "").strip()
         if not name:
             return {"ok": False, "error": "任务名必填"}
@@ -436,6 +461,11 @@ class PanelState:
             return {"ok": False, "error":
                     f"未知策略：{strategy}，可用策略："
                     f"{' / '.join(PARAMS_CLASSES)}"}
+        run_mode = str(run_mode or "manual")
+        if run_mode not in ("manual", "auto"):
+            return {"ok": False, "error":
+                    f"运行模式不合法：{run_mode}，只许 manual（自主）/ "
+                    f"auto（全自动）"}
         if name in self.task_cfgs or name in self.panel_cfgs or \
                 any(t.name == name for t in self.engine.tasks):
             return {"ok": False, "error": f"任务名已存在：{name}"}
@@ -443,7 +473,8 @@ class PanelState:
             clean = validate_params(strategy, params or {})
         except ValueError as e:
             return {"ok": False, "error": f"参数不合法：{e}"}
-        cfg = {"name": name, "strategy": strategy, "params": clean}
+        cfg = {"name": name, "strategy": strategy, "params": clean,
+               "run_mode": run_mode}
         try:
             self.engine.add_task_dynamic(cfg)
         except Exception as e:  # 占用冲突/caps/启动对账失败：原样说清
@@ -454,10 +485,11 @@ class PanelState:
         self._event(f"创建任务「{name}」（{strategy}）")
         return {"ok": True, "task": name}
 
-    def update_task(self, name, params) -> dict:
-        return self._run(lambda: self._do_update_task(name, params))
+    def update_task(self, name, params, run_mode=None) -> dict:
+        return self._run(lambda: self._do_update_task(
+            name, params, run_mode))
 
-    def _do_update_task(self, name, params) -> dict:
+    def _do_update_task(self, name, params, run_mode=None) -> dict:
         name = str(name or "").strip()
         if name not in self.panel_cfgs:
             if name in self.task_cfgs:
@@ -471,11 +503,20 @@ class PanelState:
                     f"任务「{name}」与配置文件任务重名被跳过，面板改不了，"
                     f"请删除后换个名字重新新建"}
         strategy = old_cfg["strategy"]
+        if run_mode is None:
+            # 编辑弹窗不带模式时保持原模式，不许悄悄改语义
+            run_mode = old_cfg.get("run_mode") or "manual"
+        run_mode = str(run_mode or "manual")
+        if run_mode not in ("manual", "auto"):
+            return {"ok": False, "error":
+                    f"运行模式不合法：{run_mode}，只许 manual（自主）/ "
+                    f"auto（全自动）"}
         try:
             clean = validate_params(strategy, params or {})
         except ValueError as e:
             return {"ok": False, "error": f"参数不合法：{e}"}
-        new_cfg = {"name": name, "strategy": strategy, "params": clean}
+        new_cfg = {"name": name, "strategy": strategy, "params": clean,
+                   "run_mode": run_mode}
         # 运行中改参数 = 先停（撤单+平仓）再按新参数重组
         was_stopped = name in self.stopped_by_user
         in_engine = any(t.name == name for t in self.engine.tasks)
@@ -523,8 +564,17 @@ class PanelState:
         # 有持仓拒绝删：先停止平仓或手动平仓后再删
         ex = self.engine.executor
         if ex is not None:
-            for venue_id, symbol in sorted(task_occupied_keys(cfg)):
-                if not venue_id or not symbol:
+            occupied = set(task_occupied_keys(cfg))
+            if (cfg.get("run_mode") or "manual") == "auto" and \
+                    t_obj is not None:
+                # 全自动任务的占用键是通配 "*"，真实持仓在监督器
+                # 当前标的上：把当前标的的两腿也纳入持仓检查
+                cur = getattr(t_obj.runtime, "current_symbol", None)
+                if cur:
+                    for venue_id, _ in list(occupied):
+                        occupied.add((venue_id, cur))
+            for venue_id, symbol in sorted(occupied):
+                if not venue_id or not symbol or symbol == "*":
                     continue
                 pos = ex.position(venue_id, symbol)
                 if pos is not None and pos.qty != 0:
@@ -807,14 +857,16 @@ def make_handler(state: PanelState):
                     return
                 res = state.create_task(body.get("name"),
                                         body.get("strategy"),
-                                        body.get("params") or {})
+                                        body.get("params") or {},
+                                        body.get("run_mode") or "manual")
                 self._json(res, 200 if res.get("ok") else 400)
             elif parts == ["api", "tasks", "update"]:
                 body = self._json_body()
                 if body is None:
                     return
                 res = state.update_task(body.get("name"),
-                                        body.get("params") or {})
+                                        body.get("params") or {},
+                                        body.get("run_mode"))
                 self._json(res, 200 if res.get("ok") else 400)
             elif parts == ["api", "tasks", "delete"]:
                 body = self._json_body()

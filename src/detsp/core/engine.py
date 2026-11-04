@@ -40,7 +40,10 @@ class Task:
     name: str
     strategy_type: str
     runtime: object  # HedgedGridStrategy / RotationHedgeStrategy /
-    # PremiumArbStrategy / FundingCarryStrategy
+    # PremiumArbStrategy / FundingCarryStrategy / AutoCycleRuntime
+    # 运行模式：manual=自主（单笔，平仓后任务结束）/ auto=全自动
+    # （监督器自动选标循环，见 core.auto_cycle）
+    run_mode: str = "manual"
     errors: ErrorCounter = field(default_factory=ErrorCounter)
     last_error: str = ""
     disabled: bool = False
@@ -56,7 +59,9 @@ def task_occupied_keys(task_cfg: dict) -> set[tuple[str, str]]:
         return str((task_cfg.get("params") or {}).get(key) or "")
 
     strat = task_cfg.get("strategy")
-    sym = _tf("symbol")
+    # 全自动任务不绑单个标的（监督器动态选标）：占用口径用通配
+    # "*"——该任务的两个场所不许再被任何其他任务占用
+    sym = "*" if task_cfg.get("run_mode") == "auto" else _tf("symbol")
     used: set[tuple[str, str]] = set()
     if strat == "hedged_grid":
         used.add((_tf("grid_venue"), sym))
@@ -70,22 +75,66 @@ def task_occupied_keys(task_cfg: dict) -> set[tuple[str, str]]:
     return used
 
 
-def build_task(task_cfg: dict, executor: Executor, risk_cfg) -> Task:
-    """由 config 的一条 task dict 组装策略运行时。
+def build_runtime(strategy: str, clean_params: dict, executor: Executor,
+                  risk_cfg, owner: str):
+    """按策略用已清洗参数构造运行时并 start() 后返回。
 
-    只认四个现行策略：hedged_grid / premium_arb / rotation_hedge /
-    funding_carry。已移除的旧策略名（grid / volume_loop）与未知
-    名字一样报错，并明确列出可用策略，避免用户对着旧配置猜。
+    build_task（单笔/自主）与全自动监督器（core.auto_cycle 每轮
+    选标后组装内层单笔运行时）共用同一条构造路径。
     """
     from ..strategies.funding_carry import CarryParams, FundingCarryStrategy
     from ..strategies.hedged_grid import HedgedGridParams, HedgedGridStrategy
     from ..strategies.premium_arb import PremiumArbStrategy, PremiumParams
     from ..strategies.rotation_hedge import RotationHedgeStrategy, RotationParams
+
+    available = "hedged_grid / premium_arb / rotation_hedge / funding_carry"
+    if strategy == "hedged_grid":
+        runtime = HedgedGridStrategy(
+            HedgedGridParams(**clean_params),
+            executor=executor, owner=owner)
+    elif strategy == "rotation_hedge":
+        runtime = RotationHedgeStrategy(
+            RotationParams(**clean_params),
+            executor=executor, risk_cfg=risk_cfg, owner=owner)
+    elif strategy == "premium_arb":
+        runtime = PremiumArbStrategy(
+            PremiumParams(**clean_params),
+            executor=executor, owner=owner)
+    elif strategy == "funding_carry":
+        runtime = FundingCarryStrategy(
+            CarryParams(**clean_params),
+            executor=executor, risk_cfg=risk_cfg, owner=owner)
+    else:
+        raise ValueError(
+            f"未知策略类型：{strategy}，可用策略：{available}")
+    runtime.start()
+    return runtime
+
+
+def build_task(task_cfg: dict, executor: Executor, risk_cfg,
+               scanner=None) -> Task:
+    """由 config 的一条 task dict 组装策略运行时。
+
+    只认四个现行策略：hedged_grid / premium_arb / rotation_hedge /
+    funding_carry。已移除的旧策略名（grid / volume_loop）与未知
+    名字一样报错，并明确列出可用策略，避免用户对着旧配置猜。
+
+    运行模式（task 顶层 run_mode，不进 params）：manual=自主
+    （缺省）——运行时设 single_cycle，一笔平仓后引擎停用任务；
+    auto=全自动——运行时是 AutoCycleRuntime 监督器，由它自动
+    选标、逐笔组装内层单笔运行时循环运行（scanner 为行情扫描
+    器，缺省时监督器内部惰性自建）。
+    """
     from ..strategies.specs import validate_params
 
     available = "hedged_grid / premium_arb / rotation_hedge / funding_carry"
     name = str(task_cfg.get("name") or task_cfg.get("strategy") or "task")
     stype = task_cfg.get("strategy")
+    run_mode = task_cfg.get("run_mode") or "manual"
+    if run_mode not in ("manual", "auto"):
+        raise ValueError(
+            f"任务 {name} 的 run_mode 非法：{run_mode}，"
+            f"只许 manual（自主）/ auto（全自动）")
     params_raw = dict(task_cfg.get("params") or {})
     # venue/symbol 也可写在 task 顶层，合并进参数（params 内优先）
     for k in ("venue", "symbol", "venue_a", "venue_b",
@@ -96,35 +145,46 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg) -> Task:
     if stype in ("grid", "volume_loop"):
         raise ValueError(
             f"策略 {stype} 已移除，可用策略：{available}")
+    # 全自动任务不写 symbol（监督器逐轮选标）、中性网格不写区间
+    # 上下限（监督器逐轮按 K 线/价格定）：这两类「监督器供给
+    # 字段」在校验前填占位让必填检查通过，校验后从 clean 摘除，
+    # 用户实填字段仍走全量校验，口径不放松
+    auto_supplied: set[str] = set()
+    if run_mode == "auto":
+        supplied = {"symbol": "AUTO"}
+        if stype == "hedged_grid":
+            supplied.update({"lower_price": 1.0, "upper_price": 2.0})
+        for k, v in supplied.items():
+            if k not in params_raw:
+                params_raw[k] = v
+                auto_supplied.add(k)
     # 参数校验走 strategies.specs 的单一事实源（与面板表单同一份
     # 规格）：未知字段/缺必填/类型不符都在这里逐项报错
     clean = validate_params(str(stype), params_raw) \
         if stype in ("hedged_grid", "premium_arb", "rotation_hedge",
                      "funding_carry") else None
-    if stype == "hedged_grid":
-        runtime = HedgedGridStrategy(
-            HedgedGridParams(**clean),
-            executor=executor, owner=name)
-        runtime.start()
-    elif stype == "rotation_hedge":
-        runtime = RotationHedgeStrategy(
-            RotationParams(**clean),
-            executor=executor, risk_cfg=risk_cfg, owner=name)
-        runtime.start()
-    elif stype == "premium_arb":
-        runtime = PremiumArbStrategy(
-            PremiumParams(**clean),
-            executor=executor, owner=name)
-        runtime.start()
-    elif stype == "funding_carry":
-        runtime = FundingCarryStrategy(
-            CarryParams(**clean),
-            executor=executor, risk_cfg=risk_cfg, owner=name)
-        runtime.start()
-    else:
+    if clean is None:
         raise ValueError(
             f"未知策略类型：{stype}，可用策略：{available}")
-    return Task(name=name, strategy_type=str(stype), runtime=runtime)
+    for k in auto_supplied:
+        clean.pop(k, None)
+    if run_mode == "auto":
+        # 延迟导入避免与 core.auto_cycle 循环依赖
+        from .auto_cycle import AutoCycleRuntime
+
+        runtime = AutoCycleRuntime(
+            strategy_type=stype, params=clean, executor=executor,
+            risk_cfg=risk_cfg, owner=name, scanner=scanner)
+    else:
+        runtime = build_runtime(stype, clean, executor, risk_cfg, name)
+        # 自主模式：只跑一笔，平仓后策略置 cycle_done，引擎随即
+        # 停用任务（见 Engine.tick），不自动重开
+        runtime.single_cycle = True
+        if stype == "funding_carry":
+            runtime.recovery_notes.append(
+                "自主模式：本笔平仓后任务结束，不按 reopen 参数自动重开")
+    return Task(name=name, strategy_type=str(stype), runtime=runtime,
+                run_mode=run_mode)
 
 
 @dataclass
@@ -138,6 +198,9 @@ class Engine:
     # 组装动态任务时用的风控配置（from_config 时存入；rotation /
     # carry 的运行时需要它，面板新建任务也走同一份）
     risk_cfg: object = None
+    # 行情扫描器（from_config 时存入）：全自动任务的监督器选标用，
+    # 组装任务时透传给 build_task
+    market_scanner: object = None
     # 面板任务名集合（与 config 任务区分：只有它们能在面板删改）
     panel_task_names: set[str] = field(default_factory=set)
     # S3：启动恢复对账等事件（面板可见）
@@ -184,7 +247,8 @@ class Engine:
     # ----- 执行模式 -----
     @classmethod
     def from_config(cls, app_config, venues: dict, ledger: Ledger | None = None,
-                    caps=None, state_dir: str | Path | None = None) -> "Engine":
+                    caps=None, state_dir: str | Path | None = None,
+                    scanner=None) -> "Engine":
         """按 AppConfig.tasks 组装引擎。
 
         - caps：显式传入优先；缺省时从 app_config.caps（H1 的 config
@@ -210,6 +274,7 @@ class Engine:
                             min_corridor_pct=app_config.risk.min_corridor_pct)
         engine = cls(registry=registry, kill_switch=kill_switch,
                      executor=executor, risk_cfg=app_config.risk,
+                     market_scanner=scanner,
                      max_consecutive_errors=app_config.risk.max_consecutive_errors)
         if kill_switch.halted:
             engine.events.append(
@@ -217,7 +282,8 @@ class Engine:
                 f"须人工 reset 才恢复开仓")
         for task_cfg in getattr(app_config, "tasks", []) or []:
             try:
-                task = build_task(task_cfg, executor, app_config.risk)
+                task = build_task(task_cfg, executor, app_config.risk,
+                                  scanner=scanner)
                 engine.tasks.append(task)
                 for note in getattr(task.runtime, "recovery_notes", []) or []:
                     engine.events.append(f"[{task.name}] {note}")
@@ -243,7 +309,8 @@ class Engine:
             raise ValueError("任务名必填")
         if any(t.name == name for t in self.tasks) or name in self.errors:
             raise ValueError(f"任务名已存在：{name}（重名任务请先删除或改名）")
-        task = build_task(task_cfg, self.executor, self.risk_cfg)
+        task = build_task(task_cfg, self.executor, self.risk_cfg,
+                          scanner=self.market_scanner)
         self.tasks.append(task)
         self.panel_task_names.add(name)
         for note in getattr(task.runtime, "recovery_notes", []) or []:
@@ -275,7 +342,8 @@ class Engine:
                 self.events.append(f"[面板任务 {name}] 加载失败已跳过：{msg}")
                 continue
             try:
-                task = build_task(cfg, self.executor, self.risk_cfg)
+                task = build_task(cfg, self.executor, self.risk_cfg,
+                                  scanner=self.market_scanner)
                 self.tasks.append(task)
                 for note in getattr(task.runtime, "recovery_notes", []) or []:
                     self.events.append(f"[{name}] {note}")
@@ -321,6 +389,16 @@ class Engine:
             try:
                 task.runtime.tick(now, allow_open=allow_open)
                 task.errors.record_success()
+                if task.run_mode == "manual" \
+                        and getattr(task.runtime, "cycle_done", False) \
+                        and not task.disabled:
+                    # 自主模式单笔已平仓：任务到此结束（不调
+                    # runtime.stop()——仓位已平、无单可撤，策略
+                    # 本身已收尾；停用只是不再调度）
+                    task.disabled = True
+                    self.events.append(
+                        f"[{task.name}] 自主模式：本笔已平仓，"
+                        f"任务结束（不自动重开）")
             except RiskHaltError as e:
                 # 停机在 tick 中途被触发（如面板线程直接 halt）时，
                 # 开仓被风控拒绝是安全机制的正常结果，不是任务

@@ -66,19 +66,34 @@ def _venues(fa=0.0001, fb=0.0005):
     return {"arcus": a, "lighter": b}
 
 
-def _build(venues, **params):
+def _build(venues, _run_mode=None, _scanner=None, **params):
     base = {"symbol": "BTC", "venue_a": "arcus", "venue_b": "lighter",
             "notional_usd": 300, "leverage": 5,
             "min_entry_edge_bps_per_hour": 2.0,
             "exit_edge_bps_per_hour": 1.0, "exit_confirm_checks": 2,
             "check_seconds": 10, "cooldown_seconds": 30}
     base.update(params)
-    y = {"tasks": [{"name": "carry", "strategy": "funding_carry",
-                    "params": base}]}
+    task = {"name": "carry", "strategy": "funding_carry", "params": base}
+    if _run_mode:
+        task["run_mode"] = _run_mode
+    y = {"tasks": [task]}
     cfg = build_config(env={}, yaml_data=y)
-    engine = Engine.from_config(cfg, venues, ledger=Ledger())
+    engine = Engine.from_config(cfg, venues, ledger=Ledger(),
+                                scanner=_scanner)
     assert "carry" not in engine.errors, engine.errors
     return engine
+
+
+class _FakeScanner:
+    """全自动模式测试用假扫描器：BTC 费差恒 4 bps/小时（≥ 门槛）。"""
+
+    def pairs(self, venue_a, venue_b, strategy):
+        return {"rows": [{"symbol": "BTC", "price_a": 60_000.0,
+                          "price_b": 60_000.0, "edge_bps_h": 4.0,
+                          "has_price": True, "suspect": False}]}
+
+    def candles(self, venue_id, symbol):
+        return {"ok": False, "error": "假扫描器无 K 线"}
 
 
 def _legs(engine):
@@ -125,8 +140,12 @@ def test_hourly_conversion_across_intervals():
 
 
 def test_max_hold_and_reopen_after_cooldown():
+    # 第九轮夹具调整：本例验证的是「平仓→冷却→再开」的循环语义，
+    # 第九轮起缺省自主模式只跑一笔，故显式改走全自动模式
+    # （run_mode: auto + 假扫描器选标），时序与断言不变
     venues = _venues()
-    engine = _build(venues, max_hold_seconds=50.0)
+    engine = _build(venues, _run_mode="auto", _scanner=_FakeScanner(),
+                    max_hold_seconds=50.0)
     engine.tick(now=1000)
     assert _legs(engine)[0] == pytest.approx(0.005)
     engine.tick(now=1051)   # 超过最长持有 → 平仓进冷却（30s）

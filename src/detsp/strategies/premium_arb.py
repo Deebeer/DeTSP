@@ -262,6 +262,9 @@ class PremiumArbStrategy:
         self._maker: _MakerOpen | None = None
         self._settle_until = -1e18   # 结算宽限截止（G1）：此时间前
         # 定期对账不做 delta 削腿
+        self.single_cycle = False
+        self.cycle_done = False
+        self._cycle_seen = False
         self.stopped = False
         self.last_error: str = ""
         self.recovery_notes: list[str] = []  # 启动对账事件
@@ -278,6 +281,8 @@ class PremiumArbStrategy:
         # 强平距离由 tick 监控接管
         qb = self._pos_qty(self.params.base_venue)
         qh = self._pos_qty(self.params.hedge_venue)
+        if qb != 0 and qh != 0:
+            self._cycle_seen = True
         if qb != 0 or qh != 0:
             self.recovery_notes.append(
                 f"启动对账：发现已有持仓 base={qb} hedge={qh}，"
@@ -292,6 +297,7 @@ class PremiumArbStrategy:
         self.executor.cancel_all_own(self.owner, p.hedge_venue, p.symbol)
         self.executor.close_position(self.owner, p.base_venue, p.symbol)
         self.executor.close_position(self.owner, p.hedge_venue, p.symbol)
+        self._note_cycle_positions()
 
     def stop(self) -> None:
         """面板停止：撤单 + 双腿全平，并停机（不再 tick 动作）。"""
@@ -310,6 +316,17 @@ class PremiumArbStrategy:
     def _pos_qty(self, venue_id: str) -> float:
         pos = self.executor.position(venue_id, self.params.symbol)
         return pos.qty if pos else 0.0
+
+    def _note_cycle_positions(self) -> None:
+        if not self.single_cycle or self.cycle_done:
+            return
+        qb = self._pos_qty(self.params.base_venue)
+        qh = self._pos_qty(self.params.hedge_venue)
+        if qb != 0 and qh != 0:
+            self._cycle_seen = True
+        elif self._cycle_seen and qb == 0 and qh == 0 \
+                and self._maker is None:
+            self.cycle_done = True
 
     def _fix_delta(self, now: float | None = None) -> None:
         """净 delta 修正：多出的腿用带滑点上限的 reduce-only 限价
@@ -395,6 +412,7 @@ class PremiumArbStrategy:
         self._settle_until = now + p.settle_grace_seconds
         self._last_reconcile = -1e18  # 宽限期满后下一 tick 先对账确认
         self._last_fire = now
+        self._note_cycle_positions()
 
     def _fire(self, signal: str, now: float) -> None:
         p = self.params
@@ -480,6 +498,7 @@ class PremiumArbStrategy:
             intent="open", corridor_pct=corr_hedge)
         self._settle_until = now + p.settle_grace_seconds
         self._last_reconcile = -1e18
+        self._note_cycle_positions()
 
     def _maker_final_filled(self, mk: _MakerOpen) -> float | None:
         """maker 单的最终成交量：优先 poll 终态；poll 不可得时用
@@ -617,6 +636,9 @@ class PremiumArbStrategy:
         if self.executor is None or self.stopped:
             return
         self._ensure_claims()
+        self._note_cycle_positions()
+        if self.cycle_done:
+            return
         p = self.params
         ex = self.executor
 

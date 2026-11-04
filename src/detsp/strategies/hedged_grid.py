@@ -218,6 +218,8 @@ class HedgedGridStrategy:
         self.executor = executor
         # 归属 owner = 任务名（config 的 name）；未给时退回类型名
         self.owner = owner or self.name
+        self.single_cycle = False
+        self.cycle_done = False
         self.started = False
         self.stopped = False
         self.recovering = False
@@ -367,6 +369,8 @@ class HedgedGridStrategy:
                     self.executor.release(self.owner, vid, p.symbol)
                 except Exception:  # noqa: BLE001 — 未 claim 时不挡停机
                     pass
+        if close and self.single_cycle:
+            self.cycle_done = True
 
     def request_refill(self) -> None:
         """人工补格触发：下一 tick 只补一次空缺层级。"""
@@ -701,6 +705,8 @@ class HedgedGridStrategy:
             self._recovery_orders.clear()
             self.recovering = False
             self.stopped = True
+            if self.single_cycle:
+                self.cycle_done = True
             if self._pos(p.hedge_venue) == 0:
                 # 按数量判零而不是 position() 返回 None（自查 L4
                 # 同一口径：零量持仓行不算还有持仓）
