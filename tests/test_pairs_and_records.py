@@ -442,6 +442,8 @@ def test_records_endpoints_over_http(state):
         with urllib.request.urlopen(base + "/api/records",
                                     timeout=5) as r:
             rec = json.loads(r.read().decode("utf-8"))
+        # records 带 updated_at（面板「更新 HH:MM:SS」小字的数据源）
+        assert rec.pop("updated_at") > 0
         assert rec == {"open": [], "closed": []}
     finally:
         stop_flag.set()

@@ -15,6 +15,7 @@ dataclass 反射得到，不在本模块重复维护；tests 里有专门的一�
 from __future__ import annotations
 
 import dataclasses
+import re
 
 from ..core.config import VENUE_IDS
 from .funding_carry import CarryParams
@@ -43,8 +44,19 @@ STRATEGY_BLURBS = {
     "funding_carry": "两所一多一空长期持有，专门收两所资金费率的差额。",
 }
 
-# 字段展示元数据：label（中文说明）/ group（分组）/ type 覆盖 /
-# options（枚举）。不在此列的字段按 dataclass 类型推断。
+# 字段展示元数据：label 以「字段名（简短说明）」书写（单一事实
+# 源），strategy_specs() 输出时拆成 label（名）与 desc（说明）
+# 两项，面板按三段式呈现（名一行、说明一行暗灰小字、输入框
+# 一行）；group（分组）/ type 覆盖 / options（枚举）。不在此列
+# 的字段按 dataclass 类型推断。
+_LABEL_RE = re.compile(r"^(.*?)（(.*)）$")
+
+
+def _split_label(raw: str) -> tuple[str, str]:
+    m = _LABEL_RE.match(raw or "")
+    if m:
+        return m.group(1), m.group(2)
+    return raw or "", ""
 _VENUE = {"type": "venue"}
 _FIELD_META: dict[str, dict[str, dict]] = {
     "hedged_grid": {
@@ -322,6 +334,7 @@ PAGE_META: dict[str, dict] = {
         "venue_labels": ("网格腿", "对冲腿"),
         "opportunity": "grid",
         "amount": None,
+        "amount_desc": None,
         "market_value": "price",
         "name_prefix": "grid",
         "how_it_works": [
@@ -341,6 +354,7 @@ PAGE_META: dict[str, dict] = {
         "venue_labels": ("A腿", "B腿"),
         "opportunity": "funding",
         "amount": "notional_usd",
+        "amount_desc": "自由填写（USD，每边）",
         "market_value": "funding_apr",
         "name_prefix": "rotation",
         "how_it_works": [
@@ -362,6 +376,7 @@ PAGE_META: dict[str, dict] = {
         "venue_labels": ("基准腿", "对冲腿"),
         "opportunity": "spread",
         "amount": "max_position_usd",
+        "amount_desc": "自由填写（USD）",
         "market_value": "spread_bps",
         "name_prefix": "arb",
         "how_it_works": [
@@ -386,6 +401,7 @@ PAGE_META: dict[str, dict] = {
         "venue_labels": ("A腿", "B腿"),
         "opportunity": "funding",
         "amount": "notional_usd",
+        "amount_desc": "自由填写（USD，每边）",
         "market_value": "funding_apr",
         "name_prefix": "carry",
         "how_it_works": [
@@ -429,9 +445,11 @@ def strategy_specs() -> list[dict]:
             meta = meta_all.get(f.name, {})
             required = f.default is dataclasses.MISSING and \
                 f.default_factory is dataclasses.MISSING
+            label, desc = _split_label(meta.get("label", f.name))
             item = {
                 "name": f.name,
-                "label": meta.get("label", f.name),
+                "label": label,
+                "desc": desc,
                 "type": _infer_type(f, meta),
                 "required": required,
                 "default": None if required else f.default,
@@ -455,6 +473,7 @@ def strategy_specs() -> list[dict]:
                 "venue_labels": list(page["venue_labels"]),
                 "opportunity": page["opportunity"],
                 "amount": page["amount"],
+                "amount_desc": page.get("amount_desc"),
                 "market_value": page["market_value"],
                 "name_prefix": page["name_prefix"],
                 "how_it_works": list(page["how_it_works"]),

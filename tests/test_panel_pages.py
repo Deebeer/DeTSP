@@ -7,9 +7,11 @@
 无 chips）/ 选市场（pairs 下拉）/ 配置（预设四态）/ 高级选项 /
 交易预览 / 运行中仓位，无热门机会表）；总览两行统计（今日 +
 累计，含盈亏估算口径）与最佳机会混合列表；策略记录独立页
-两段；字段说明统一为「字段名（简短说明）」；颜色只用一套变量、
+两段；字段说明三段式（label 只剩名 + desc 一句话说明，页面
+fname/fdesc 两行呈现）；颜色只用一套变量、
 无杂色残留；极客风主题关键样式；「资金费套利」改名一致性；
-specs 的 page 元数据自洽（primary / venue_fields / amount /
+实时性与杠杆维度（20 秒刷新、更新戳与失败保留、选市场统计/
+价格行、订单腿杠杆行、预览超限警告）；specs 的 page 元数据自洽（primary / venue_fields / amount /
 market_value / how_it_works / presets / amount_ratios）；
 /api/strategy-specs 把 page 元数据带给前端。
 """
@@ -95,20 +97,49 @@ def test_color_palette_single_source_no_junk_colors():
 
 
 def test_field_labels_have_short_explanations():
-    # 全站字段统一「字段名（简短说明）」：四策略每个字段的 label
-    # 都必须带括号里的一句话说明，且不能太长（大白话、扫一眼懂）
+    # 全站字段三段式：specs 输出把「字段名（简短说明）」拆成
+    # label（只有名、无括号）+ desc（一句话说明，大白话、扫一眼懂）
     for spec in strategy_specs():
         for f in spec["fields"]:
-            label = f["label"]
-            assert "（" in label and label.endswith("）"), \
-                f"{spec['strategy']}.{f['name']} label 缺括号说明：{label}"
-            assert len(label) <= 40, \
-                f"{spec['strategy']}.{f['name']} label 太长：{label}"
+            label, desc = f["label"], f.get("desc")
+            assert "（" not in label and "）" not in label, \
+                f"{spec['strategy']}.{f['name']} label 不应再带括号：{label}"
+            assert desc, \
+                f"{spec['strategy']}.{f['name']} 缺 desc 说明"
+            assert len(label) + len(desc) <= 40, \
+                f"{spec['strategy']}.{f['name']} 名+说明太长：{label}（{desc}）"
     # 用户点名的例子
     by = {s["strategy"]: {f["name"]: f for f in s["fields"]}
           for s in strategy_specs()}
-    assert by["hedged_grid"]["lower_price"]["label"] == \
-        "网格区间下限（网格铺单的最低价）"
+    assert by["hedged_grid"]["lower_price"]["label"] == "网格区间下限"
+    assert by["hedged_grid"]["lower_price"]["desc"] == "网格铺单的最低价"
+    # 金额区说明按用户例子：名下直接写「自由填写（USD，每边）」
+    pages = {s["strategy"]: s["page"] for s in strategy_specs()}
+    assert pages["rotation_hedge"]["amount_desc"] == "自由填写（USD，每边）"
+    assert pages["funding_carry"]["amount_desc"] == "自由填写（USD，每边）"
+
+
+def test_sixth_round_layout_markers():
+    # 三段式渲染：fname（名）/ fdesc（说明）两行 + 输入框
+    assert 'class="fname"' in PAGE_HTML and 'class="fdesc"' in PAGE_HTML
+    assert "fldHead" in PAGE_HTML
+    # 选市场定版版式：统计行 + 币种下拉 + 价格行（实际价格带口径）
+    assert "pairsStats" in PAGE_HTML and "pairPrices" in PAGE_HTML
+    assert '"共同 "' in PAGE_HTML and '" 上市 "' in PAGE_HTML
+    assert '"价格："' in PAGE_HTML and "renderPairPrices" in PAGE_HTML
+    # 数据区块更新戳：时间取接口 updated_at，失败标黄保留旧数据
+    for marker in ('id="ovUpd"', 'id="bestUpd"', 'id="recUpd"',
+                   "pairsUpd", "prevUpd", "setUpd", "更新 ",
+                   "刷新失败，显示上次数据"):
+        assert marker in PAGE_HTML, marker
+    # 实时节奏：pairs/最佳机会 20 秒（与扫描缓存对齐），旧 30 秒不得残留
+    assert "},20000);" in PAGE_HTML
+    assert "},30000);" not in PAGE_HTML
+    # 订单腿杠杆行 + 预览超限警告（只展示与警告，不改执行行为）
+    assert "data-leglev" in PAGE_HTML and "legLevText" in PAGE_HTML
+    assert "杠杆上限未知" in PAGE_HTML and "逐仓 only" in PAGE_HTML
+    assert "实际执行可能被该所拒绝或按上限成交" in PAGE_HTML
+    assert "所需保证金按各腿所填杠杆计算" in PAGE_HTML
 
 
 def test_leg_rows_show_available_balance():

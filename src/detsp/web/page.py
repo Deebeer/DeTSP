@@ -17,26 +17,38 @@ server.overview）、各所权益/持仓/挂单、KillSwitch、系统事件，
 （含 page 元数据：两腿字段、主金额、primary、预设三档、运作
 方式文案）生成，流程仿 Mob Exchange 的 Delta 中性配置面板，
 自上而下：页头（策略名 + 说明 + 「运作方式」折叠）→ 订单腿
-（先选两所，每行带该所可用余额）→ 金额（自由输入；网格是目标
-总名义，反推每格量）→ 选市场（/api/pairs 拉所选两所共同上市
-的全部标的、按策略排序，每项带关键指标）→ 配置（保守/中性/
-激进/自定义预设 + 常用字段；预设只套结构参数、绝不改用户填
-的金额，金额派生量按比例换算）→ 高级选项（其余字段，折叠）
-→ 交易预览（按平台分列标记价/预估执行价/所需保证金 + 入场
-条件指示）→ 运行按钮 → 运行中仓位（本策略任务与持仓，含
-启停改删/平仓）。运行中的全部仓位在策略页与策略记录页双处
-可见。
+（先选两所，每行带该所可用余额与该标的最高杠杆/保证金模式）
+→ 金额（自由输入；网格是目标总名义，反推每格量）→ 选市场
+（统计行「共同 N · A所上市 X · B所上市 Y」+ 币种下拉 + 所选
+标的在两腿的实际价格行）→ 配置（保守/中性/激进/自定义预设
++ 常用字段；预设只套结构参数、绝不改用户填的金额，金额派
+生量按比例换算）→ 高级选项（其余字段，折叠）→ 交易预览
+（按平台分列标记价/预估执行价/所需保证金 + 入场条件指示 +
+所填杠杆超过某所该标的上限时的黄色警告）→ 运行按钮 →
+运行中仓位（本策略任务与持仓，含启停改删/平仓）。运行中的
+全部仓位在策略页与策略记录页双处可见。
+
+数据实时性：策略页打开期间 pairs 每 20 秒自动重拉（与扫描
+缓存对齐），排序/预览/腿数量随新数据重算，已选标的与表单
+不被冲掉；总览最佳机会同样 20 秒刷新，总览统计/场所与策略
+记录随 5 秒 overview 节奏。各数据区块右上角有「更新
+HH:MM:SS」小字（时间取自接口 updated_at）；刷新失败保留旧
+数据并把时间戳标黄注明。各所各标的的最高杠杆不同、有的标
+的仅逐仓：订单腿逐行显示该标的在该所的最高杠杆与保证金
+模式（数据来自各所公开接口，拿不到显示未知），预览里所填
+杠杆超上限会警告——本面板只展示与警告，程序不自动改杠杆
+（既有口径）。
 
 视觉：极客终端风——近黑底、直角、等宽字体、高密度表格、状态用
 小圆点 + 大写英文小标签。颜色只用一套变量（--bg/--panel/
 --line/--txt/--mut/--acc/--red/--yel 等）：说明文字统一暗灰，
 强调只有终端绿，涨/多绿、跌/空红、警告黄，不用其他杂色。字段
-呈现统一为「字段名（简短说明）」同行（说明在 specs 的 label
-里），必填星号在名后；与原仓差异这类长注保留在字段下方小字。
-设置（密钥只报已填/未填、绝不回显值）保持原有功能。任务编辑
-仍走弹窗（与策略页共用 specs 动态表单渲染/收集函数）。配置
-文件里的任务在面板只可启停，面板任务才可删改，界面上如实
-标注来源。
+呈现统一三段式：第一行字段名（必填带星号）、第二行说明
+（specs 的 desc，暗灰小字）、第三行输入框；与原仓差异这类
+长注保留在字段下方小字。设置（密钥只报已填/未填、绝不回显
+值）保持原有功能。任务编辑仍走弹窗（与策略页共用 specs
+动态表单渲染/收集函数）。配置文件里的任务在面板只可启停，
+面板任务才可删改，界面上如实标注来源。
 """
 
 PAGE_HTML = """<!DOCTYPE html>
@@ -78,6 +90,10 @@ pre{background:var(--panel2);border:1px solid var(--line);padding:8px;overflow:a
 fieldset{border:1px solid var(--line);margin:10px 0;padding:8px 12px}
 fieldset legend{color:var(--mut);font-size:11px;padding:0 6px;text-transform:uppercase;letter-spacing:.05em}
 .fld{display:block;margin:7px 0;font-size:12px}
+.fname{display:block;color:var(--bright)}
+.fdesc{display:block;color:var(--mut);font-size:11px;margin-top:1px;line-height:1.45}
+.upd{float:right;font-size:11px;color:var(--mut);font-weight:normal;letter-spacing:0;text-transform:none}
+.legLev{flex-basis:100%;font-size:12px;color:var(--mut)}
 .fld input[type=number],.fld input[type=text],.fld select,#mName{width:100%;box-sizing:border-box;background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:5px 8px;margin-top:3px;font:inherit}
 .fhelp{font-size:11px;color:var(--mut);line-height:1.5;margin-top:2px}
 #modal select{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:5px 8px;font:inherit}
@@ -155,7 +171,7 @@ details div{font-size:12px;padding:6px 4px;line-height:1.7}
 <main id="main">
 
 <section class="page on" id="page-overview">
-<h2>总览 <span class="muted" id="mode"></span></h2>
+<h2>总览 <span class="muted" id="mode"></span><span class="upd" id="ovUpd"></span></h2>
 <p class="warn">⚠ 本面板只允许绑本机 127.0.0.1 使用，POST 操作带随机
 token 校验（防跨站借道），但<b>不等于登录鉴权</b>：不要改绑公网地址、
 不要做端口映射。</p>
@@ -165,7 +181,7 @@ token 校验（防跨站借道），但<b>不等于登录鉴权</b>：不要改�
 <p>累计成交量：<b id="avol">-</b>　累计手续费：<b id="afee">-</b>　
 累计成交笔数：<b id="acnt">-</b>　累计盈亏（估算）：<b id="apnl">-</b></p>
 <p class="muted" id="pnlNote"></p>
-<h3>最佳机会</h3>
+<h3>最佳机会 <span class="upd" id="bestUpd"></span></h3>
 <p class="muted">四策略各自的当前最佳标的合并成一张表，按机会值
 从大到小排列；点任意一行跳到对应策略页并带入两腿与标的。</p>
 <table id="bestTbl"><thead><tr>
@@ -178,7 +194,7 @@ token 校验（防跨站借道），但<b>不等于登录鉴权</b>：不要改�
 </section>
 
 <section class="page" id="page-records">
-<h2>策略记录</h2>
+<h2>策略记录 <span class="upd" id="recUpd"></span></h2>
 <p class="muted">运行仓位（按开始时间倒序）</p>
 <table id="recOpen"><thead><tr>
 <th>策略</th><th>任务</th><th>场所</th><th>币种</th><th>方向</th><th>数量</th><th>开仓价</th><th>操作</th>
@@ -209,10 +225,10 @@ token 校验（防跨站借道），但<b>不等于登录鉴权</b>：不要改�
 
 <div id="overlay"><div id="modal">
 <h3 id="mTitle">编辑任务</h3>
-<p class="fld">策略
+<p class="fld"><span class="fname">策略</span>
 <select id="mStrategy"></select></p>
 <p class="muted" id="mBlurb"></p>
-<p class="fld" id="mNameRow">任务名（唯一，建后不可改名）
+<p class="fld" id="mNameRow"><span class="fname">任务名</span><span class="fdesc">唯一，建后不可改名</span>
 <input type="text" id="mName" placeholder="如 carry-BTC-093015"></p>
 <div id="mForm"></div>
 <p class="bad" id="mErr"></p>
@@ -226,8 +242,18 @@ token 校验（防跨站借道），但<b>不等于登录鉴权</b>：不要改�
 const $=s=>document.querySelector(s);
 const TOKEN="__TOKEN__"; // 由后端在返回页面时注入（H2）
 let SPECS=[], VENUES=[], TASKS=[], EDITING=null, LAST_OV=null, FILLS=[];
+let OVSTALE=false, BESTSTALE=false, RECSTALE=false;  // 刷新失败保留旧数据时置位，时间戳标黄
 function esc(x){return String(x==null?"":x).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 function fmt(x,d=2){return x==null?"-":Number(x).toFixed(d)}
+// 数据区块右上角的「更新 HH:MM:SS」：时间一律取接口的 updated_at
+function updClock(ts){const d=new Date(ts*1000),p=n=>String(n).padStart(2,"0");
+return p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds())}
+function setUpd(el, ts, stale){
+if(!el) return;
+if(ts==null){el.textContent=""; el.style.color=""; return}
+el.textContent="更新 "+updClock(ts)+(stale?"（刷新失败，显示上次数据）":"");
+el.style.color=stale?"var(--yel)":"";
+}
 async function post(url){const r=await fetch(url,{method:"POST",headers:{"X-API-Token":TOKEN}});return r.json()}
 async function postJson(url,obj){const r=await fetch(url,{method:"POST",headers:{"X-API-Token":TOKEN,"Content-Type":"application/json"},body:JSON.stringify(obj)});return r.json()}
 
@@ -240,25 +266,34 @@ SPECS.forEach(buildStrategyPage);
 
 function specOf(st){return SPECS.find(s=>s.strategy===st)}
 
-// 单个字段渲染（弹窗表单与策略页共用）。symbolSelect 时币种渲染成
-// 下拉（选项由 fillSymbolSelects 按观察列表填充），否则文本框。
-function renderFieldRaw(f, v, symbolSelect){
+// 单个字段渲染（弹窗表单与策略页共用）。三段式：第一行字段名
+// （必填带星号）、第二行说明（specs 的 desc，暗灰小字）、第三
+// 行输入框。descOverride 给定（如金额区的「自由填写」说明）时
+// 用它顶替字段自带说明。symbolSelect 时币种渲染成下拉（选项
+// 由 fillSymbolSelects 按观察列表填充），否则文本框。
+function fldHead(f, descOverride){
+const desc=descOverride!==undefined?descOverride:f.desc;
+return '<span class="fname">'+esc(f.label)+(f.required?" *":"")+"</span>"+
+(desc?'<span class="fdesc">'+esc(desc)+"</span>":"");
+}
+function renderFieldRaw(f, v, symbolSelect, descOverride){
+const head=fldHead(f, descOverride);
 if(f.type==="bool")
-return '<label class="fld"><input type="checkbox" data-f="'+f.name+'"'+(v?" checked":"")+"> "+esc(f.label)+"</label>";
+return '<label class="fld">'+head+'<input type="checkbox" data-f="'+f.name+'"'+(v?" checked":"")+"></label>";
 if(f.type==="enum")
-return '<label class="fld">'+esc(f.label)+'<select data-f="'+f.name+'">'+f.options.map(o=>'<option value="'+esc(o.value)+'"'+(o.value===v?" selected":"")+">"+esc(o.label)+"</option>").join("")+"</select></label>";
+return '<label class="fld">'+head+'<select data-f="'+f.name+'">'+f.options.map(o=>'<option value="'+esc(o.value)+'"'+(o.value===v?" selected":"")+">"+esc(o.label)+"</option>").join("")+"</select></label>";
 if(f.type==="venue")
-return '<label class="fld">'+esc(f.label)+'<select data-f="'+f.name+'">'+VENUES.map(x=>'<option value="'+esc(x)+'"'+(x===v?" selected":"")+">"+esc(x)+"</option>").join("")+"</select></label>";
+return '<label class="fld">'+head+'<select data-f="'+f.name+'">'+VENUES.map(x=>'<option value="'+esc(x)+'"'+(x===v?" selected":"")+">"+esc(x)+"</option>").join("")+"</select></label>";
 if(symbolSelect&&f.name==="symbol")
-return '<label class="fld">'+esc(f.label)+(f.required?" *":"")+'<select data-f="symbol" class="symSel"></select></label>';
+return '<label class="fld">'+head+'<select data-f="symbol" class="symSel"></select></label>';
 const t=(f.type==="int"||f.type==="float")?"number":"text";
 const step=f.type==="int"?"1":"any";
-return '<label class="fld">'+esc(f.label)+(f.required?" *":"")+'<input type="'+t+'" step="'+step+'" data-f="'+f.name+'" value="'+(v==null?"":esc(v))+'"></label>';
+return '<label class="fld">'+head+'<input type="'+t+'" step="'+step+'" data-f="'+f.name+'" value="'+(v==null?"":esc(v))+'"></label>';
 }
 
-// 带 help 的包装：字段说明（如与原仓默认的差异及原因）渲染在字段下方
-function renderField(f, v, symbolSelect){
-const html=renderFieldRaw(f, v, symbolSelect);
+// 带 help 的包装：与原仓差异这类长注渲染在字段下方小字
+function renderField(f, v, symbolSelect, descOverride){
+const html=renderFieldRaw(f, v, symbolSelect, descOverride);
 return f.help?html+'<div class="fhelp">'+esc(f.help)+"</div>":html;
 }
 
@@ -384,8 +419,16 @@ return {n, vol};
 }
 
 async function refresh(){
-const ov=await (await fetch("/api/overview")).json();
+let ov;
+try{
+ov=await (await fetch("/api/overview")).json();
+OVSTALE=false;
+}catch(e){
+if(!LAST_OV) return;   // 首屏就失败：无旧数据可留，下个周期重试
+ov=LAST_OV; OVSTALE=true;   // 刷新失败：保留旧数据，时间戳标黄注明
+}
 LAST_OV=ov;
+setUpd($("#ovUpd"), ov.updated_at, OVSTALE);
 $("#mode").textContent="（"+(ov.dry_run?"DRY_RUN 只决策不下单":"实盘模式")+"）";
 const ks=ov.killswitch;
 $("#killbox").innerHTML=ks.halted
@@ -422,8 +465,12 @@ const fl=await (await fetch("/api/fills?limit=200")).json();
 FILLS=fl.fills||[];
 try{
 const rc=await (await fetch("/api/records?limit=50")).json();
-RECORDS=rc; renderRecords();
-}catch(e){/* 记录暂时取不到：保留上次渲染，下个周期重试 */}
+RECORDS=rc; RECSTALE=false; renderRecords();
+setUpd($("#recUpd"), rc.updated_at, false);
+}catch(e){
+RECSTALE=true;   // 记录暂时取不到：保留上次渲染，时间戳标黄
+if(RECORDS) setUpd($("#recUpd"), RECORDS.updated_at, true);
+}
 SPECS.forEach(spec=>{renderStratTasks(spec.strategy); renderLegs(spec.strategy); renderPreview(spec.strategy)});
 }
 
@@ -465,7 +512,8 @@ let BESTALL=null;
 async function loadBest(){
 try{
 BESTALL=await (await fetch("/api/best")).json();
-}catch(e){/* 最佳机会暂时取不到：保留上次，下个周期重试 */}
+BESTSTALE=false;
+}catch(e){BESTSTALE=true}   // 刷新失败：保留上次列表，时间戳标黄
 renderBest();
 }
 function bestDoText(spec, r){
@@ -493,6 +541,7 @@ return fmt(r.score_pct,2)+"%";
 }
 function renderBest(){
 const tb=$("#bestTbl tbody"); if(!tb) return;
+setUpd($("#bestUpd"), BESTALL?BESTALL.updated_at:null, BESTSTALE);
 if(!BESTALL){tb.innerHTML='<tr><td colspan="5" class="muted">加载中…</td></tr>'; return}
 tb.innerHTML=BESTALL.rows.map(r=>{
 const spec=specOf(r.strategy);
@@ -553,9 +602,8 @@ const primaryRest=spec.fields.filter(f=>f.primary&&pg.venue_fields.indexOf(f.nam
 const advanced=spec.fields.filter(f=>!f.primary&&pg.venue_fields.indexOf(f.name)<0);
 const steps=(pg.how_it_works||[]).map(s=>"<li>"+esc(s)+"</li>").join("");
 const amtHtml=amtField
-? '<div class="amtRow"><div class="amtMain">'+renderField(amtField, amtField.default, false)+"</div>"+
-'<span class="muted">自由填写（USD，每边）。</span></div>'
-: '<div class="amtRow"><div class="amtMain"><label class="fld">目标总名义（USD，自由填写）'+
+? '<div class="amtRow"><div class="amtMain">'+renderField(amtField, amtField.default, false, pg.amount_desc||"")+"</div></div>"
+: '<div class="amtRow"><div class="amtMain"><label class="fld"><span class="fname">目标总名义</span><span class="fdesc">自由填写（USD）</span>'+
 '<input type="number" step="any" class="gridTotalInp" placeholder="如 1000"></label></div>'+
 '<span class="muted gridAmtInfo"></span></div>'+
 '<p class="muted">网格按总名义定仓：改这里会按网格腿现价反推每格量（在下方配置区）；反过来改每格量/格数，这里显示约合总名义。</p>';
@@ -565,7 +613,8 @@ const legRow=idx=>
 '<span class="dirB" data-dir="'+idx+'">-</span>'+
 '<span class="muted">金额 $</span><input class="legAmt" data-legamt="'+idx+'" readonly>'+
 '<span class="muted">数量</span><span data-legqty="'+idx+'">-</span>'+
-'<span class="legBal" data-legbal="'+idx+'">可用 —</span></div>';
+'<span class="legBal" data-legbal="'+idx+'">可用 —</span>'+
+'<span class="legLev" data-leglev="'+idx+'"></span></div>';
 const presetBtns=["conservative","neutral","aggressive","custom"].map(k=>
 '<button data-preset="'+k+'"'+(k==="neutral"?' class="on"':"")+">"+
 ({conservative:"保守",neutral:"中性",aggressive:"激进",custom:"自定义"})[k]+"</button>").join("");
@@ -573,11 +622,12 @@ root.innerHTML=
 "<h2>"+esc(spec.title)+'</h2><p class="muted">'+esc(spec.blurb)+"</p>"+
 '<details class="block howBox"><summary>运作方式</summary><ol>'+steps+"</ol></details>"+
 '<div class="block"><h3>订单腿</h3><div class="legs">'+legRow(0)+legRow(1)+"</div>"+
-'<p class="muted">先选两所：下面的「选市场」会列出这两所共同上市的全部标的并按策略排序。方向由所选标的的机会自动定；金额与下方主金额联动（两腿自动配平，只读），数量按现价实时换算；每条腿下方显示该所可用余额（权益），随总览刷新更新。</p></div>'+
+'<p class="muted">先选两所：下面的「选市场」会列出这两所共同上市的全部标的并按策略排序。方向由所选标的的机会自动定；金额与下方主金额联动（两腿自动配平，只读），数量按现价实时换算；每条腿下方显示该所可用余额（权益）与该标的在该所的最高杠杆/保证金模式（各所各标的不同、有的仅逐仓；未知则显示未知），随数据刷新更新。</p></div>'+
 '<div class="block"><h3>金额</h3>'+amtHtml+"</div>"+
-'<div class="block"><h3>选市场</h3><div class="symWrap">'+
-'<label>币种 <select class="symSel" data-f="symbol"></select></label>'+
-'<span class="muted pairsInfo"></span></div>'+
+'<div class="block"><span class="upd pairsUpd"></span><h3>选市场</h3>'+
+'<div class="pairsStats muted"></div>'+
+'<div class="symWrap"><label>币种 <select class="symSel" data-f="symbol"></select></label></div>'+
+'<div class="pairPrices muted"></div>'+
 '<p class="bad listNote"></p><div class="gridSug"></div></div>'+
 '<div class="block"><h3>配置</h3><div class="presetRow"><span class="muted">预设：</span>'+
 presetBtns+
@@ -586,7 +636,7 @@ presetBtns+
 (pg.note?'<p class="muted">'+esc(pg.note)+"</p>":"")+"</div>"+
 '<details class="block"><summary>高级选项（其余参数，改动随运行一并提交）</summary>'+
 '<div class="aform">'+fieldsHtml(advanced,null,false)+"</div></details>"+
-'<div class="block"><h3>交易预览</h3><div class="preview"><p class="muted">加载中…</p></div></div>'+
+'<div class="block"><span class="upd prevUpd"></span><h3>交易预览</h3><div class="preview"><p class="muted">加载中…</p></div></div>'+
 '<div class="block"><p class="bad runErr"></p>'+
 '<button class="runBtn">▶ 运行</button> <span class="ok runOk"></span>'+
 '<p class="muted">任务名自动生成（策略-币种-时分秒），点运行即创建并启动。</p></div>'+
@@ -594,11 +644,15 @@ presetBtns+
 "<th>名称</th><th>标的</th><th>来源</th><th>状态</th><th>持仓</th><th>今日成交</th><th>最近错误</th><th>操作</th>"+
 '</tr></thead><tbody></tbody></table></div>';
 const S={spec:spec, root:root, selSymbol:"", candles:{}, candleFetching:{},
-pairsRows:[], pairsMeta:null, pairKey:"", pairSeq:0,
+pairsRows:[], pairsMeta:null, pairKey:"", pairSeq:0, pairsStale:false,
+totalManual:false,
 pendingSymbol:"", pendingPrefill:null, presetName:"neutral", applying:false,
 vA:root.querySelector('[data-leg="0"]'), vB:root.querySelector('[data-leg="1"]'),
 symSel:root.querySelector(".symSel"),
-pairsInfo:root.querySelector(".pairsInfo"),
+pairsStats:root.querySelector(".pairsStats"),
+pairPrices:root.querySelector(".pairPrices"),
+pairsUpd:root.querySelector(".pairsUpd"),
+prevUpd:root.querySelector(".prevUpd"),
 listNote:root.querySelector(".listNote"),
 gridSug:root.querySelector(".gridSug"),
 legsEl:root.querySelector(".legs"), previewEl:root.querySelector(".preview"),
@@ -611,11 +665,12 @@ if(VENUES.length>1) S.vB.selectedIndex=1;
 const onVenue=()=>{S.pendingSymbol=pageSymbol(S); loadPairs(st)};
 S.vA.addEventListener("change",onVenue);
 S.vB.addEventListener("change",onVenue);
-S.symSel.addEventListener("change",()=>{S.selSymbol=S.symSel.value; renderLegs(st); renderPreview(st); updateGridSug(st); syncGridTotal(st)});
+S.symSel.addEventListener("change",()=>{S.selSymbol=S.symSel.value; renderPairPrices(st); renderLegs(st); renderPreview(st); updateGridSug(st); syncGridTotal(st)});
 root.querySelectorAll("[data-preset]").forEach(b=>b.addEventListener("click",()=>applyPreset(st, b.dataset.preset)));
 const gt=root.querySelector(".gridTotalInp");
-if(gt) gt.addEventListener("input",()=>gridTotalToQty(st));
+if(gt) gt.addEventListener("input",()=>{S.totalManual=true; gridTotalToQty(st)});
 root.addEventListener("input",e=>{
+if(e.target.dataset&&["qty_per_grid","grid_count"].indexOf(e.target.dataset.f)>=0) S.totalManual=false;
 if(!S.applying&&(e.target.closest(".pform")||e.target.closest(".aform")||e.target.closest(".amtRow"))) markCustom(st);
 renderLegs(st); renderPreview(st);
 });
@@ -648,9 +703,13 @@ const d=await (await fetch("/api/pairs?venue_a="+encodeURIComponent(va)+
 "&venue_b="+encodeURIComponent(vb)+"&strategy="+st)).json();
 if(seq!==S.pairSeq) return;   // 期间又切了场所：只认最新一次
 S.pairsRows=d.rows||[]; S.pairsMeta=d; S.pairKey=va+"|"+vb+"|"+st;
+S.pairsStale=false;
 fillPairSymbols(st);
 }catch(e){
-if(S.listNote) S.listNote.textContent="行情暂时取不到，请稍后重试";
+if(S.pairsMeta){
+S.pairsStale=true;   // 刷新失败：保留旧数据，只把时间戳标黄注明
+setUpd(S.pairsUpd, S.pairsMeta.updated_at, true);
+}else if(S.listNote) S.listNote.textContent="行情暂时取不到，请稍后重试";
 }
 }
 
@@ -675,15 +734,40 @@ if(cur&&rows.some(r=>r.symbol===cur)) target=cur;
 else if(rows.length) target=rows[0].symbol;
 if(target){S.symSel.value=target; S.selSymbol=target}
 S.pendingSymbol="";
-const kinds=meta.price_kinds||{};
-S.pairsInfo.textContent="共 "+rows.length+" 个标的（"+S.vA.value+" 上市 "+(meta.listed_a??"-")+
-" · "+S.vB.value+" 上市 "+(meta.listed_b??"-")+" · 共同 "+(meta.common??"-")+"）"+
-(kinds[S.vA.value]?"；价格口径："+S.vA.value+" "+kinds[S.vA.value]+" / "+S.vB.value+" "+(kinds[S.vB.value]||""):"");
+// 统计行（定版格式）：共同 N · A所上市 X · B所上市 Y
+S.pairsStats.textContent="共同 "+(meta.common??"-")+" · "+S.vA.value+" 上市 "+
+(meta.listed_a??"-")+" · "+S.vB.value+" 上市 "+(meta.listed_b??"-")+
+"（按策略排序后可交易 "+rows.length+" 个）";
+setUpd(S.pairsUpd, meta.updated_at, S.pairsStale);
+renderPairPrices(st);
 const errs=meta.errors||{};
 const errTxt=Object.keys(errs).map(v=>v+" "+errs[v]).join("；");
 S.listNote.textContent=errTxt||(rows.length?"":"所选两所暂无共同上市标的，换一对场所试试。");
 if(S.pendingPrefill){applyPrefill(S.root, S.pendingPrefill); S.pendingPrefill=null}
 renderLegs(st); renderPreview(st); updateGridSug(st); syncGridTotal(st);
+}
+
+// 选市场价格行（定版格式）：所选标的在两腿的实际价格 + 口径，
+// 随选币与 pairs 刷新（20 秒）更新；某腿无价显示「—」
+function renderPairPrices(st){
+const S=SPAGES[st]; if(!S||!S.pairPrices) return;
+const row=pairRow(st), kinds=(S.pairsMeta&&S.pairsMeta.price_kinds)||{};
+const va=S.vA.value, vb=S.vB.value;
+const px=x=>x==null?"—":fmt(x, x<10?4:2);
+S.pairPrices.textContent=row
+? "价格："+va+" "+px(row.price_a)+"（"+(kinds[va]||"价格")+"） · "+
+  vb+" "+px(row.price_b)+"（"+(kinds[vb]||"价格")+"）"
+: "价格：暂无所选标的的价格";
+}
+
+// 腿的杠杆行文案：最高杠杆 + 保证金模式（数据来自 pairs 行，
+// 各所公开接口；拿不到显示未知，绝不猜）
+function legLevText(ml, mm){
+if(ml==null) return "杠杆上限未知";
+const lv=Number.isInteger(ml)?String(ml):fmt(ml, 2);
+const mode=mm==="isolated_only"?"逐仓 only"
+: mm==="cross"?"全仓/逐仓":"保证金模式未知";
+return "最高杠杆 "+lv+"x · "+mode;
 }
 
 function pairRow(st){
@@ -753,6 +837,7 @@ if(price&&cnt&&qEl) qEl.value=Number((total/(cnt*price)).toPrecision(6));
 function syncGridTotal(st){
 const S=SPAGES[st]; if(!S||st!=="hedged_grid") return;
 const inp=S.root.querySelector(".gridTotalInp"); if(!inp) return;
+if(S.totalManual) return;   // 用户手填过总名义：自动刷新不许冲掉
 const q=numField(S,"qty_per_grid"), cnt=numField(S,"grid_count");
 const row=pairRow(st);
 let px=row?row.price_a:null;
@@ -818,6 +903,12 @@ balEl.textContent=(!vv||vv.available==null)?"可用 —"
 :("可用 $"+fmt(vv.available)+"（权益 $"+fmt(vv.equity)+"）"+
 (vv.mode==="paper"?" 模拟余额":""));
 }
+const levEl=S.root.querySelector('[data-leglev="'+i+'"]');
+if(levEl){
+const ml=row?(i===0?row.max_leverage_a:row.max_leverage_b):null;
+const mm=row?(i===0?row.margin_mode_a:row.margin_mode_b):"unknown";
+levEl.textContent=legLevText(ml, mm);
+}
 let dir="-", cls="dirB";
 if(kind==="grid"){dir=i===0?"网格双向":"反向对冲"}
 else if(kind==="funding"&&pr&&pr.longV){
@@ -853,6 +944,7 @@ gi.textContent=(q&&cnt&&px)?("当前约合总名义 $"+fmt(q*cnt*px)):"";
 // ---------- 交易预览（按平台分列 + 入场条件指示） ----------
 function renderPreview(st){
 const S=SPAGES[st]; if(!S||!S.previewEl) return;
+setUpd(S.prevUpd, S.pairsMeta?S.pairsMeta.updated_at:null, S.pairsStale);
 const pg=S.spec.page, kind=pg.opportunity;
 const levNames=st==="hedged_grid"?["leverage_grid","leverage_hedge"]
 :st==="rotation_hedge"?["leverage_a","leverage_b"]
@@ -916,10 +1008,28 @@ const step=(hi-lo)/cnt, midP=(lo+hi)/2;
 ind='<p class="muted">每格间距 ≈ '+fmt(step/midP*10000,1)+" bps（等距 "+fmt(step, step<10?4:2)+"）；总名义 ≈ "+(totN!=null?"$"+fmt(totN):"-")+"。</p>";
 }else ind='<p class="muted">填好区间上下限与格数后，这里显示每格间距与总名义。</p>';
 }
+// 杠杆超限警告：所填杠杆超过任一腿该标的在该所的最高杠杆 →
+// 逐腿黄字警告；保证金仍按所填杠杆算，警告与口径注并列展示
+const levWarns=legs.map((L, i)=>{
+const ml=row?(i===0?row.max_leverage_a:row.max_leverage_b):null;
+if(ml==null||!(L.lev>ml)) return "";
+const lv=Number.isInteger(ml)?String(ml):fmt(ml, 2);
+return '<p style="color:var(--yel)">⚠ '+esc(L.vid)+" 该标的最高 "+lv+
+"x，你填了 "+L.lev+"x，实际执行可能被该所拒绝或按上限成交"+
+"（逐仓/全仓限制见订单腿）。</p>";
+}).join("");
+const levModes=legs.map((L, i)=>{
+const mm=row?(i===0?row.margin_mode_a:row.margin_mode_b):"unknown";
+return mm==="isolated_only"
+? '<p style="color:var(--yel)">⚠ '+esc(L.vid)+" 该标的仅逐仓（isolated only），账户须为逐仓模式。</p>"
+: "";
+}).join("");
 S.previewEl.innerHTML="<table><thead><tr><th>腿</th><th>平台</th><th>标记价</th><th>预估执行价</th><th>名义</th><th>所需保证金</th></tr></thead><tbody>"+
 rowsHtml+"</tbody></table>"+
 '<p>总名义：<b>'+(totN!=null?"$"+fmt(totN):"-")+'</b>　总保证金：<b>'+(totM!=null?"$"+fmt(totM):"-")+"</b></p>"+
-"<p>"+avail+"</p>"+ind;
+"<p>"+avail+"</p>"+
+'<p class="muted">所需保证金按各腿所填杠杆计算；程序不自动改杠杆，交易所的实际上限见订单腿。</p>'+
+levWarns+levModes+ind;
 }
 
 // 运行中仓位表（本策略任务：状态/持仓/今日成交/操作）
@@ -998,6 +1108,10 @@ if(cur) el.value=cur;
 
 // ---------- 行情（无独立页面：/api/market 只供弹窗的币种 ----------
 // 下拉与总览/策略页的 pairs、best 数据；策略页币种下拉走 pairs）
+// 实时节奏：策略页打开期间 pairs 每 20 秒重拉（与扫描缓存
+// 对齐），排序/预览/腿数量随新数据重算，已选标的与表单不被
+// 冲掉；总览最佳机会同为 20 秒；总览统计/场所/记录走 refresh
+// 的 5 秒节奏（见文件尾）。
 async function loadMarket(force){
 try{
 const d=await (await fetch("/api/market"+(force?"?force=1":""))).json();
@@ -1011,7 +1125,7 @@ const st=CURPAGE.slice(6);
 if(SPAGES[st]) loadPairs(st);
 }
 if(CURPAGE==="overview") loadBest();
-},30000);
+},20000);
 
 // ---------- 设置页（密钥） ----------
 const GUIDES={
@@ -1028,9 +1142,10 @@ if(d.error){$("#secGroups").innerHTML='<p class="bad">'+esc(d.error)+"</p>";retu
 $("#secGroups").innerHTML=d.groups.map(g=>
 '<fieldset class="sec"><legend>'+esc(g.title)+"</legend>"+
 (GUIDES[g.key]?'<details><summary>怎么获取？</summary><div>'+GUIDES[g.key]+"</div></details>":"")+
-g.fields.map(f=>'<label class="fld">'+esc(f.label)+
+g.fields.map(f=>'<label class="fld"><span class="fname">'+esc(f.label)+
 (f.required===true?' <span class="bad">*</span>':"")+(f.required==="one_of"?' <span class="muted">(二选一必填)</span>':"")+
-' <span class="'+(f.filled?"ok":"bad")+'">'+(f.filled?"已设置":"未设置")+'</span>'+
+' <span class="'+(f.filled?"ok":"bad")+'">'+(f.filled?"已设置":"未设置")+'</span></span>'+
+(f.desc?'<span class="fdesc">'+esc(f.desc)+"</span>":"")+
 '<input type="'+(f.secret?"password":"text")+'" data-sec="'+esc(f.name)+'" autocomplete="off" placeholder="'+
 (f.filled?"已设置，留空不修改":"未设置，在此填写")+'"></label>').join("")+"</fieldset>").join("");
 }

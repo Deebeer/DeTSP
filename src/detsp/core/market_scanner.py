@@ -13,6 +13,17 @@
    一分钟以上，不可行；watchlist 内的币仍用 BBO 中间价覆盖，
    保持矩阵口径不变）。单所失败隔离，整表带缓存（默认 20 秒）。
 
+   快照每格还带杠杆与保证金模式（活接口逐所核实，2026-11-04）：
+   HL 家族 meta universe 直接给 maxLeverage 与 onlyIsolated /
+   marginMode（noCross = 仅逐仓）；Lighter 用 orderBookDetails
+   的 min_initial_margin_fraction（万分比，10000 = 100%，最高
+   杠杆 = 10000 / 它）与 market_config.market_margin_mode
+   （0 = 全仓、1 = 仅逐仓）；Aster 用 exchangeInfo 的
+   requiredMarginPercent（最高杠杆 = 100 / 它，逐所核实为逐标
+   的值），保证金模式无公开字段 = 未知；Arcus 用 /v1/markets
+   的 initialMarginFraction（最高杠杆 = 1 / 它），保证金模式
+   无公开字段 = 未知。拿不到的一律 None / "unknown"，不猜。
+
 2. **观察列表矩阵**（scan）：从全量快照派生 watchlist 逐格三态
    （ok / not_listed / error），语义与旧版一致——把「没上市」
    与「取数失败」分开（用户实测痛点：SNDK 在 Hyperliquid 本体
@@ -87,6 +98,32 @@ def _plain(name: str) -> str:
 def _bps_per_hour(rate: float, interval_seconds: float) -> float:
     """原始费率 → 每小时 bps（统一口径，与 risk 的换算一致）。"""
     return funding_hourly_rate(rate, interval_seconds) * 10_000
+
+
+def _lev_direct(value) -> float | int | None:
+    """交易所直接给的最高杠杆（如 HL maxLeverage）：近整数取整。"""
+    v = _f(value)
+    if v is None or v <= 0:
+        return None
+    r = round(v)
+    return int(r) if abs(v - r) < 0.01 else v
+
+
+def _lev_from_fraction(frac, full: float) -> float | int | None:
+    """保证金比例 → 最高杠杆 = full / frac。
+
+    full 是「100%」在该所口径下的数值：Lighter 的
+    min_initial_margin_fraction 是万分比（full=10000）、Aster 的
+    requiredMarginPercent 是百分数（full=100）、Arcus 的
+    initialMarginFraction 是小数（full=1）。换算结果近整数取整
+    （如 10000/3333=3.0003 → 3），否则保留两位小数。
+    """
+    v = _f(frac)
+    if v is None or v <= 0:
+        return None
+    lev = full / v
+    r = round(lev)
+    return int(r) if abs(lev - r) < 0.06 else round(lev, 2)
 
 
 def best_spread(prices: dict[str, float | None]) -> dict | None:
@@ -181,7 +218,9 @@ class MarketScanner:
             return None
 
     # ----- 全量抓取：每所返回 {symbol: cell}，cell = -----
-    # ----- {"price":…, "funding": FundingInfo|None, "vol":…} -----
+    # ----- {"price":…, "funding": FundingInfo|None, "vol":…,
+    # -----  "max_leverage": float|int|None,
+    # -----  "margin_mode": "cross"|"isolated_only"|"unknown"} -----
     def _full_hl_family(self, errors: dict[str, str],
                         listings: dict[str, set[str]]) -> dict[str, dict]:
         out: dict[str, dict] = {v: {} for v in HL_DEX}
@@ -215,8 +254,17 @@ class MarketScanner:
                 funding = FundingInfo(
                     symbol=sym, rate=rate, interval_seconds=3600,
                     rate_kind="current") if rate is not None else None
-                out[vid][sym] = {"price": price, "funding": funding,
-                                 "vol": vol}
+                # 杠杆/保证金模式：meta universe 直接给 maxLeverage；
+                # onlyIsolated 或 marginMode=noCross 表示仅逐仓，
+                # 其余（字段缺失）为可全仓
+                out[vid][sym] = {
+                    "price": price, "funding": funding, "vol": vol,
+                    "max_leverage": _lev_direct(a.get("maxLeverage")),
+                    "margin_mode": (
+                        "isolated_only"
+                        if a.get("onlyIsolated")
+                        or a.get("marginMode") == "noCross"
+                        else "cross")}
         # 下期预测：能对上的条目把口径升级为 predicted（与 HL 适配
         # funding() 的主口径一致）；接口失败不影响当期口径结果。
         # 注意：predictedFundings 实测不含 io/xyz 子所条目，子所
@@ -246,7 +294,9 @@ class MarketScanner:
                     if rate is None:
                         continue
                     cell = out.setdefault(vid, {}).setdefault(
-                        sym, {"price": None, "funding": None, "vol": None})
+                        sym, {"price": None, "funding": None, "vol": None,
+                              "max_leverage": None,
+                              "margin_mode": "unknown"})
                     nts = _f((payload or {}).get("nextFundingTime")) or 0
                     cell["funding"] = FundingInfo(
                         symbol=sym, rate=rate,
@@ -275,6 +325,9 @@ class MarketScanner:
                     interval_seconds=_ASTER_FUNDING_INTERVAL,
                     rate_kind="last_settled") if rate is not None else None,
                 "vol": None,
+                # 杠杆在 exchangeInfo 里补（requiredMarginPercent）；
+                # 保证金模式无公开字段，未知
+                "max_leverage": None, "margin_mode": "unknown",
             }
         # 日涨跌幅走 ticker/24hr（单独失败只丢波动，不拖垮主数据）
         try:
@@ -290,8 +343,11 @@ class MarketScanner:
                     out[sym]["vol"] = abs(chg)
         except Exception as e:  # noqa: BLE001 — 波动是排序辅助，可缺
             _log(f"aster ticker/24hr 失败：{type(e).__name__}: {e}")
-        # 上市清单走 exchangeInfo（status=TRADING 的 USDT 永续）；
-        # 该接口单独失败时退回「premiumIndex 有条目即上市」
+        # 上市清单走 exchangeInfo（status=TRADING 的 USDT 永续），
+        # 顺带取每标的的 requiredMarginPercent（逐标的的初始保证金
+        # 百分比，活接口核实分布为 5/10/20/25/33.33/50 等多档，
+        # 最高杠杆 = 100 / 它）；该接口单独失败时退回「premiumIndex
+        # 有条目即上市」、杠杆未知
         listed: set[str] | None = None
         try:
             re_ = self._client().get(f"{ASTER_BASE}/fapi/v1/exchangeInfo")
@@ -304,7 +360,11 @@ class MarketScanner:
                 status = row.get("status")
                 if raw.upper().endswith("USDT") and \
                         (status is None or str(status).upper() == "TRADING"):
-                    listed.add(raw[:-4].upper())
+                    sym = raw[:-4].upper()
+                    listed.add(sym)
+                    if sym in out:
+                        out[sym]["max_leverage"] = _lev_from_fraction(
+                            row.get("requiredMarginPercent"), 100.0)
         except Exception as e:  # noqa: BLE001 — 清单失败只降级判定口径
             _log(f"aster exchangeInfo 失败：{type(e).__name__}: {e}")
         listings["aster"] = listed if listed is not None else set(out)
@@ -344,7 +404,8 @@ class MarketScanner:
             chg = _f(srow.get("daily_price_change"))
             out[sym] = {"price": price if price and price > 0 else None,
                         "funding": None,
-                        "vol": abs(chg) if chg is not None else None}
+                        "vol": abs(chg) if chg is not None else None,
+                        "max_leverage": None, "margin_mode": "unknown"}
         r = self._client().get(f"{base}/funding-rates")
         r.raise_for_status()
         for row in (r.json() or {}).get("funding_rates") or []:
@@ -358,11 +419,38 @@ class MarketScanner:
             if sym is None or rate is None:
                 continue
             out.setdefault(sym, {"price": None, "funding": None,
-                                 "vol": None})
+                                 "vol": None, "max_leverage": None,
+                                 "margin_mode": "unknown"})
             out[sym]["funding"] = FundingInfo(
                 symbol=sym, rate=rate,
                 interval_seconds=_LIGHTER_FUNDING_INTERVAL,
                 rate_kind="current")
+        # 杠杆与保证金模式：orderBookDetails 一次批量给全部市场——
+        # min_initial_margin_fraction 是万分比（10000 = 100%，如
+        # 200 = 2% → 最高 50x），market_config.market_margin_mode
+        # 0 = 全仓 / 1 = 仅逐仓（活接口核实：主网有 7 个模式 1 的
+        # 冷门市场）。该接口失败只丢这组信息（显示未知），不
+        # 拖垮价格与资金费
+        try:
+            rd = self._client().get(f"{base}/orderBookDetails")
+            rd.raise_for_status()
+            for row in (rd.json() or {}).get("order_book_details") or []:
+                if not isinstance(row, dict):
+                    continue
+                if row.get("market_type") not in (None, "perp"):
+                    continue
+                cell = out.get(str(row.get("symbol") or "").upper())
+                if cell is None:
+                    continue
+                cell["max_leverage"] = _lev_from_fraction(
+                    row.get("min_initial_margin_fraction"), 10_000.0)
+                mode = (row.get("market_config") or {}).get(
+                    "market_margin_mode")
+                cell["margin_mode"] = (
+                    "isolated_only" if mode == 1
+                    else "cross" if mode == 0 else "unknown")
+        except Exception as e:  # noqa: BLE001 — 杠杆信息是增强项，可缺
+            _log(f"{vid} orderBookDetails 失败：{type(e).__name__}: {e}")
         # watchlist 内的币用 BBO 中间价覆盖批量最近成交价，
         # 保持观察列表矩阵的价格口径与旧版一致
         for sym in self.watchlist:
@@ -398,6 +486,11 @@ class MarketScanner:
             cell = {"price": _f(raw.get("markPrice")), "funding": None,
                     # priceChange24h 是小数口径（0.0123 = 1.23%）
                     "vol": abs(chg) * 100 if chg is not None else None,
+                    # 最高杠杆 = 1 / initialMarginFraction（如 BTC
+                    # 0.025 → 40x）；保证金模式无公开字段，未知
+                    "max_leverage": _lev_from_fraction(
+                        raw.get("initialMarginFraction"), 1.0),
+                    "margin_mode": "unknown",
                     "_arcus_symbol": str(raw.get("marketDisplayName") or "")}
             if rate is not None:
                 cell["funding"] = FundingInfo(
@@ -596,6 +689,12 @@ class MarketScanner:
         suspect = spread is not None and spread > 5000
         return {"symbol": sym,
                 "price_a": pa, "price_b": pb,
+                "max_leverage_a": ca.get("max_leverage") if ca else None,
+                "max_leverage_b": cb.get("max_leverage") if cb else None,
+                "margin_mode_a": (ca.get("margin_mode") if ca else None)
+                or "unknown",
+                "margin_mode_b": (cb.get("margin_mode") if cb else None)
+                or "unknown",
                 "rate_a_bps_h": ra, "rate_b_bps_h": rb,
                 "rate_kind_a": ka, "rate_kind_b": kb,
                 "spread_bps": spread, "signed_spread_bps": signed,

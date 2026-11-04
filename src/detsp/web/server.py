@@ -239,7 +239,8 @@ class PanelState:
             "entry_price": s["entry_price"], "opened_ts": s["opened_ts"],
         } for s in seen.values()]
         open_rows.sort(key=lambda r: -r["opened_ts"])
-        return {"open": open_rows,
+        return {"updated_at": _time.time(),
+                "open": open_rows,
                 "closed": self.ledger.recent_closed_positions(limit)}
 
     # ----- 设置页（密钥：只报状态、只写不读值）-----
@@ -589,6 +590,8 @@ class PanelState:
 
     # ----- 总览 -----
     def overview(self) -> dict:
+        import time as _time
+
         venues_out = []
         pos_ok_venues: set = set()
         upnl = 0.0
@@ -651,6 +654,9 @@ class PanelState:
                      "pnl": round(rp_all["realized_pnl"] + upnl, 4)}
         ks = self.engine.kill_switch
         return {
+            # 数据时间（本接口生成时刻）：面板各区块右上角的
+            # 「更新 HH:MM:SS」小字取自这里，不由前端瞎填
+            "updated_at": _time.time(),
             "dry_run": bool(getattr(self.app_config, "dry_run", True)),
             "killswitch": {"halted": ks.halted, "reason": ks.reason},
             "today": stats,
