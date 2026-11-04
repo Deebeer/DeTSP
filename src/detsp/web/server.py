@@ -81,6 +81,160 @@ class PanelState:
     def market_candles(self, venue_id: str, symbol: str) -> dict:
         return self._scanner().candles(venue_id, symbol)
 
+    def pairs_view(self, venue_a: str, venue_b: str,
+                   strategy: str) -> dict:
+        return self._scanner().pairs(venue_a, venue_b, strategy)
+
+    def best_view(self, strategy: str) -> dict:
+        return self._scanner().best(strategy, limit=5)
+
+    # ----- 策略记录（运行仓位 + 仓位历史）-----
+    # 运行仓位没有交易所侧的「开仓时间」可用：追踪器以面板首次
+    # 观测到该仓位的时间为 opened_ts（程序启动前就存在的仓位
+    # 同此口径）。仓位从有到无（平仓/任务停止收尾/手动平）时，
+    # 把一条记录落进账本 closed_positions：平仓价优先取该任务
+    # 在 opened_ts 之后的平仓方向成交均价（fills 口径），取不
+    # 到时用发现平仓当刻的盘口中间价（mark 口径），再取不到
+    # 记 unknown、close_price 为 None——口径随记录如实标注。
+    _pos_seen: dict = None          # (venue, symbol) -> 跟踪中的仓位
+    _pos_synced_at: float = 0.0
+
+    def _strategy_of(self, task_name: str) -> str:
+        cfg = self.task_cfgs.get(task_name) or {}
+        return str(cfg.get("strategy") or "")
+
+    def _close_price_from_fills(self, seen: dict,
+                                need_qty: float) -> float | None:
+        """平仓价（fills 口径）：opened_ts 之后、平仓方向的成交，
+        从最近往前累计到 need_qty 的量加权均价；无成交返回 None。"""
+        if not seen.get("task"):
+            return None
+        close_side = "sell" if seen["qty"] > 0 else "buy"
+        fills = self.ledger.recent_fills(limit=500,
+                                         since=seen["opened_ts"] - 1.0)
+        got, wsum = 0.0, 0.0
+        for f in fills:
+            if f["venue"] != seen["venue"] or \
+                    f["symbol"] != seen["symbol"] or \
+                    f["strategy"] != seen["task"] or \
+                    f["side"] != close_side:
+                continue
+            take = min(abs(f["qty"]), need_qty - got)
+            if take <= 0:
+                break
+            got += take
+            wsum += take * f["price"]
+            if got >= need_qty - 1e-12:
+                break
+        if got <= 0:
+            return None
+        return wsum / got
+
+    def _update_pos_tracker(self, flat: list[dict],
+                            known_venues: set | None = None) -> None:
+        """flat = [{venue, symbol, qty, entry_price, owner}]（当前
+        全部持仓）。与上次快照 diff：消失/反向的仓位落历史表。
+        known_venues = 本轮成功抓到持仓的场所集合：不在其中的
+        场所视为「本轮未知」，其仓位不参与 diff（防接口抖动把
+        还在的仓位误记成已平）；None = 全部可信。"""
+        import time as _time
+
+        if self._pos_seen is None:
+            self._pos_seen = {}
+        now = _time.time()
+        current: dict[tuple, dict] = {}
+        for p in flat:
+            if not p["qty"]:
+                continue
+            current[(p["venue"], p["symbol"])] = p
+        for key, seen in list(self._pos_seen.items()):
+            if known_venues is not None and \
+                    seen["venue"] not in known_venues:
+                continue          # 本轮没抓到这所：不下结论
+            cur = current.get(key)
+            if cur is not None and \
+                    (cur["qty"] > 0) == (seen["qty"] > 0):
+                # 同向仍在：更新数量/开仓价（加仓会变），不落历史
+                seen["qty"] = cur["qty"]
+                seen["entry_price"] = cur["entry_price"]
+                continue
+            # 消失或方向翻转：旧仓位视为已平，落一条历史记录
+            close_price = self._close_price_from_fills(
+                seen, abs(seen["qty"]))
+            source = "fills"
+            if close_price is None:
+                source = "unknown"
+                venue = self.venues.get(seen["venue"])
+                if venue is not None:
+                    try:
+                        close_price = venue.book(seen["symbol"]).mid
+                        source = "mark"
+                    except Exception:  # noqa: BLE001 — 盘口取不到就 unknown
+                        close_price = None
+            self.ledger.record_closed_position({
+                "strategy": seen["strategy"], "task": seen["task"],
+                "venue": seen["venue"], "symbol": seen["symbol"],
+                "side": "long" if seen["qty"] > 0 else "short",
+                "qty": abs(seen["qty"]),
+                "entry_price": seen["entry_price"],
+                "close_price": close_price,
+                "close_price_source": source,
+                "opened_ts": seen["opened_ts"], "closed_ts": now})
+            del self._pos_seen[key]
+        for key, p in current.items():
+            if key not in self._pos_seen:
+                self._pos_seen[key] = {
+                    "venue": p["venue"], "symbol": p["symbol"],
+                    "qty": p["qty"], "entry_price": p["entry_price"],
+                    "task": p.get("owner") or "",
+                    "strategy": self._strategy_of(p.get("owner") or ""),
+                    "opened_ts": now}
+        self._pos_synced_at = now
+
+    def _flat_positions(self) -> tuple[list[dict], set]:
+        """轻量抓取全部场所当前持仓（含归属），供记录追踪用。
+        返回 (持仓列表, 成功抓到的场所集合)。"""
+        flat = []
+        known = set()
+        ex = self.engine.executor
+        for vid, v in self.venues.items():
+            try:
+                poss = v.positions()
+            except Exception:  # noqa: BLE001 — 单所故障不拖垮记录
+                continue
+            known.add(vid)
+            for p in poss:
+                owner = None
+                if ex is not None:
+                    try:
+                        owner = ex.registry.owner_of(ex.key(vid, p.symbol))
+                    except Exception:  # noqa: BLE001
+                        owner = None
+                flat.append({"venue": vid, "symbol": p.symbol,
+                             "qty": p.qty, "entry_price": p.entry_price,
+                             "owner": owner})
+        return flat, known
+
+    def records_view(self, limit: int = 50) -> dict:
+        """策略记录：运行仓位（开始时间倒序）+ 仓位历史（平仓
+        时间倒序）。追踪快照过期（>3 秒）时先轻量同步一次。"""
+        import time as _time
+
+        if _time.time() - self._pos_synced_at > 3.0:
+            flat, known = self._flat_positions()
+            self._update_pos_tracker(flat, known)
+        seen = self._pos_seen or {}
+        open_rows = [{
+            "strategy": s["strategy"], "task": s["task"],
+            "venue": s["venue"], "symbol": s["symbol"],
+            "side": "long" if s["qty"] > 0 else "short",
+            "qty": abs(s["qty"]), "qty_signed": s["qty"],
+            "entry_price": s["entry_price"], "opened_ts": s["opened_ts"],
+        } for s in seen.values()]
+        open_rows.sort(key=lambda r: -r["opened_ts"])
+        return {"open": open_rows,
+                "closed": self.ledger.recent_closed_positions(limit)}
+
     # ----- 设置页（密钥：只报状态、只写不读值）-----
     def secrets_view(self) -> dict:
         if not self.env_path:
@@ -429,6 +583,7 @@ class PanelState:
     # ----- 总览 -----
     def overview(self) -> dict:
         venues_out = []
+        pos_ok_venues: set = set()
         upnl = 0.0
         for vid, v in self.venues.items():
             item = {"venue_id": vid, "mode": getattr(v, "mode", ""),
@@ -457,10 +612,18 @@ class PanelState:
                         upnl += p.qty * (mid - p.entry_price)
                     except Exception:
                         pass
+                pos_ok_venues.add(vid)   # 持仓已成功抓到，可参与记录 diff
                 item["open_orders"] = len(v.open_orders())
             except Exception as e:  # 单场所故障不拖垮总览
                 item["error"] = str(e)
             venues_out.append(item)
+        # 策略记录追踪：用总览已抓到的持仓 diff，消失的落历史表
+        self._update_pos_tracker([
+            {"venue": item["venue_id"], "symbol": p["symbol"],
+             "qty": p["qty"], "entry_price": p["entry_price"],
+             "owner": p.get("owner")}
+            for item in venues_out for p in item["positions"]],
+            pos_ok_venues)
         today0 = datetime.combine(datetime.now().date(), dtime.min).timestamp()
         stats = self.ledger.stats_since(today0)
         ks = self.engine.kill_switch
@@ -552,6 +715,21 @@ def make_handler(state: PanelState):
                 q = parse_qs(u.query)
                 self._json(state.market_candles(
                     q.get("venue", [""])[0], q.get("symbol", [""])[0]))
+            elif u.path == "/api/pairs":
+                q = parse_qs(u.query)
+                self._json(state.pairs_view(
+                    q.get("venue_a", [""])[0], q.get("venue_b", [""])[0],
+                    q.get("strategy", [""])[0]))
+            elif u.path == "/api/best":
+                q = parse_qs(u.query)
+                self._json(state.best_view(q.get("strategy", [""])[0]))
+            elif u.path == "/api/records":
+                q = parse_qs(u.query)
+                try:
+                    limit = int(q.get("limit", ["50"])[0])
+                except ValueError:
+                    limit = 50
+                self._json(state.records_view(limit=limit))
             elif u.path == "/api/settings/secrets":
                 # 只返回已填/未填，绝不返回任何密钥值
                 self._json(state.secrets_view())

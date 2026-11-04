@@ -60,6 +60,76 @@ class Ledger:
             )
             self._conn.commit()
 
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS closed_positions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy TEXT NOT NULL DEFAULT '',
+                    task TEXT NOT NULL DEFAULT '',
+                    venue TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    qty REAL NOT NULL,
+                    entry_price REAL NOT NULL DEFAULT 0,
+                    close_price REAL,
+                    close_price_source TEXT NOT NULL DEFAULT 'unknown',
+                    opened_ts REAL NOT NULL DEFAULT 0,
+                    closed_ts REAL NOT NULL
+                )
+                """
+            )
+            self._conn.commit()
+
+    def record_closed_position(self, rec: dict) -> int:
+        """落一条已平仓位记录（面板「策略记录 · 仓位历史」的数据源）。
+
+        rec 字段：strategy（策略类型，可空）、task（任务名/归属，
+        可空）、venue、symbol、side（long/short）、qty（绝对值）、
+        entry_price、close_price（可 None）、close_price_source
+        （fills=平仓成交均价 / mark=发现平仓时的标记价 /
+        unknown=两者都拿不到）、opened_ts、closed_ts。
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO closed_positions (strategy, task, venue,"
+                " symbol, side, qty, entry_price, close_price,"
+                " close_price_source, opened_ts, closed_ts)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (str(rec.get("strategy") or ""),
+                 str(rec.get("task") or ""),
+                 str(rec.get("venue") or ""),
+                 str(rec.get("symbol") or ""),
+                 str(rec.get("side") or ""),
+                 float(rec.get("qty") or 0.0),
+                 float(rec.get("entry_price") or 0.0),
+                 rec.get("close_price"),
+                 str(rec.get("close_price_source") or "unknown"),
+                 float(rec.get("opened_ts") or 0.0),
+                 float(rec.get("closed_ts") or time.time())),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def recent_closed_positions(self, limit: int = 50) -> list[dict]:
+        """最近已平仓位（按平仓时间倒序），供面板策略记录展示。"""
+        cols = ("id", "strategy", "task", "venue", "symbol", "side",
+                "qty", "entry_price", "close_price",
+                "close_price_source", "opened_ts", "closed_ts")
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, strategy, task, venue, symbol, side, qty,"
+                " entry_price, close_price, close_price_source,"
+                " opened_ts, closed_ts FROM closed_positions"
+                " ORDER BY closed_ts DESC, id DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [dict(zip(cols, r)) for r in rows]
+
+    def count_closed_positions(self) -> int:
+        with self._lock:
+            return int(self._conn.execute(
+                "SELECT COUNT(*) FROM closed_positions").fetchone()[0])
+
     def record(self, fill: Fill) -> int:
         ts = fill.ts if fill.ts > 0 else time.time()
         with self._lock:

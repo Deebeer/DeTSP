@@ -187,45 +187,141 @@ _FIELD_META: dict[str, dict[str, dict]] = {
 }
 
 
+# 配置预设（页面「配置」区的档位按钮）：保守 / 中性 / 激进 三组
+# 字段值，点一下整组填入表单；用户再改任何字段即变「自定义」。
+# 中性 = 现行原仓对齐默认值：凡字段在 Params 里有默认值，中性档
+# 的值必须与默认值相等（tests 锁死，防漂移）；无默认值的必填
+# 金额字段（notional_usd 等）中性档给的是参考金额。网格的
+# _total_usd 是伪字段：页面金额区的「目标总名义」，前端据它
+# 反推每格量（绝对每格量随币价变化，预设写死就是错的）。
+PRESETS: dict[str, dict[str, dict]] = {
+    "hedged_grid": {
+        "conservative": {"_total_usd": 500, "grid_count": 10,
+                         "leverage_grid": 2.0, "leverage_hedge": 2.0,
+                         "skip_band_frac": 0.35},
+        "neutral": {"_total_usd": 1000, "grid_count": 20,
+                    "leverage_grid": 3.0, "leverage_hedge": 3.0,
+                    "skip_band_frac": 0.25, "mode": "long_short"},
+        "aggressive": {"_total_usd": 3000, "grid_count": 40,
+                       "leverage_grid": 5.0, "leverage_hedge": 5.0,
+                       "skip_band_frac": 0.15},
+    },
+    "rotation_hedge": {
+        "conservative": {"notional_usd": 200, "leverage_a": 3.0,
+                         "leverage_b": 3.0, "hold_min_seconds": 3600.0,
+                         "hold_max_seconds": 5400.0,
+                         "cooldown_seconds": 60.0, "arcus_maker": True},
+        "neutral": {"notional_usd": 500, "leverage_a": 6.0,
+                    "leverage_b": 6.0, "hold_min_seconds": 3600.0,
+                    "hold_max_seconds": 7200.0,
+                    "cooldown_seconds": 30.0, "arcus_maker": True},
+        "aggressive": {"notional_usd": 2000, "leverage_a": 10.0,
+                       "leverage_b": 10.0, "hold_min_seconds": 1800.0,
+                       "hold_max_seconds": 3600.0,
+                       "cooldown_seconds": 15.0, "arcus_maker": False},
+    },
+    "premium_arb": {
+        "conservative": {"max_position_usd": 500.0,
+                         "max_order_notional_usd": 250.0,
+                         "leverage_base": 1.0, "leverage_hedge": 1.0,
+                         "execution_mode": "maker"},
+        "neutral": {"max_position_usd": 1000.0,
+                    "max_order_notional_usd": 500.0,
+                    "leverage_base": 1.0, "leverage_hedge": 1.0,
+                    "execution_mode": "taker"},
+        "aggressive": {"max_position_usd": 3000.0,
+                       "max_order_notional_usd": 1500.0,
+                       "leverage_base": 3.0, "leverage_hedge": 3.0,
+                       "execution_mode": "taker"},
+    },
+    "funding_carry": {
+        "conservative": {"notional_usd": 200, "leverage": 3.0,
+                         "min_entry_edge_bps_per_hour": 2.0,
+                         "exit_edge_bps_per_hour": 0.5,
+                         "check_seconds": 30.0},
+        "neutral": {"notional_usd": 500, "leverage": 6.0,
+                    "min_entry_edge_bps_per_hour": 1.0,
+                    "exit_edge_bps_per_hour": 0.0,
+                    "check_seconds": 30.0},
+        "aggressive": {"notional_usd": 2000, "leverage": 10.0,
+                       "min_entry_edge_bps_per_hour": 0.5,
+                       "exit_edge_bps_per_hour": 0.0,
+                       "check_seconds": 15.0},
+    },
+}
+
+PRESET_LABELS = {"conservative": "保守", "neutral": "中性",
+                 "aggressive": "激进", "custom": "自定义"}
+
+
 # 策略页（左侧边栏布局）元数据：每策略一页，页面由通用渲染器按
-# 本表生成。venue_fields/venue_labels 是页面顶部「交易平台」区的
-# 两腿场所下拉；primary 是「开仓区」的常用字段（其余字段进折叠的
-# 「高级配置」）；opportunity 决定「策略机会」区看哪张排行；
-# name_prefix 是面板一键运行的自动任务名前缀。
+# 本表生成。venue_fields/venue_labels 是「订单腿」区的两腿场所
+# 下拉；primary 是「金额」区的常用字段（其余字段进折叠的「高级
+# 选项」）；opportunity 决定「热门机会」区看哪类排行；amount 是
+# 页面顶部大输入框的主金额字段（中性网格无单一金额，为 None，
+# 用每格量×格数×现价折算总名义）；market_value 是「选市场」下拉
+# 里每个币后面带的机会值类型；how_it_works 是页头「运作方式」
+# 折叠里的步骤短句（按各策略真实机制写）；name_prefix 是面板
+# 一键运行的自动任务名前缀。
 PAGE_META: dict[str, dict] = {
     "hedged_grid": {
         "venue_fields": ("grid_venue", "hedge_venue"),
         "venue_labels": ("网格腿", "对冲腿"),
         "opportunity": "grid",
+        "amount": None,
+        "market_value": "price",
         "name_prefix": "grid",
+        "how_it_works": [
+            "网格腿在区间内按等距格子铺单，成交后在相邻格补反向单，吃震荡价差。",
+            "网格腿每成交一格，对冲腿就在另一所下反向单，把两腿净仓位拉平。",
+            "净仓位残差小于对冲死区时不动；裸露超过设定秒数会强制对冲。",
+            "价格冲出区间时按设置处置：平双腿停机，或只减仓回收。",
+        ],
         "primary": ("symbol", "lower_price", "upper_price", "grid_count",
                     "qty_per_grid", "leverage_grid", "leverage_hedge"),
-        "note": "区间上下限默认填机会区给出的建议区间（近 24 小时"
-                "高低各扩 2%），可改；杠杆只用于校验与显示，须与"
+        "note": "区间上下限可点热门机会表里的「选择」，用建议区间（近 24 小时"
+                "高低各扩 2%）一键填入；杠杆只用于校验与显示，须与"
                 "账户里实际设置的一致（程序不自动改杠杆）。",
     },
     "rotation_hedge": {
         "venue_fields": ("venue_a", "venue_b"),
         "venue_labels": ("A腿", "B腿"),
         "opportunity": "funding",
+        "amount": "notional_usd",
+        "market_value": "funding_apr",
         "name_prefix": "rotation",
+        "how_it_works": [
+            "两所一多一空等额对锁，方向按当下资金费选：多费率低的一所、空费率高的一所。",
+            "持有一段时长（默认每轮在 1~2 小时之间随机）刷成交量，顺带吃两所费差。",
+            "到期双腿平仓，冷却后按最新资金费重新选向，再开下一轮。",
+            "Arcus 腿可走 maker 挂单开仓，降低手续费（高级选项里开关）。",
+        ],
         "primary": ("symbol", "notional_usd", "leverage_a", "leverage_b",
                     "hold_min_seconds", "hold_max_seconds"),
         "note": "方向由策略按资金费自动选（多费率低的一所、空费率"
                 "高的一所）；持有时长默认按 Parallax 原仓表单在最短"
                 " 1 小时 ~ 最长 2 小时之间每轮随机抽取，到点自动平仓"
                 "轮换（最长 ≤ 最短或最短填 0 时关闭随机，改用高级"
-                "配置里的固定 hold_seconds）。",
+                "选项里的固定 hold_seconds）。",
     },
     "premium_arb": {
         "venue_fields": ("base_venue", "hedge_venue"),
         "venue_labels": ("基准腿", "对冲腿"),
         "opportunity": "spread",
+        "amount": "max_position_usd",
+        "market_value": "spread_bps",
         "name_prefix": "arb",
+        "how_it_works": [
+            "持续比较基准腿与对冲腿的价格，价差换算成相对中枢的溢价（bps）。",
+            "溢价偏离中枢超过入场带、并持续确认一段时间后，便宜的一腿买、贵的一腿卖，等量对锁。",
+            "溢价回归中枢附近即双腿平仓，赚价差回归；平仓恒走 taker 立即成交。",
+            "主腿可选 maker 先挂单（成交后对冲腿跟上）或 taker 双腿立即吃单。",
+        ],
         "primary": ("symbol", "max_position_usd", "execution_mode",
                     "midline_bps", "upper_bps", "lower_bps",
                     "leverage_base", "leverage_hedge"),
-        "note": "溢价带（中枢/上带/下带）必须先实测再填：用录制器"
+        "note": "顶部金额是最大持仓名义（不是单笔，单笔上限在高级选项里）。"
+                "溢价带（中枢/上带/下带）必须先实测再填：用录制器"
                 "采集盘口后跑 analyze 得建议值（见使用说明第 6 节），"
                 "不要凭感觉填。执行模式 maker = 主腿先挂单、成交后"
                 "对冲腿跟上；taker = 双腿立即吃单；平仓恒为 taker。",
@@ -234,7 +330,15 @@ PAGE_META: dict[str, dict] = {
         "venue_fields": ("venue_a", "venue_b"),
         "venue_labels": ("A腿", "B腿"),
         "opportunity": "funding",
+        "amount": "notional_usd",
+        "market_value": "funding_apr",
         "name_prefix": "carry",
+        "how_it_works": [
+            "比较两所同一币的资金费率，方向自动定：多费率低的一所、空费率高的一所。",
+            "净费差（空腿费率减多腿费率）达到入场门槛，才双腿等额开仓。",
+            "持有期间按检查周期复核费差，跌破退出门槛并连续确认多次后平仓。",
+            "开启自动重开时，平仓后费差恢复到门槛之上会自动再开仓。",
+        ],
         "primary": ("symbol", "notional_usd", "leverage",
                     "min_entry_edge_bps_per_hour",
                     "exit_edge_bps_per_hour"),
@@ -295,9 +399,14 @@ def strategy_specs() -> list[dict]:
                 "venue_fields": list(page["venue_fields"]),
                 "venue_labels": list(page["venue_labels"]),
                 "opportunity": page["opportunity"],
+                "amount": page["amount"],
+                "market_value": page["market_value"],
                 "name_prefix": page["name_prefix"],
+                "how_it_works": list(page["how_it_works"]),
                 "primary": list(page["primary"]),
                 "note": page["note"],
+                "presets": PRESETS[stype],
+                "preset_labels": PRESET_LABELS,
             },
         })
     return out
