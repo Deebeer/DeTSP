@@ -204,6 +204,27 @@ class Ledger:
         return {"fills": int(row[0]), "volume": float(row[1]),
                 "fees": float(row[2])}
 
+    def realized_pnl_since(self, since: float) -> dict:
+        """since 之后平仓的已实现盈亏（估算口径，面板总览用）。
+
+        逐条 closed_positions 按 (平仓价 - 开仓价) × 数量 × 方向
+        符号（多 +1 / 空 -1）求和。平仓价口径为 fills（平仓成交
+        均价）与 mark（发现平仓当刻的盘口中间价）的行都按其记录
+        价计入；close_price 为空（unknown 口径）的行无法估算，
+        不计入盈亏、只计 excluded 条数，供页面注明。
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(SUM((close_price - entry_price) * qty"
+                " * CASE side WHEN 'long' THEN 1 ELSE -1 END), 0),"
+                " COALESCE(SUM(CASE WHEN close_price IS NULL"
+                " THEN 1 ELSE 0 END), 0)"
+                " FROM closed_positions WHERE closed_ts >= ?",
+                (since,),
+            ).fetchone()
+        return {"realized_pnl": float(row[0]),
+                "excluded": int(row[1])}
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()

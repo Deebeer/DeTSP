@@ -1,15 +1,17 @@
-"""左侧边栏 + 每策略一页测试（第五轮：用户定版结构）。
+"""左侧边栏 + 每策略一页测试（第六轮：用户定版结构）。
 
 覆盖：边栏入口与四个策略页容器存在且顺序为用户定版（总览 /
-中性网格 / 溢价套利 / 资金费套利 / 轮换对冲刷量 / 设置，共 6 项，
-无账本、无「数据」入口、无通用新建任务按钮）；策略页定版流程
-的区块标记（运作方式 / 订单腿 / 金额（自由输入、无 chips）/
-选市场（pairs 下拉）/ 配置（预设四态）/ 高级选项 / 交易预览 /
-运行中仓位，无热门机会表）；总览策略记录两段与最佳机会卡片；
-极客风主题关键样式；「资金费套利」改名一致性；specs 的 page
-元数据自洽（primary / venue_fields / amount / market_value /
-how_it_works / presets）；/api/strategy-specs 把 page 元数据
-带给前端。
+中性网格 / 溢价套利 / 资金费套利 / 轮换对冲刷量 / 策略记录 /
+设置，共 7 项，无账本、无「数据」入口、无通用新建任务按钮）；
+策略页定版流程的区块标记（运作方式 / 订单腿 / 金额（自由输入、
+无 chips）/ 选市场（pairs 下拉）/ 配置（预设四态）/ 高级选项 /
+交易预览 / 运行中仓位，无热门机会表）；总览两行统计（今日 +
+累计，含盈亏估算口径）与最佳机会混合列表；策略记录独立页
+两段；字段说明统一为「字段名（简短说明）」；颜色只用一套变量、
+无杂色残留；极客风主题关键样式；「资金费套利」改名一致性；
+specs 的 page 元数据自洽（primary / venue_fields / amount /
+market_value / how_it_works / presets / amount_ratios）；
+/api/strategy-specs 把 page 元数据带给前端。
 """
 
 import json
@@ -22,7 +24,8 @@ import pytest
 from detsp.core.config import build_config
 from detsp.core.engine import Engine
 from detsp.core.ledger import Ledger
-from detsp.strategies.specs import (PAGE_META, PARAMS_CLASSES, PRESETS,
+from detsp.strategies.specs import (AMOUNT_RATIOS, PAGE_META,
+                                    PARAMS_CLASSES, PRESETS,
                                     PRESET_LABELS, STRATEGY_TITLES,
                                     strategy_specs)
 from detsp.venues.paper import PaperVenue
@@ -31,7 +34,7 @@ from detsp.web.server import PanelState, serve
 
 SIDEBAR_PAGES = ["overview", "strat-hedged_grid", "strat-premium_arb",
                  "strat-funding_carry", "strat-rotation_hedge",
-                 "settings"]
+                 "records", "settings"]
 
 
 # ── 边栏与策略页容器 ────────────────────────────────────────
@@ -42,9 +45,9 @@ def test_sidebar_entries_and_order():
     sidebar = PAGE_HTML[start:end]
     pos = [sidebar.index(f'data-page="{p}"') for p in SIDEBAR_PAGES]
     assert pos == sorted(pos), \
-        "边栏顺序必须是用户定版：总览/网格/套利/资金费/轮换/设置"
+        "边栏顺序必须是用户定版：总览/网格/套利/资金费/轮换/策略记录/设置"
     for label in ("总览", "中性网格", "溢价套利", "资金费套利",
-                  "轮换对冲刷量", "设置"):
+                  "轮换对冲刷量", "策略记录", "设置"):
         assert label in sidebar
     # 账本已按定版从边栏移除
     assert "账本" not in sidebar
@@ -73,6 +76,48 @@ def test_geek_theme_tokens():
     assert "border-radius:4px" not in PAGE_HTML
     # 状态标签：圆点 + 大写英文
     assert "RUNNING" in PAGE_HTML and "statusHtml" in PAGE_HTML
+
+
+def test_color_palette_single_source_no_junk_colors():
+    # 颜色只用一套变量：说明暗灰 --mut、正文 --txt、强调 --acc、
+    # 负/空 --red、正/多 --acc、警告 --yel；杂色一律不得残留
+    assert "--mut:#8b949e" in PAGE_HTML
+    assert "--txt:#c9d1d9" in PAGE_HTML
+    assert "--acc:#3fb950" in PAGE_HTML
+    assert "--red:#f85149" in PAGE_HTML
+    assert "--yel:#d29922" in PAGE_HTML
+    for junk in ("#ff9d97", "#58a6ff", "#1f6feb", "#bc8cff",
+                 "#a371f7", "#79c0ff", "background:#445", "#161b22"):
+        assert junk not in PAGE_HTML, f"杂色残留：{junk}"
+    # 说明文字（.muted/.fhelp）统一走 --mut，不许各写各的灰
+    assert ".muted{color:var(--mut)}" in PAGE_HTML
+    assert ".fhelp{" in PAGE_HTML and "color:var(--mut)" in PAGE_HTML
+
+
+def test_field_labels_have_short_explanations():
+    # 全站字段统一「字段名（简短说明）」：四策略每个字段的 label
+    # 都必须带括号里的一句话说明，且不能太长（大白话、扫一眼懂）
+    for spec in strategy_specs():
+        for f in spec["fields"]:
+            label = f["label"]
+            assert "（" in label and label.endswith("）"), \
+                f"{spec['strategy']}.{f['name']} label 缺括号说明：{label}"
+            assert len(label) <= 40, \
+                f"{spec['strategy']}.{f['name']} label 太长：{label}"
+    # 用户点名的例子
+    by = {s["strategy"]: {f["name"]: f for f in s["fields"]}
+          for s in strategy_specs()}
+    assert by["hedged_grid"]["lower_price"]["label"] == \
+        "网格区间下限（网格铺单的最低价）"
+
+
+def test_leg_rows_show_available_balance():
+    # 订单腿每行显示该所可用余额（权益），paper 标模拟，取不到
+    # 显示「可用 —」，随 refresh 的 renderLegs 更新
+    assert 'data-legbal="' in PAGE_HTML
+    assert "legBal" in PAGE_HTML
+    assert "可用 $" in PAGE_HTML and "（权益 $" in PAGE_HTML
+    assert "可用 —" in PAGE_HTML and "模拟余额" in PAGE_HTML
 
 
 def test_strategy_page_containers_exist():
@@ -136,18 +181,35 @@ def test_preview_block_markers():
     assert "renderLegs" in PAGE_HTML
 
 
-def test_overview_records_and_best_cards():
-    # 旧「运行中仓位（全部策略）」表已按定版移除，改为策略记录两段
+def test_overview_stats_best_list_and_records_page():
+    # 总览两行统计：今日一行 + 累计一行，第四项是盈亏（估算）
+    for marker in ('id="tvol"', 'id="tfee"', 'id="tcnt"', 'id="tpnl"',
+                   'id="avol"', 'id="afee"', 'id="acnt"', 'id="apnl"',
+                   "今日盈亏（估算）", "累计盈亏（估算）",
+                   "累计成交量", "累计手续费", "累计成交笔数",
+                   'id="pnlNote"'):
+        assert marker in PAGE_HTML
+    # 旧单行口径不得残留
+    assert "持仓未实现盈亏（估算）" not in PAGE_HTML
+    assert 'id="upnl"' not in PAGE_HTML
+    # 最佳机会改单一混合列表（四策略合并、按机会值排序），卡片删除
+    assert 'id="bestTbl"' in PAGE_HTML
+    assert 'id="bestCards"' not in PAGE_HTML
+    assert "renderBestCards" not in PAGE_HTML
+    assert "renderBest" in PAGE_HTML and 'fetch("/api/best")' in PAGE_HTML
+    assert "score_pct" in PAGE_HTML
+    assert "data-goto" in PAGE_HTML and "gotoStrategy" in PAGE_HTML
+    # 策略记录独立成页：两段表格在记录页容器内，不在总览里
+    ov = PAGE_HTML[PAGE_HTML.index('id="page-overview"'):
+                   PAGE_HTML.index('id="page-records"')]
+    assert 'id="recOpen"' not in ov and "策略记录" not in ov
+    rec = PAGE_HTML[PAGE_HTML.index('id="page-records"'):
+                    PAGE_HTML.index('id="page-strat-hedged_grid"')]
+    assert 'id="recOpen"' in rec and 'id="recClosed"' in rec
+    assert "运行仓位" in rec and "仓位历史" in rec
+    assert "renderRecords" in PAGE_HTML and "/api/records" in PAGE_HTML
     assert 'id="allPos"' not in PAGE_HTML
     assert "运行中仓位（全部策略）" not in PAGE_HTML
-    assert "策略记录" in PAGE_HTML
-    assert 'id="recOpen"' in PAGE_HTML and 'id="recClosed"' in PAGE_HTML
-    assert "运行仓位" in PAGE_HTML and "仓位历史" in PAGE_HTML
-    assert "renderRecords" in PAGE_HTML and "/api/records" in PAGE_HTML
-    # 四策略最佳机会卡片：数据走 /api/best，点行跳策略页带入
-    assert 'id="bestCards"' in PAGE_HTML
-    assert "renderBestCards" in PAGE_HTML and "/api/best" in PAGE_HTML
-    assert "data-goto" in PAGE_HTML and "gotoStrategy" in PAGE_HTML
 
 
 # ── 改名一致性 ──────────────────────────────────────────────
@@ -176,7 +238,8 @@ def test_page_meta_consistency():
                         "venue_labels": list(PAGE_META[st]["venue_labels"]),
                         "primary": list(PAGE_META[st]["primary"]),
                         "presets": PRESETS[st],
-                        "preset_labels": PRESET_LABELS}
+                        "preset_labels": PRESET_LABELS,
+                        "amount_ratios": AMOUNT_RATIOS.get(st, {})}
         vf = page["venue_fields"]
         assert len(vf) == 2 and len(page["venue_labels"]) == 2
         for name in vf:

@@ -86,7 +86,14 @@ class PanelState:
         return self._scanner().pairs(venue_a, venue_b, strategy)
 
     def best_view(self, strategy: str) -> dict:
-        return self._scanner().best(strategy, limit=5)
+        """strategy 给了合法策略名 → 该策略最佳（策略卡时代的
+        接口，保留兼容）；没给/不合法 → 四策略合并排序
+        （总览「最佳机会」单列表用）。"""
+        from ..strategies.specs import PARAMS_CLASSES
+
+        if strategy in PARAMS_CLASSES:
+            return self._scanner().best(strategy, limit=5)
+        return self._scanner().best_all(per_strategy=5)
 
     # ----- 策略记录（运行仓位 + 仓位历史）-----
     # 运行仓位没有交易所侧的「开仓时间」可用：追踪器以面板首次
@@ -626,11 +633,28 @@ class PanelState:
             pos_ok_venues)
         today0 = datetime.combine(datetime.now().date(), dtime.min).timestamp()
         stats = self.ledger.stats_since(today0)
+        all_stats = self.ledger.stats_since(0.0)
+        # 盈亏（估算）口径：已平仓实现盈亏（closed_positions 按
+        # (平仓价-开仓价)×量×方向；平仓价 unknown 的行无法估算、
+        # 不计入只计 excluded 数）+ 当前持仓未实现盈亏。未实现
+        # 盈亏是「当前」快照、没有时间维度，今日与累计都全额
+        # 计入（页面小字注明）。
+        rp_today = self.ledger.realized_pnl_since(today0)
+        rp_all = self.ledger.realized_pnl_since(0.0)
+        stats = {**stats,
+                 "realized_pnl": round(rp_today["realized_pnl"], 4),
+                 "pnl_excluded": rp_today["excluded"],
+                 "pnl": round(rp_today["realized_pnl"] + upnl, 4)}
+        all_stats = {**all_stats,
+                     "realized_pnl": round(rp_all["realized_pnl"], 4),
+                     "pnl_excluded": rp_all["excluded"],
+                     "pnl": round(rp_all["realized_pnl"] + upnl, 4)}
         ks = self.engine.kill_switch
         return {
             "dry_run": bool(getattr(self.app_config, "dry_run", True)),
             "killswitch": {"halted": ks.halted, "reason": ks.reason},
             "today": stats,
+            "all_time": all_stats,
             "unrealized_pnl": round(upnl, 4),
             "venues": venues_out,
             # S3：启动恢复对账等事件（最近 20 条，面板可见）

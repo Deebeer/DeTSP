@@ -48,68 +48,84 @@ STRATEGY_BLURBS = {
 _VENUE = {"type": "venue"}
 _FIELD_META: dict[str, dict[str, dict]] = {
     "hedged_grid": {
-        "grid_venue": {"label": "网格腿场所", "group": "场所与标的", **_VENUE},
-        "hedge_venue": {"label": "对冲腿场所", "group": "场所与标的", **_VENUE},
-        "symbol": {"label": "币种（如 BTC）", "group": "场所与标的"},
-        "lower_price": {"label": "网格区间下限", "group": "网格参数"},
-        "upper_price": {"label": "网格区间上限", "group": "网格参数"},
-        "grid_count": {"label": "格数（至少 2）", "group": "网格参数"},
-        "qty_per_grid": {"label": "每格数量（币）", "group": "网格参数"},
-        "mode": {"label": "方向模式", "group": "网格参数", "type": "enum",
+        "grid_venue": {"label": "网格腿场所（铺网格单的一所）",
+                       "group": "场所与标的", **_VENUE},
+        "hedge_venue": {"label": "对冲腿场所（对冲网格仓位的一所）",
+                        "group": "场所与标的", **_VENUE},
+        "symbol": {"label": "币种（要交易的标的）", "group": "场所与标的"},
+        "lower_price": {"label": "网格区间下限（网格铺单的最低价）",
+                        "group": "网格参数"},
+        "upper_price": {"label": "网格区间上限（网格铺单的最高价）",
+                        "group": "网格参数"},
+        "grid_count": {"label": "格数（区间切成多少格，至少 2）",
+                       "group": "网格参数"},
+        "qty_per_grid": {"label": "每格数量（每格下单的币数）",
+                         "group": "网格参数"},
+        "mode": {"label": "方向模式（网格只做多、只做空还是双向）",
+                 "group": "网格参数", "type": "enum",
                  "options": [("long", "只做多"), ("short", "只做空"),
                              ("long_short", "双向")]},
         "out_of_range_action": {
-            "label": "冲出区间后的动作", "group": "网格参数", "type": "enum",
+            "label": "冲出区间后的动作（价格跑出区间时怎么处置）",
+            "group": "网格参数", "type": "enum",
             "options": [("close", "平双腿并停机"),
                         ("reduce_only", "只减仓回收")]},
-        "leverage_grid": {"label": "网格腿杠杆（与账户实际一致）",
+        "leverage_grid": {"label": "网格腿杠杆（只校验用，须和账户里设的一致）",
                           "group": "对冲与风控"},
-        "leverage_hedge": {"label": "对冲腿杠杆（与账户实际一致）",
-                           "group": "对冲与风控",
-                           "help": "WGALL 原仓没有对冲腿，默认随网格腿"
-                                   "取 3（原仓表单默认杠杆）。"},
-        "hedge_deadband_qty": {"label": "对冲死区（币，残差小于它不对冲）",
-                               "group": "对冲与风控"},
-        "max_unhedged_seconds": {"label": "裸露超时强制对冲（秒，0=禁用）",
-                                 "group": "对冲与风控"},
-        "max_residual_seconds": {"label": "小残差强制对冲时限（秒，0=禁用）",
-                                 "group": "对冲与风控"},
-        "skip_band_frac": {"label": "贴价跳档带宽（格距比例）",
+        "leverage_hedge": {"label": "对冲腿杠杆（只校验用，须和账户里设的一致）",
                            "group": "对冲与风控"},
-        "fee_bps_per_side": {"label": "单边手续费估算 bps（经济性检查用）",
+        "hedge_deadband_qty": {"label": "对冲死区（两腿仓位差小于它先不对冲，单位币）",
+                               "group": "对冲与风控"},
+        "max_unhedged_seconds": {"label": "裸露超时（没对冲满超过多少秒强制对冲，0=关）",
+                                 "group": "对冲与风控"},
+        "max_residual_seconds": {"label": "小残差超时（小尾巴仓位留超过多少秒强制对冲，0=关）",
+                                 "group": "对冲与风控"},
+        "skip_band_frac": {"label": "贴价跳档带宽（离现价太近的格子先不挂，占格距的比例）",
+                           "group": "对冲与风控"},
+        "fee_bps_per_side": {"label": "单边手续费估算（每边多少 bps，只做划算性检查）",
                              "group": "对冲与风控"},
-        "takeover_position": {"label": "启动时接管网格腿已有持仓",
+        "takeover_position": {"label": "接管已有持仓（启动时把网格腿现有仓位接过来管）",
                               "group": "对冲与风控"},
     },
     "rotation_hedge": {
-        "symbol": {"label": "币种（如 BTC）", "group": "场所与标的"},
-        "venue_a": {"label": "场所 A", "group": "场所与标的", **_VENUE},
-        "venue_b": {"label": "场所 B", "group": "场所与标的", **_VENUE},
-        "notional_usd": {"label": "单边开仓金额（USD）", "group": "场所与标的"},
-        "hold_seconds": {"label": "固定持有时长（秒）", "group": "轮换节奏"},
-        "hold_min_seconds": {"label": "持有时长下限（秒，>0 时与上限间随机）",
+        "symbol": {"label": "币种（要交易的标的）", "group": "场所与标的"},
+        "venue_a": {"label": "场所 A（A 腿用的交易所）",
+                    "group": "场所与标的", **_VENUE},
+        "venue_b": {"label": "场所 B（B 腿用的交易所）",
+                    "group": "场所与标的", **_VENUE},
+        "notional_usd": {"label": "单边开仓金额（一边开多少美元）",
+                         "group": "场所与标的"},
+        "hold_seconds": {"label": "固定持有时长（关掉随机时长时每轮持有多少秒）",
+                         "group": "轮换节奏"},
+        "hold_min_seconds": {"label": "持有时长下限（每轮随机时长的最短，单位秒）",
                              "group": "轮换节奏"},
-        "hold_max_seconds": {"label": "持有时长上限（秒）", "group": "轮换节奏"},
-        "cooldown_seconds": {"label": "平仓后冷却（秒）", "group": "轮换节奏"},
-        "notional_min_usd": {"label": "金额下限（USD，>0 时与上限间随机）",
+        "hold_max_seconds": {"label": "持有时长上限（每轮随机时长的最长，单位秒）",
+                             "group": "轮换节奏"},
+        "cooldown_seconds": {"label": "冷却（平仓后等多少秒开下一轮）",
+                             "group": "轮换节奏"},
+        "notional_min_usd": {"label": "随机金额下限（金额随机模式的最少美元，0=关）",
                              "group": "轮换节奏",
                              "help": "与原仓差异：Parallax 默认金额留空="
                                      "按两所可用容量开满（安全系数 0.95）；"
                                      "DeTSP 任务必须给固定 notional_usd，"
                                      "不做按容量开满（安全差异）。"},
-        "notional_max_usd": {"label": "金额上限（USD）", "group": "轮换节奏"},
-        "max_position_qty": {"label": "逐步建仓上限（币，0=禁用）",
+        "notional_max_usd": {"label": "随机金额上限（金额随机模式的最多美元）",
                              "group": "轮换节奏"},
-        "accumulate_interval_seconds": {"label": "逐步建仓加仓间隔（秒）",
+        "max_position_qty": {"label": "逐步建仓上限（分批加仓最多加到多少币，0=一次开满）",
+                             "group": "轮换节奏"},
+        "accumulate_interval_seconds": {"label": "加仓间隔（分批建仓时每批间隔多少秒）",
                                         "group": "轮换节奏"},
-        "arcus_maker": {"label": "Arcus 腿走 maker 挂单开仓", "group": "执行与风控"},
-        "maker_wait_seconds": {"label": "maker 挂单最长等待（秒）",
+        "arcus_maker": {"label": "Arcus 挂单开仓（Arcus 腿用挂单而不是吃单）",
+                        "group": "执行与风控"},
+        "maker_wait_seconds": {"label": "挂单等待（挂单多少秒没成交就撤单，单位秒）",
                                "group": "执行与风控"},
-        "leverage_a": {"label": "A 腿杠杆（与账户实际一致）", "group": "执行与风控"},
-        "leverage_b": {"label": "B 腿杠杆（与账户实际一致）", "group": "执行与风控"},
-        "settle_grace_seconds": {"label": "开仓结算宽限期（秒）",
+        "leverage_a": {"label": "A 腿杠杆（只校验用，须和账户里设的一致）",
+                       "group": "执行与风控"},
+        "leverage_b": {"label": "B 腿杠杆（只校验用，须和账户里设的一致）",
+                       "group": "执行与风控"},
+        "settle_grace_seconds": {"label": "结算宽限（开仓后等成交落账的宽限秒数）",
                                  "group": "执行与风控"},
-        "max_slippage_bps": {"label": "削腿滑点保护上限（bps）",
+        "max_slippage_bps": {"label": "削腿滑点上限（两腿不平时修仓最多接受多少滑点，单位 bps）",
                              "group": "执行与风控",
                              "help": "与原仓差异：Parallax 下单滑点上限"
                                      " ORDER_SLIPPAGE_BPS=10；本字段只管"
@@ -117,68 +133,93 @@ _FIELD_META: dict[str, dict[str, dict]] = {
                                      "给薄盘口成交余量（安全差异）。"},
     },
     "premium_arb": {
-        "base_venue": {"label": "基准腿场所", "group": "场所与标的", **_VENUE},
-        "hedge_venue": {"label": "对冲腿场所", "group": "场所与标的", **_VENUE},
-        "symbol": {"label": "币种（如 BTC）", "group": "场所与标的"},
-        "midline_bps": {"label": "溢价中枢（bps，必须实测）", "group": "溢价带",
-                        "help": "原仓 example 参考值 0，但那只是示例占位："
-                                "中枢必须用录制+analyze 实测，不许照抄。"},
-        "upper_bps": {"label": "中枢上方入场带（bps）", "group": "溢价带",
-                      "help": "原仓 example 参考值 4（示例，须按实测波动调整）。"},
-        "lower_bps": {"label": "中枢下方入场带（bps）", "group": "溢价带",
-                      "help": "原仓 example 参考值 4（示例，须按实测波动调整）。"},
-        "persist_seconds": {"label": "信号持续确认（秒）", "group": "溢价带"},
-        "cooldown_seconds": {"label": "两次执行最小间隔（秒，0=不限）",
+        "base_venue": {"label": "基准腿场所（盯价差定方向的一所）",
+                       "group": "场所与标的", **_VENUE},
+        "hedge_venue": {"label": "对冲腿场所（跟随对冲的一所）",
+                        "group": "场所与标的", **_VENUE},
+        "symbol": {"label": "币种（要交易的标的）", "group": "场所与标的"},
+        "midline_bps": {"label": "溢价中枢（两所价差的中间线，单位 bps）",
+                        "group": "溢价带",
+                        "help": "中枢必须用录制+analyze 实测，不能照抄"
+                                "示例值（原仓 example 的 0 只是占位）。"},
+        "upper_bps": {"label": "上方入场带（价差高出中枢多少 bps 开仓）",
+                      "group": "溢价带"},
+        "lower_bps": {"label": "下方入场带（价差低于中枢多少 bps 开仓）",
+                      "group": "溢价带"},
+        "persist_seconds": {"label": "信号确认（价差越线持续多少秒才动手）",
+                            "group": "溢价带"},
+        "cooldown_seconds": {"label": "执行冷却（两次开仓至少间隔多少秒，0=不限）",
                              "group": "溢价带"},
-        "max_position_usd": {"label": "最大持仓名义（USD）", "group": "风控"},
-        "max_order_notional_usd": {"label": "单笔名义上限（USD）", "group": "风控"},
-        "min_order_notional_usd": {"label": "单笔名义下限（USD，低于不下单）",
+        "max_position_usd": {"label": "最大持仓（两腿最多持有多少美元）",
+                             "group": "风控"},
+        "max_order_notional_usd": {"label": "单笔上限（一笔最多下多少美元）",
                                    "group": "风控"},
-        "inventory_scale_bps": {"label": "库存阶梯满仓附加门槛（bps）",
+        "min_order_notional_usd": {"label": "单笔下限（一笔低于多少美元就不下）",
+                                   "group": "风控"},
+        "inventory_scale_bps": {"label": "库存阶梯（仓位越满入场门槛额外加多少 bps）",
                                 "group": "风控"},
-        "inventory_floor_frac": {"label": "库存阶梯起算仓位比例（0~1）",
+        "inventory_floor_frac": {"label": "库存阶梯起点（仓位到这个比例才开始加门槛）",
                                  "group": "风控"},
-        "take_fraction": {"label": "吃对手盘深度比例（0~1）", "group": "风控"},
-        "base_taker_fee_bps": {"label": "基准腿 taker 费率（bps）", "group": "执行"},
-        "hedge_taker_fee_bps": {"label": "对冲腿 taker 费率（bps）", "group": "执行"},
-        "execution_mode": {"label": "执行模式", "group": "执行", "type": "enum",
+        "take_fraction": {"label": "吃单深度比例（一笔吃对手盘深度的几成）",
+                          "group": "风控"},
+        "base_taker_fee_bps": {"label": "基准腿吃单费率（算收益用，单位 bps）",
+                               "group": "执行"},
+        "hedge_taker_fee_bps": {"label": "对冲腿吃单费率（算收益用，单位 bps）",
+                                "group": "执行"},
+        "execution_mode": {"label": "执行模式（挂单等成交还是直接吃单）",
+                           "group": "执行", "type": "enum",
                            "options": [("taker", "吃单（双腿立即成交）"),
                                        ("maker", "挂单（主腿先挂单等成交）")]},
-        "maker_offset_ticks": {"label": "maker 挂价偏移（tick）", "group": "执行"},
-        "maker_timeout_seconds": {"label": "maker 挂单最长等待（秒）", "group": "执行"},
-        "reconcile_seconds": {"label": "持仓对账周期（秒）", "group": "执行"},
-        "leverage_base": {"label": "基准腿杠杆（与账户实际一致）", "group": "风控"},
-        "leverage_hedge": {"label": "对冲腿杠杆（与账户实际一致）", "group": "风控"},
-        "settle_grace_seconds": {"label": "开仓结算宽限期（秒）", "group": "执行",
+        "maker_offset_ticks": {"label": "挂单偏移（挂价离盘口几个最小价位）",
+                               "group": "执行"},
+        "maker_timeout_seconds": {"label": "挂单超时（挂单多少秒没成就撤，单位秒）",
+                                  "group": "执行"},
+        "reconcile_seconds": {"label": "对账周期（多久核对一次两腿仓位，单位秒）",
+                              "group": "执行"},
+        "leverage_base": {"label": "基准腿杠杆（只校验用，须和账户里设的一致）",
+                          "group": "风控"},
+        "leverage_hedge": {"label": "对冲腿杠杆（只校验用，须和账户里设的一致）",
+                           "group": "风控"},
+        "settle_grace_seconds": {"label": "结算宽限（开仓后等成交落账的宽限秒数）",
+                                 "group": "执行",
                                  "help": "与原仓差异：entropy-arb 的 "
                                          "settle_timeout 是 5~10 秒的等成交"
                                          "确认；本字段是防异步结算误削腿的"
                                          "状态机宽限，保留 20 秒（安全差异）。"},
-        "max_slippage_bps": {"label": "削腿滑点保护上限（bps）", "group": "执行",
+        "max_slippage_bps": {"label": "削腿滑点上限（两腿不平时修仓最多接受多少滑点，单位 bps）",
+                             "group": "执行",
                              "help": "与原仓 hedge_slippage_bps=20 一致；"
                                      "原仓开仓腿滑点保护 leg_slippage_bps=50 "
                                      "未单独移植（DeTSP 开仓走市价单+未知"
                                      "结果对账口径）。"},
     },
     "funding_carry": {
-        "venue_a": {"label": "场所 A", "group": "场所与标的", **_VENUE},
-        "venue_b": {"label": "场所 B", "group": "场所与标的", **_VENUE},
-        "symbol": {"label": "币种（如 BTC）", "group": "场所与标的"},
-        "notional_usd": {"label": "单边开仓金额（USD）", "group": "场所与标的"},
-        "leverage": {"label": "两腿杠杆（与账户实际一致）", "group": "场所与标的"},
-        "min_entry_edge_bps_per_hour": {"label": "入场门槛：净收资金费优势（bps/小时）",
+        "venue_a": {"label": "场所 A（A 腿用的交易所）",
+                    "group": "场所与标的", **_VENUE},
+        "venue_b": {"label": "场所 B（B 腿用的交易所）",
+                    "group": "场所与标的", **_VENUE},
+        "symbol": {"label": "币种（要交易的标的）", "group": "场所与标的"},
+        "notional_usd": {"label": "单边开仓金额（一边开多少美元）",
+                         "group": "场所与标的"},
+        "leverage": {"label": "两腿杠杆（只校验用，须和账户里设的一致）",
+                     "group": "场所与标的"},
+        "min_entry_edge_bps_per_hour": {"label": "入场门槛（费差达到多少 bps/小时才开仓）",
                                         "group": "入场与退出"},
-        "exit_edge_bps_per_hour": {"label": "退出门槛（bps/小时，须小于入场门槛）",
+        "exit_edge_bps_per_hour": {"label": "退出门槛（费差低于多少 bps/小时考虑平仓）",
                                    "group": "入场与退出"},
-        "exit_confirm_checks": {"label": "退出确认次数（连续低于退出门槛）",
+        "exit_confirm_checks": {"label": "退出确认次数（连续几次低于退出门槛才平仓）",
                                 "group": "入场与退出"},
-        "check_seconds": {"label": "资金费检查周期（秒）", "group": "入场与退出"},
-        "max_hold_seconds": {"label": "最长持有（秒，0=不限）", "group": "入场与退出"},
-        "reopen": {"label": "平仓后优势恢复自动重开", "group": "入场与退出"},
-        "cooldown_seconds": {"label": "平仓后重开冷却（秒）", "group": "入场与退出"},
-        "settle_grace_seconds": {"label": "开仓结算宽限期（秒）",
+        "check_seconds": {"label": "检查周期（多久查一次资金费，单位秒）",
+                          "group": "入场与退出"},
+        "max_hold_seconds": {"label": "最长持有（持仓超过多少秒强制平仓，0=不限）",
+                             "group": "入场与退出"},
+        "reopen": {"label": "自动重开（平仓后费差恢复了自动再开）",
+                   "group": "入场与退出"},
+        "cooldown_seconds": {"label": "重开冷却（平仓后等多少秒才允许重开）",
+                             "group": "入场与退出"},
+        "settle_grace_seconds": {"label": "结算宽限（开仓后等成交落账的宽限秒数）",
                                  "group": "执行与风控"},
-        "max_slippage_bps": {"label": "削腿滑点保护上限（bps）",
+        "max_slippage_bps": {"label": "削腿滑点上限（两腿不平时修仓最多接受多少滑点，单位 bps）",
                              "group": "执行与风控",
                              "help": "与原仓差异：Parallax 下单滑点上限"
                                      "为 10 bps；本字段只管削腿修正单，"
@@ -189,64 +230,76 @@ _FIELD_META: dict[str, dict[str, dict]] = {
 
 # 配置预设（页面「配置」区的档位按钮）：保守 / 中性 / 激进 三组
 # 字段值，点一下整组填入表单；用户再改任何字段即变「自定义」。
-# 中性 = 现行原仓对齐默认值：凡字段在 Params 里有默认值，中性档
-# 的值必须与默认值相等（tests 锁死，防漂移）；无默认值的必填
-# 金额字段（notional_usd 等）中性档给的是参考金额。网格的
-# _total_usd 是伪字段：页面金额区的「目标总名义」，前端据它
-# 反推每格量（绝对每格量随币价变化，预设写死就是错的）。
+# 用户定版语义（第五轮修正）：预设只套**结构参数**（杠杆、门槛、
+# 格数、持有时长、冷却、执行方式等），**绝不含金额类字段**——
+# 金额由用户先在「金额」区填好，点预设时金额输入框一个字不动。
+# 中性 = 现行原仓对齐默认值：凡结构字段在 Params 里有默认值，
+# 中性档的值必须与默认值相等（tests 锁死，防漂移）。金额本来
+# 就不是原仓默认语义的一部分（原仓金额是表单必填项），故不锁。
+# 原先靠金额分档的量改为比例换算（见 AMOUNT_RATIOS）：溢价套利
+# 的单笔上限 = 用户填的最大持仓 × 档位比例，点预设时前端换算
+# 填入。中性网格的每格量继续由用户填的目标总名义反推（点预设
+# 只改格数/杠杆/跳档，总名义输入框不动）。
 PRESETS: dict[str, dict[str, dict]] = {
     "hedged_grid": {
-        "conservative": {"_total_usd": 500, "grid_count": 10,
+        "conservative": {"grid_count": 10,
                          "leverage_grid": 2.0, "leverage_hedge": 2.0,
                          "skip_band_frac": 0.35},
-        "neutral": {"_total_usd": 1000, "grid_count": 20,
+        "neutral": {"grid_count": 20,
                     "leverage_grid": 3.0, "leverage_hedge": 3.0,
                     "skip_band_frac": 0.25, "mode": "long_short"},
-        "aggressive": {"_total_usd": 3000, "grid_count": 40,
+        "aggressive": {"grid_count": 40,
                        "leverage_grid": 5.0, "leverage_hedge": 5.0,
                        "skip_band_frac": 0.15},
     },
     "rotation_hedge": {
-        "conservative": {"notional_usd": 200, "leverage_a": 3.0,
+        "conservative": {"leverage_a": 3.0,
                          "leverage_b": 3.0, "hold_min_seconds": 3600.0,
                          "hold_max_seconds": 5400.0,
                          "cooldown_seconds": 60.0, "arcus_maker": True},
-        "neutral": {"notional_usd": 500, "leverage_a": 6.0,
+        "neutral": {"leverage_a": 6.0,
                     "leverage_b": 6.0, "hold_min_seconds": 3600.0,
                     "hold_max_seconds": 7200.0,
                     "cooldown_seconds": 30.0, "arcus_maker": True},
-        "aggressive": {"notional_usd": 2000, "leverage_a": 10.0,
+        "aggressive": {"leverage_a": 10.0,
                        "leverage_b": 10.0, "hold_min_seconds": 1800.0,
                        "hold_max_seconds": 3600.0,
                        "cooldown_seconds": 15.0, "arcus_maker": False},
     },
     "premium_arb": {
-        "conservative": {"max_position_usd": 500.0,
-                         "max_order_notional_usd": 250.0,
-                         "leverage_base": 1.0, "leverage_hedge": 1.0,
+        "conservative": {"leverage_base": 1.0, "leverage_hedge": 1.0,
                          "execution_mode": "maker"},
-        "neutral": {"max_position_usd": 1000.0,
-                    "max_order_notional_usd": 500.0,
-                    "leverage_base": 1.0, "leverage_hedge": 1.0,
+        "neutral": {"leverage_base": 1.0, "leverage_hedge": 1.0,
                     "execution_mode": "taker"},
-        "aggressive": {"max_position_usd": 3000.0,
-                       "max_order_notional_usd": 1500.0,
-                       "leverage_base": 3.0, "leverage_hedge": 3.0,
+        "aggressive": {"leverage_base": 3.0, "leverage_hedge": 3.0,
                        "execution_mode": "taker"},
     },
     "funding_carry": {
-        "conservative": {"notional_usd": 200, "leverage": 3.0,
+        "conservative": {"leverage": 3.0,
                          "min_entry_edge_bps_per_hour": 2.0,
                          "exit_edge_bps_per_hour": 0.5,
                          "check_seconds": 30.0},
-        "neutral": {"notional_usd": 500, "leverage": 6.0,
+        "neutral": {"leverage": 6.0,
                     "min_entry_edge_bps_per_hour": 1.0,
                     "exit_edge_bps_per_hour": 0.0,
                     "check_seconds": 30.0},
-        "aggressive": {"notional_usd": 2000, "leverage": 10.0,
+        "aggressive": {"leverage": 10.0,
                        "min_entry_edge_bps_per_hour": 0.5,
                        "exit_edge_bps_per_hour": 0.0,
                        "check_seconds": 15.0},
+    },
+}
+
+# 金额派生字段的档位比例：字段值 = 页面主金额（用户已填）× 比例。
+# 只有溢价套利有这种字段：单笔上限原先按最大持仓分档写死绝对值
+# （250/500/1500 对应最大持仓 500/1000/3000）；现按用户定版改
+# 比例 25% / 50% / 100%——保守/中性与原档在参考金额下等值，
+# 激进原为 50%（1500/3000），按定版语义改 100%（单笔可打满）。
+AMOUNT_RATIOS: dict[str, dict[str, dict[str, float]]] = {
+    "premium_arb": {
+        "max_order_notional_usd": {"conservative": 0.25,
+                                   "neutral": 0.5,
+                                   "aggressive": 1.0},
     },
 }
 
@@ -257,7 +310,7 @@ PRESET_LABELS = {"conservative": "保守", "neutral": "中性",
 # 策略页（左侧边栏布局）元数据：每策略一页，页面由通用渲染器按
 # 本表生成。venue_fields/venue_labels 是「订单腿」区的两腿场所
 # 下拉；primary 是「金额」区的常用字段（其余字段进折叠的「高级
-# 选项」）；opportunity 决定「热门机会」区看哪类排行；amount 是
+# 选项」）；opportunity 决定 pairs 排序与总览最佳机会的口径；amount 是
 # 页面顶部大输入框的主金额字段（中性网格无单一金额，为 None，
 # 用每格量×格数×现价折算总名义）；market_value 是「选市场」下拉
 # 里每个币后面带的机会值类型；how_it_works 是页头「运作方式」
@@ -279,7 +332,7 @@ PAGE_META: dict[str, dict] = {
         ],
         "primary": ("symbol", "lower_price", "upper_price", "grid_count",
                     "qty_per_grid", "leverage_grid", "leverage_hedge"),
-        "note": "区间上下限可点热门机会表里的「选择」，用建议区间（近 24 小时"
+        "note": "区间上下限可在「选市场」下方用建议区间（近 24 小时"
                 "高低各扩 2%）一键填入；杠杆只用于校验与显示，须与"
                 "账户里实际设置的一致（程序不自动改杠杆）。",
     },
@@ -320,7 +373,9 @@ PAGE_META: dict[str, dict] = {
         "primary": ("symbol", "max_position_usd", "execution_mode",
                     "midline_bps", "upper_bps", "lower_bps",
                     "leverage_base", "leverage_hedge"),
-        "note": "顶部金额是最大持仓名义（不是单笔，单笔上限在高级选项里）。"
+        "note": "顶部金额是最大持仓名义（不是单笔）；单笔上限在高级"
+                "选项里，点预设时按最大持仓的比例换算（保守 25% / "
+                "中性 50% / 激进 100%），改金额不会被预设覆盖。"
                 "溢价带（中枢/上带/下带）必须先实测再填：用录制器"
                 "采集盘口后跑 analyze 得建议值（见使用说明第 6 节），"
                 "不要凭感觉填。执行模式 maker = 主腿先挂单、成交后"
@@ -407,6 +462,7 @@ def strategy_specs() -> list[dict]:
                 "note": page["note"],
                 "presets": PRESETS[stype],
                 "preset_labels": PRESET_LABELS,
+                "amount_ratios": AMOUNT_RATIOS.get(stype, {}),
             },
         })
     return out

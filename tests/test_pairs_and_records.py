@@ -1,13 +1,21 @@
-"""第五轮测试：全量 pairs 接口、跨所 best、配置预设、策略记录落库。
+"""第六轮测试：全量 pairs 接口、跨所 best（含合并排序）、配置
+预设（只套结构参数、金额靠比例换算）、策略记录落库、总览
+盈亏（估算）口径。
 
 - pairs：两所共同上市交集、按策略排序、混口径靠后、预计年化
   换算、疑似同名不同资产（价差 >50%）标 suspect 并沉底；
-- best：跨场所对聚合，suspect 不进最佳；
-- presets：三档齐全、字段真实、中性档与 Params 默认值一致
-  （有默认值的字段）、三档关键字段单调差异化；
+- best：跨场所对聚合，suspect 不进最佳；best_all 四策略合并
+  按统一机会值 % 降序（资金费=年化 %、套利=价差 %、网格=
+  日波动 %）；
+- presets：三档齐全、只含结构参数（绝不含金额类字段）、中性
+  档结构参数与 Params 默认值一致、三档关键结构字段单调差异
+  化；金额派生字段走 amount_ratios（25%/50%/100%）；
 - records：仓位出现 → 运行仓位；平掉 → 落 closed_positions，
   平仓价口径 fills 优先、mark 兜底；接口 /api/records、
-  /api/pairs、/api/best 实服可用。
+  /api/pairs、/api/best 实服可用；
+- pnl：realized_pnl_since 按 (平仓价-开仓价)×量×方向聚合，
+  fills/mark 计入、unknown 只计 excluded；overview 的今日/
+  累计盈亏 = 实现 + 当前未实现，累计成交为 fills 全表聚合。
 全部离线（假 HTTP + PaperVenue）。
 """
 
@@ -23,7 +31,7 @@ from detsp.core.engine import Engine
 from detsp.core.ledger import Fill, Ledger
 from detsp.core.market_scanner import MarketScanner
 from detsp.core.venue import OrderRequest, Side
-from detsp.strategies.specs import PRESETS, strategy_specs
+from detsp.strategies.specs import AMOUNT_RATIOS, PRESETS, strategy_specs
 from detsp.venues.paper import PaperVenue
 from detsp.web.server import PanelState, serve
 
@@ -233,7 +241,42 @@ def test_best_aggregates_and_excludes_suspect(scanner):
     assert vols == sorted(vols, reverse=True)
 
 
+def test_best_all_merges_strategies_sorted_by_score(scanner):
+    d = scanner.best_all(per_strategy=5)
+    rows = d["rows"]
+    assert rows, "四策略合并后应有行"
+    # 每行都带 strategy 与统一机会值 score_pct，且整体降序
+    sts = {r["strategy"] for r in rows}
+    assert sts <= {"hedged_grid", "premium_arb",
+                   "funding_carry", "rotation_hedge"}
+    assert len(sts) >= 3
+    scores = [r["score_pct"] for r in rows]
+    assert all(s is not None for s in scores)
+    assert scores == sorted(scores, reverse=True)
+    # 机会值口径：资金费 = 预计年化 %、套利 = 价差 bps/100、
+    # 网格 = 日波动 %（与 _best_score 的定义逐行对得上）
+    for r in rows:
+        if r["strategy"] in ("funding_carry", "rotation_hedge"):
+            assert r["score_pct"] == pytest.approx(r["apr_pct"])
+        elif r["strategy"] == "premium_arb":
+            assert r["score_pct"] == pytest.approx(
+                r["spread_bps"] / 100.0)
+            assert not r["suspect"]
+        else:
+            assert r["score_pct"] == pytest.approx(
+                r["volatility_pct"])
+    # 每策略至多 per_strategy 行
+    from collections import Counter
+    assert all(n <= 5 for n in Counter(
+        r["strategy"] for r in rows).values())
+
+
 # ── presets ────────────────────────────────────────────────
+
+# 金额类字段：用户先填、预设绝不许碰（第五轮用户定版语义）
+_AMOUNT_FIELDS = {"notional_usd", "max_position_usd",
+                  "max_order_notional_usd", "_total_usd"}
+
 
 def test_presets_shape_and_neutral_equals_defaults():
     for spec in strategy_specs():
@@ -244,19 +287,44 @@ def test_presets_shape_and_neutral_equals_defaults():
         for tier, vals in presets.items():
             assert vals, f"{st}/{tier} 预设不能为空"
             for k, v in vals.items():
-                if k == "_total_usd":
-                    assert st == "hedged_grid"  # 伪字段只许网格用
-                    continue
                 assert k in fields, f"{st}/{tier} 含未知字段 {k}"
+                # 只锁结构参数：中性档结构值必须与 Params 默认
+                # 值一致；金额字段不进预设（见下个测试），本来
+                # 就不是原仓默认语义的一部分（原仓金额是表单
+                # 必填项），故这里没有金额可锁
                 if tier == "neutral" and fields[k]["default"] is not None:
                     assert v == fields[k]["default"], \
                         f"{st} 中性档 {k}={v} 与默认值 " \
                         f"{fields[k]['default']} 漂移"
 
 
+def test_presets_never_touch_amount_fields():
+    # 点预设绝不改用户填的金额：任何一档都不许出现金额类字段
+    for st, tiers in PRESETS.items():
+        for tier, vals in tiers.items():
+            bad = _AMOUNT_FIELDS & set(vals)
+            assert not bad, f"{st}/{tier} 预设含金额字段 {bad}"
+    # 网格也不再有 _total_usd 伪字段（总名义归用户填）
+    for vals in PRESETS["hedged_grid"].values():
+        assert "_total_usd" not in vals
+
+
+def test_amount_ratios_for_derived_amount_fields():
+    # 金额派生量按比例换算：只有溢价套利的单笔上限，比例
+    # 保守 25% / 中性 50% / 激进 100%，对用户所填最大持仓生效
+    assert set(AMOUNT_RATIOS) == {"premium_arb"}
+    ratios = AMOUNT_RATIOS["premium_arb"]["max_order_notional_usd"]
+    assert ratios == {"conservative": 0.25, "neutral": 0.5,
+                      "aggressive": 1.0}
+    # specs 接口把比例表带给前端（applyPreset 据此换算）
+    for spec in strategy_specs():
+        assert spec["page"]["amount_ratios"] == \
+            AMOUNT_RATIOS.get(spec["strategy"], {})
+
+
 def test_presets_tiers_differ_on_key_fields():
     p = PRESETS
-    # 杠杆/规模单调：保守 < 中性 < 激进（网格看格数与杠杆）
+    # 结构参数单调：保守 < 中性 < 激进（网格看格数与杠杆）
     assert p["funding_carry"]["conservative"]["leverage"] < \
         p["funding_carry"]["neutral"]["leverage"] < \
         p["funding_carry"]["aggressive"]["leverage"]
@@ -265,9 +333,11 @@ def test_presets_tiers_differ_on_key_fields():
         p["funding_carry"]["aggressive"]["min_entry_edge_bps_per_hour"]
     assert p["rotation_hedge"]["conservative"]["leverage_a"] < \
         p["rotation_hedge"]["aggressive"]["leverage_a"]
-    assert p["premium_arb"]["conservative"]["max_position_usd"] < \
-        p["premium_arb"]["neutral"]["max_position_usd"] < \
-        p["premium_arb"]["aggressive"]["max_position_usd"]
+    # 溢价套利三档靠杠杆与执行方式差异化（金额不再进预设）
+    assert p["premium_arb"]["conservative"]["execution_mode"] == "maker"
+    assert p["premium_arb"]["neutral"]["execution_mode"] == "taker"
+    assert p["premium_arb"]["aggressive"]["leverage_base"] > \
+        p["premium_arb"]["neutral"]["leverage_base"]
     assert p["hedged_grid"]["conservative"]["grid_count"] < \
         p["hedged_grid"]["neutral"]["grid_count"] < \
         p["hedged_grid"]["aggressive"]["grid_count"]
@@ -360,6 +430,15 @@ def test_records_endpoints_over_http(state):
                 base + "/api/best?strategy=hedged_grid", timeout=5) as r:
             b = json.loads(r.read().decode("utf-8"))
         assert b["rows"]
+        with urllib.request.urlopen(base + "/api/best",
+                                    timeout=5) as r:
+            merged = json.loads(r.read().decode("utf-8"))
+        # 不带 strategy = 四策略合并、按机会值降序的单列表
+        assert merged["rows"]
+        assert all("strategy" in r and "score_pct" in r
+                   for r in merged["rows"])
+        scores = [r["score_pct"] for r in merged["rows"]]
+        assert scores == sorted(scores, reverse=True)
         with urllib.request.urlopen(base + "/api/records",
                                     timeout=5) as r:
             rec = json.loads(r.read().decode("utf-8"))
@@ -367,3 +446,63 @@ def test_records_endpoints_over_http(state):
     finally:
         stop_flag.set()
         server.shutdown()
+
+
+# ── 盈亏（估算）口径：实现盈亏聚合 + 总览两行 ──────────────
+
+def _closed(led, **over):
+    rec = {"strategy": "funding_carry", "task": "t", "venue": "arcus",
+           "symbol": "BTC", "side": "long", "qty": 1.0,
+           "entry_price": 100.0, "close_price": 110.0,
+           "close_price_source": "fills",
+           "opened_ts": time.time() - 100,
+           "closed_ts": time.time()}
+    rec.update(over)
+    led.record_closed_position(rec)
+
+
+def test_realized_pnl_since_counts_fills_and_mark_skips_unknown():
+    led = Ledger()
+    now = time.time()
+    # 多头 fills 口径：(110-100)×0.5 = +5
+    _closed(led, qty=0.5)
+    # 空头 mark 口径也计入：(50-40)×2.0 = +20
+    _closed(led, side="short", qty=2.0, entry_price=50.0,
+            close_price=40.0, close_price_source="mark")
+    # unknown（平仓价为空）：不计盈亏，只计 excluded
+    _closed(led, close_price=None, close_price_source="unknown")
+    # 昨天平的仓：-1，只进累计不进今日
+    _closed(led, entry_price=10.0, close_price=9.0,
+            closed_ts=now - 90_000)
+    today = led.realized_pnl_since(now - 3600)
+    assert today["realized_pnl"] == pytest.approx(25.0)
+    assert today["excluded"] == 1
+    total = led.realized_pnl_since(0.0)
+    assert total["realized_pnl"] == pytest.approx(24.0)
+    assert total["excluded"] == 1
+
+
+def test_overview_today_and_all_time_stats_and_pnl(state):
+    led = state.ledger
+    _closed(led, qty=0.5)                       # 今日实现 +5
+    _closed(led, close_price=None,
+            close_price_source="unknown")       # 今日 excluded 1 条
+    led.record(Fill(venue="arcus", account="default", symbol="BTC",
+                    strategy="t1", side="buy", qty=0.1,
+                    price=60_000.0, fee=0.0))
+    ov = state.overview()
+    # 今日：成交聚合 + 盈亏 = 实现 5 + 未实现 0（无持仓）
+    assert ov["today"]["fills"] == 1
+    assert ov["today"]["volume"] == pytest.approx(6000.0)
+    assert ov["today"]["realized_pnl"] == pytest.approx(5.0)
+    assert ov["today"]["pnl"] == pytest.approx(
+        5.0 + ov["unrealized_pnl"])
+    assert ov["today"]["pnl_excluded"] == 1
+    # 累计：fills 全表聚合，盈亏口径同今日
+    assert ov["all_time"]["fills"] == led.count() == 1
+    assert ov["all_time"]["volume"] == pytest.approx(
+        led.total_volume())
+    assert ov["all_time"]["fees"] == pytest.approx(led.total_fees())
+    assert ov["all_time"]["pnl"] == pytest.approx(
+        ov["all_time"]["realized_pnl"] + ov["unrealized_pnl"])
+    assert ov["all_time"]["pnl_excluded"] == 1

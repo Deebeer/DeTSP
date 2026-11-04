@@ -1,33 +1,42 @@
 """面板单页 HTML（内嵌，无外部资源依赖）。
 
 布局（用户定版）：左侧窄边栏 + 主区域分页，不整页刷新。边栏自上
-而下只有 6 项：总览 / 中性网格 / 溢价套利 / 资金费套利 / 轮换
-对冲刷量 / 设置——没有账本页、没有独立「数据」页，也没有通用
-新建任务入口：新建任务只能从各策略页发起。
+而下共 7 项：总览 / 中性网格 / 溢价套利 / 资金费套利 / 轮换
+对冲刷量 / 策略记录 / 设置——没有账本页、没有独立「数据」页，
+也没有通用新建任务入口：新建任务只能从各策略页发起。
 
-总览：各所权益/持仓/挂单、今日成交、未实现盈亏、KillSwitch、
-系统事件，外加两块——「最佳机会」四策略卡片（每策略当前最佳
-标的 Top 5，数据来自全量扫描的 /api/best，点行跳策略页并带入
-两腿与标的）与「策略记录」（/api/records：运行仓位按开始时间
-倒序、仓位历史按平仓时间倒序，历史由后端追踪仓位消失落库）。
+总览：今日与累计两行统计（成交量/手续费/笔数/盈亏估算，口径见
+server.overview）、各所权益/持仓/挂单、KillSwitch、系统事件，
+外加「最佳机会」混合列表（/api/best 不带 strategy 参数时返回
+四策略各自 Top 5 合并、按机会值 % 降序，点行跳策略页并带入
+两腿与标的）。
+「策略记录」是独立页（/api/records：运行仓位按开始时间倒序、
+仓位历史按平仓时间倒序，历史由后端追踪仓位消失落库）。
 
 每个策略页同构，由通用渲染器按 /api/strategy-specs 的规格
 （含 page 元数据：两腿字段、主金额、primary、预设三档、运作
 方式文案）生成，流程仿 Mob Exchange 的 Delta 中性配置面板，
 自上而下：页头（策略名 + 说明 + 「运作方式」折叠）→ 订单腿
-（先选两所）→ 金额（自由输入；网格是目标总名义，反推每格量）
-→ 选市场（/api/pairs 拉所选两所共同上市的全部标的、按策略
-排序，每项带关键指标）→ 配置（保守/中性/激进/自定义预设 +
-常用字段）→ 高级选项（其余字段，折叠）→ 交易预览（按平台
-分列标记价/预估执行价/所需保证金 + 入场条件指示）→ 运行
-按钮 → 运行中仓位（本策略任务与持仓，含启停改删/平仓）。
-运行中的全部仓位在策略页与总览（策略记录）双处可见。
+（先选两所，每行带该所可用余额）→ 金额（自由输入；网格是目标
+总名义，反推每格量）→ 选市场（/api/pairs 拉所选两所共同上市
+的全部标的、按策略排序，每项带关键指标）→ 配置（保守/中性/
+激进/自定义预设 + 常用字段；预设只套结构参数、绝不改用户填
+的金额，金额派生量按比例换算）→ 高级选项（其余字段，折叠）
+→ 交易预览（按平台分列标记价/预估执行价/所需保证金 + 入场
+条件指示）→ 运行按钮 → 运行中仓位（本策略任务与持仓，含
+启停改删/平仓）。运行中的全部仓位在策略页与策略记录页双处
+可见。
 
 视觉：极客终端风——近黑底、直角、等宽字体、高密度表格、状态用
-小圆点 + 大写英文小标签。设置（密钥只报已填/未填、绝不回显
-值）保持原有功能。任务编辑仍走弹窗（与策略页共用 specs 动态
-表单渲染/收集函数）。配置文件里的任务在面板只可启停，面板
-任务才可删改，界面上如实标注来源。
+小圆点 + 大写英文小标签。颜色只用一套变量（--bg/--panel/
+--line/--txt/--mut/--acc/--red/--yel 等）：说明文字统一暗灰，
+强调只有终端绿，涨/多绿、跌/空红、警告黄，不用其他杂色。字段
+呈现统一为「字段名（简短说明）」同行（说明在 specs 的 label
+里），必填星号在名后；与原仓差异这类长注保留在字段下方小字。
+设置（密钥只报已填/未填、绝不回显值）保持原有功能。任务编辑
+仍走弹窗（与策略页共用 specs 动态表单渲染/收集函数）。配置
+文件里的任务在面板只可启停，面板任务才可删改，界面上如实
+标注来源。
 """
 
 PAGE_HTML = """<!DOCTYPE html>
@@ -36,32 +45,36 @@ PAGE_HTML = """<!DOCTYPE html>
 <meta charset="utf-8">
 <title>DeTSP 交易面板</title>
 <style>
-:root{--bg:#0b0e11;--panel:#11161c;--line:#232a32;--txt:#c9d1d9;--mut:#8b949e;--acc:#3fb950;--red:#f85149;--yel:#d29922}
+/* 全站唯一配色：正文主色 --txt、标题亮色 --bright、说明暗灰
+--mut、次暗 --dim；强调只有终端绿 --acc；负/空 --red、正/多
+--acc、警告 --yel。结构色（底/面/边框）也全部走变量，任何地方
+不许再出现这套之外的杂色（旧主题的蓝色/圆角一类早已清除）。 */
+:root{--bg:#0b0e11;--panel:#11161c;--panel2:#0d1117;--line:#232a32;--line2:#30363d;--txt:#c9d1d9;--bright:#e6edf3;--mut:#8b949e;--dim:#484f58;--acc:#3fb950;--red:#f85149;--redline:#5a2b2b;--yel:#d29922;--onacc:#06130a}
 body{font-family:ui-monospace,"JetBrains Mono",Consolas,"Courier New",monospace;margin:0;background:var(--bg);color:var(--txt);font-size:13px;line-height:1.55;font-variant-numeric:tabular-nums}
-h1{font-size:17px;color:#e6edf3} h2{font-size:15px;margin:16px 0 8px;color:#e6edf3;letter-spacing:.03em}
+h1{font-size:17px;color:var(--bright)} h2{font-size:15px;margin:16px 0 8px;color:var(--bright);letter-spacing:.03em}
 h3{font-size:13px}
 a{color:var(--acc)}
 table{border-collapse:collapse;width:100%;margin:6px 0}
 th,td{border:1px solid var(--line);padding:4px 8px;font-size:12px;text-align:left;vertical-align:top}
-th{background:#0d1117;color:var(--mut);text-transform:uppercase;letter-spacing:.06em;font-size:11px;font-weight:600}
+th{background:var(--panel2);color:var(--mut);text-transform:uppercase;letter-spacing:.06em;font-size:11px;font-weight:600}
 tbody tr:nth-child(even){background:rgba(255,255,255,.016)}
-button{background:transparent;color:var(--txt);border:1px solid #30363d;padding:4px 12px;border-radius:0;cursor:pointer;font:inherit;font-size:12px}
-button:hover{background:var(--txt);color:#0b0e11;border-color:var(--txt)}
-button.stop{border-color:#5a2b2b;color:#ff9d97}
-button.stop:hover{background:var(--red);border-color:var(--red);color:#0b0e11}
+button{background:transparent;color:var(--txt);border:1px solid var(--line2);padding:4px 12px;border-radius:0;cursor:pointer;font:inherit;font-size:12px}
+button:hover{background:var(--txt);color:var(--bg);border-color:var(--txt)}
+button.stop{border-color:var(--redline);color:var(--red)}
+button.stop:hover{background:var(--red);border-color:var(--red);color:var(--bg)}
 button.kill{border-color:var(--red);color:var(--red);font-weight:bold}
-button.kill:hover{background:var(--red);color:#0b0e11}
+button.kill:hover{background:var(--red);color:var(--bg)}
 button.mini{padding:1px 8px;font-size:11px;margin:2px 2px 2px 0}
-.warn{background:rgba(248,81,73,.07);border:1px solid #5a2b2b;padding:8px 12px}
+.warn{background:rgba(248,81,73,.07);border:1px solid var(--redline);padding:8px 12px}
 .ok{color:var(--acc)}.bad{color:var(--red)}.muted{color:var(--mut)}
-pre{background:#0d1117;border:1px solid var(--line);padding:8px;overflow:auto;font-size:12px;margin:0}
+pre{background:var(--panel2);border:1px solid var(--line);padding:8px;overflow:auto;font-size:12px;margin:0}
 .tag{border:1px solid var(--line);padding:0 5px;font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em}
-.dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;background:#484f58;vertical-align:1px}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;background:var(--dim);vertical-align:1px}
 .dot.g{background:var(--acc)}.dot.r{background:var(--red)}.dot.y{background:var(--yel)}
 .st{font-size:11px;letter-spacing:.06em;white-space:nowrap}
 #overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10}
 #modal{background:var(--panel);border:1px solid var(--line);max-width:560px;margin:40px auto;padding:16px 20px;max-height:85vh;overflow:auto}
-#modal h3{margin-top:0;color:#e6edf3}
+#modal h3{margin-top:0;color:var(--bright)}
 fieldset{border:1px solid var(--line);margin:10px 0;padding:8px 12px}
 fieldset legend{color:var(--mut);font-size:11px;padding:0 6px;text-transform:uppercase;letter-spacing:.05em}
 .fld{display:block;margin:7px 0;font-size:12px}
@@ -70,17 +83,17 @@ fieldset legend{color:var(--mut);font-size:11px;padding:0 6px;text-transform:upp
 #modal select{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:5px 8px;font:inherit}
 #mErr{white-space:pre-wrap}
 #layout{display:flex;align-items:stretch}
-#sidebar{width:168px;flex:0 0 168px;background:#0d1117;border-right:1px solid var(--line);padding:14px 10px;position:sticky;top:0;height:100vh;display:flex;flex-direction:column;gap:2px}
-#sidebar .sideTitle{font-size:14px;font-weight:bold;margin:0 4px 12px;color:#e6edf3;letter-spacing:.05em}
+#sidebar{width:168px;flex:0 0 168px;background:var(--panel2);border-right:1px solid var(--line);padding:14px 10px;position:sticky;top:0;height:100vh;display:flex;flex-direction:column;gap:2px}
+#sidebar .sideTitle{font-size:14px;font-weight:bold;margin:0 4px 12px;color:var(--bright);letter-spacing:.05em}
 #sidebar button{text-align:left;background:transparent;border:1px solid transparent;border-left:2px solid transparent;padding:6px 10px;font-size:13px;color:var(--mut)}
-#sidebar button:hover{background:#161b22;color:var(--txt)}
+#sidebar button:hover{background:var(--panel);color:var(--txt)}
 #sidebar button.on{color:var(--acc);border-left-color:var(--acc);background:rgba(63,185,80,.06)}
 #sidebar .sideSep{border-top:1px solid var(--line);margin:8px 0}
 #sidebar .sideNote{font-size:11px;color:var(--mut);line-height:1.6;margin-top:12px}
 #main{flex:1;min-width:0;padding:4px 22px 30px}
 .page{display:none}.page.on{display:block}
 .block{border:1px solid var(--line);background:var(--panel);padding:10px 14px;margin:12px 0}
-.block h3{margin:0 0 8px;font-size:12px;color:#e6edf3;letter-spacing:.05em}
+.block h3{margin:0 0 8px;font-size:12px;color:var(--bright);letter-spacing:.05em}
 .block h3::before{content:"[ ";color:var(--acc)}
 .block h3::after{content:" ]";color:var(--acc)}
 label.inl{display:inline-block;margin:0 18px 4px 0;font-size:12px}
@@ -88,25 +101,16 @@ label.inl select{display:block;margin-top:4px;background:var(--bg);color:var(--t
 .pform select,.aform select,.pform input,.aform input{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:5px 8px;font:inherit}
 .pform .fld input,.pform .fld select,.aform .fld input,.aform .fld select{width:100%;box-sizing:border-box;margin-top:3px}
 .pform{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:0 16px}
-.runBtn{background:var(--acc);color:#06130a;border-color:var(--acc);font-size:15px;padding:10px 30px;font-weight:bold;width:100%}
+.runBtn{background:var(--acc);color:var(--onacc);border-color:var(--acc);font-size:15px;padding:10px 30px;font-weight:bold;width:100%}
 .runBtn:hover{background:transparent;color:var(--acc);border-color:var(--acc)}
 .amtRow{display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;margin-bottom:8px}
 .amtMain{flex:0 1 320px}
 .amtMain .fld{font-size:13px;color:var(--mut)}
 .amtMain input{font-size:19px;padding:7px 10px}
 .presetRow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
-.presetRow button.on{background:var(--acc);color:#06130a;border-color:var(--acc);font-weight:bold}
-.bestGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px;margin:12px 0}
-.bestCard{border:1px solid var(--line);background:var(--panel);padding:10px 14px}
-.bestCard h3{margin:0 0 6px;font-size:12px;color:#e6edf3;letter-spacing:.05em}
-.bestCard h3::before{content:"[ ";color:var(--acc)}
-.bestCard h3::after{content:" ]";color:var(--acc)}
-.bestRow{display:flex;gap:12px;align-items:baseline;padding:5px 6px;border-bottom:1px dashed var(--line);cursor:pointer;font-size:12px}
-.bestRow:last-of-type{border-bottom:none}
-.bestRow:hover{background:rgba(63,185,80,.08)}
-.bestRow b{flex:0 0 86px}
-.bestRow span{flex:1}
-.bestRow span:last-child{text-align:right;flex:0 1 auto}
+.presetRow button.on{background:var(--acc);color:var(--onacc);border-color:var(--acc);font-weight:bold}
+.pickRow{cursor:pointer}
+.pickRow:hover td{background:rgba(63,185,80,.08)}
 .symWrap{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
 .symWrap select{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:6px 10px;min-width:340px;font:inherit;font-size:13px}
 .legRow{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:7px 0;border-bottom:1px dashed var(--line)}
@@ -114,6 +118,7 @@ label.inl select{display:block;margin-top:4px;background:var(--bg);color:var(--t
 .legRow .legLab{flex:0 0 74px;color:var(--mut);font-size:12px}
 .legRow select{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:5px 8px;min-width:160px;font:inherit}
 .legRow input.legAmt{width:130px;background:var(--bg);color:var(--mut);border:1px solid var(--line);border-radius:0;padding:5px 8px;font:inherit}
+.legRow .legBal{flex-basis:100%;font-size:12px;color:var(--mut)}
 .dirB{border:1px solid var(--line);padding:1px 8px;font-size:11px;white-space:nowrap}
 .dirB.long{color:var(--acc);border-color:var(--acc)}
 .dirB.short{color:var(--red);border-color:var(--red)}
@@ -123,9 +128,9 @@ label.inl select{display:block;margin-top:4px;background:var(--bg);color:var(--t
 .marginLine{font-size:14px;margin:4px 0}
 tr.best td{background:rgba(63,185,80,.09)}
 tr.selrow td{background:rgba(63,185,80,.17)}
-td.na{color:#484f58}
-.chip{background:transparent;border:1px solid #30363d;margin:2px 4px 2px 0}
-.chip.on{background:var(--acc);color:#06130a;border-color:var(--acc)}
+td.na{color:var(--dim)}
+.chip{background:transparent;border:1px solid var(--line2);margin:2px 4px 2px 0}
+.chip.on{background:var(--acc);color:var(--onacc);border-color:var(--acc)}
 details{margin:6px 0}
 details summary{cursor:pointer;color:var(--mut);font-size:12px}
 details div{font-size:12px;padding:6px 4px;line-height:1.7}
@@ -141,10 +146,11 @@ details div{font-size:12px;padding:6px 4px;line-height:1.7}
 <button data-page="strat-premium_arb">溢价套利</button>
 <button data-page="strat-funding_carry">资金费套利</button>
 <button data-page="strat-rotation_hedge">轮换对冲刷量</button>
+<button data-page="records">策略记录</button>
 <div class="sideSep"></div>
 <button data-page="settings">设置</button>
 <p class="sideNote">新建任务只能从各策略页发起；
-运行中仓位在各策略页与总览里都能看到。</p>
+运行中仓位在各策略页与策略记录里都能看到。</p>
 </nav>
 <main id="main">
 
@@ -155,22 +161,32 @@ token 校验（防跨站借道），但<b>不等于登录鉴权</b>：不要改�
 不要做端口映射。</p>
 <div id="killbox"></div>
 <p>今日成交量：<b id="tvol">-</b>　今日手续费：<b id="tfee">-</b>　
-今日成交笔数：<b id="tcnt">-</b>　持仓未实现盈亏（估算）：<b id="upnl">-</b></p>
-<h3>最佳机会（每策略当前最佳标的）</h3>
-<div class="bestGrid" id="bestCards"></div>
+今日成交笔数：<b id="tcnt">-</b>　今日盈亏（估算）：<b id="tpnl">-</b></p>
+<p>累计成交量：<b id="avol">-</b>　累计手续费：<b id="afee">-</b>　
+累计成交笔数：<b id="acnt">-</b>　累计盈亏（估算）：<b id="apnl">-</b></p>
+<p class="muted" id="pnlNote"></p>
+<h3>最佳机会</h3>
+<p class="muted">四策略各自的当前最佳标的合并成一张表，按机会值
+从大到小排列；点任意一行跳到对应策略页并带入两腿与标的。</p>
+<table id="bestTbl"><thead><tr>
+<th>策略</th><th>标的</th><th>做法</th><th>机会值（按此排序，口径不同）</th><th>操作</th>
+</tr></thead><tbody></tbody></table>
 <table id="venues"><thead><tr>
 <th>场所</th><th>模式</th><th>权益</th><th>可用</th><th>持仓</th><th>挂单数</th>
 </tr></thead><tbody></tbody></table>
-<h3>策略记录</h3>
-<p class="muted">运行仓位</p>
+<div id="events"></div>
+</section>
+
+<section class="page" id="page-records">
+<h2>策略记录</h2>
+<p class="muted">运行仓位（按开始时间倒序）</p>
 <table id="recOpen"><thead><tr>
 <th>策略</th><th>任务</th><th>场所</th><th>币种</th><th>方向</th><th>数量</th><th>开仓价</th><th>操作</th>
 </tr></thead><tbody></tbody></table>
-<p class="muted">仓位历史</p>
+<p class="muted">仓位历史（按平仓时间倒序）</p>
 <table id="recClosed"><thead><tr>
 <th>策略</th><th>任务</th><th>场所</th><th>币种</th><th>方向</th><th>数量</th><th>开仓价</th><th>平仓价</th><th>开仓时间</th><th>平仓时间</th>
 </tr></thead><tbody></tbody></table>
-<div id="events"></div>
 </section>
 
 <section class="page" id="page-strat-hedged_grid"></section>
@@ -201,7 +217,7 @@ token 校验（防跨站借道），但<b>不等于登录鉴权</b>：不要改�
 <div id="mForm"></div>
 <p class="bad" id="mErr"></p>
 <p><button id="mSave">保存</button>
-<button id="mCancel" style="background:#445">取消</button></p>
+<button id="mCancel">取消</button></p>
 <p class="muted">运行中的任务保存新参数时，会先停止（撤单+平仓）再按新参数重组；
 重组失败不会保存新参数，可点启动按原参数恢复。</p>
 </div></div>
@@ -378,7 +394,17 @@ $("#killbox").innerHTML=ks.halted
 $("#tvol").textContent=fmt(ov.today.volume);
 $("#tfee").textContent=fmt(ov.today.fees,4);
 $("#tcnt").textContent=ov.today.fills;
-$("#upnl").textContent=fmt(ov.unrealized_pnl);
+const pnlCell=(id, v)=>{const el=$(id); el.textContent=fmt(v);
+el.className=v>0?"ok":(v<0?"bad":"")};
+pnlCell("#tpnl", ov.today.pnl);
+$("#avol").textContent=fmt(ov.all_time.volume);
+$("#afee").textContent=fmt(ov.all_time.fees,4);
+$("#acnt").textContent=ov.all_time.fills;
+pnlCell("#apnl", ov.all_time.pnl);
+const exclT=ov.today.pnl_excluded||0, exclA=ov.all_time.pnl_excluded||0;
+$("#pnlNote").textContent="盈亏（估算）口径：已平仓实现盈亏（按平仓价 − 开仓价计算，按盘口标记价平仓的记录含估算成分）+ 当前持仓未实现盈亏 "+
+fmt(ov.unrealized_pnl)+"（未实现是当前快照，今日与累计都全额计入）"+
+(exclA?"；另有平仓价未知的历史记录未计入盈亏（今日 "+exclT+" 条 / 累计 "+exclA+" 条）":"")+"。";
 $("#venues tbody").innerHTML=ov.venues.map(v=>"<tr><td>"+esc(v.venue_id)+"</td><td>"+esc(v.mode)+
 "</td><td>"+fmt(v.equity)+"</td><td>"+fmt(v.available)+"</td><td>"+
 (v.positions.length?v.positions.map(p=>
@@ -401,7 +427,7 @@ RECORDS=rc; renderRecords();
 SPECS.forEach(spec=>{renderStratTasks(spec.strategy); renderLegs(spec.strategy); renderPreview(spec.strategy)});
 }
 
-// ---------- 总览：策略记录（运行仓位 + 仓位历史） ----------
+// ---------- 策略记录页（运行仓位 + 仓位历史） ----------
 let RECORDS=null;
 function fmtTs(ts){
 if(!ts) return "-";
@@ -431,44 +457,52 @@ fmtTs(r.opened_ts)+"</td><td>"+fmtTs(r.closed_ts)+"</td></tr>").join("")||
 '<tr><td colspan="10" class="muted">暂无历史仓位（仓位平掉后会落到这里）。</td></tr>';
 }
 
-// ---------- 总览：四策略最佳机会卡片 ----------
-let BEST={};
+// ---------- 总览：最佳机会（四策略合并成一张表，按机会值降序） ----------
+// 后端 /api/best（不带 strategy）已把四策略各自 Top 5 按统一
+// 机会值 % 排好：资金费类 = 预计年化 %、套利 = 单次价差 %、
+// 网格 = 日波动 %；口径不同，表头已注明，只做横向参考。
+let BESTALL=null;
 async function loadBest(){
-for(const spec of SPECS){
 try{
-const d=await (await fetch("/api/best?strategy="+spec.strategy)).json();
-BEST[spec.strategy]=d;
-}catch(e){/* 单策略卡片取不到：保留上次，下个周期重试 */}
+BESTALL=await (await fetch("/api/best")).json();
+}catch(e){/* 最佳机会暂时取不到：保留上次，下个周期重试 */}
+renderBest();
 }
-renderBestCards();
-}
-function renderBestCards(){
-const box=$("#bestCards"); if(!box) return;
-box.innerHTML=SPECS.map(spec=>{
-const d=BEST[spec.strategy], kind=spec.page.opportunity;
-let rows;
-if(!d) rows='<p class="muted">加载中…</p>';
-else if(!d.rows.length) rows='<p class="muted">暂无可排行的标的。</p>';
-else rows=d.rows.map(r=>{
-const head="<b>"+esc(r.symbol)+"</b>";
+function bestDoText(spec, r){
+const kind=spec?spec.page.opportunity:"";
 if(kind==="funding")
-return '<div class="bestRow" data-goto="'+spec.strategy+'" data-va="'+esc(r.venue_a)+'" data-vb="'+esc(r.venue_b)+'" data-sym="'+esc(r.symbol)+'">'+head+
-"<span>多 "+esc(r.long_venue)+" / 空 "+esc(r.short_venue)+"</span>"+
-"<span>费差 "+fmt(r.edge_bps_h,2)+' bps/小时 · 年化 +'+fmt(r.apr_pct,1)+"%</span></div>";
+return "多 "+esc(r.long_venue)+" / 空 "+esc(r.short_venue)+
+(r.mixed?' <span class="tag">混口径仅参考</span>':"");
 if(kind==="spread"){
 const buy=r.price_a<=r.price_b?r.venue_a:r.venue_b;
 const sell=buy===r.venue_a?r.venue_b:r.venue_a;
-return '<div class="bestRow" data-goto="'+spec.strategy+'" data-va="'+esc(r.venue_a)+'" data-vb="'+esc(r.venue_b)+'" data-sym="'+esc(r.symbol)+'">'+head+
-"<span>买 "+esc(buy)+" / 卖 "+esc(sell)+"</span>"+
-"<span>价差 "+fmt(r.spread_bps,1)+" bps</span></div>";
+return "买 "+esc(buy)+" / 卖 "+esc(sell);
 }
-return '<div class="bestRow" data-goto="'+spec.strategy+'" data-va="'+esc(r.venue)+'" data-vb="'+esc(r.venue_b||"")+'" data-sym="'+esc(r.symbol)+'">'+head+
-"<span>在 "+esc(r.venue)+" 做网格</span>"+
-"<span>日波动 "+fmt(r.volatility_pct,2)+"% · 现价 "+fmt(r.price, r.price<10?4:2)+"</span></div>";
-}).join("");
-return '<div class="bestCard"><h3>'+esc(spec.title)+'</h3>'+rows+
-'<p class="muted">点任意一行跳到该策略页并带入两腿与标的。</p></div>';
-}).join("");
+if(kind==="grid")
+return "在 "+esc(r.venue)+" 做网格 · 现价 "+
+fmt(r.price, r.price<10?4:2);
+return "-";
+}
+function bestScoreText(spec, r){
+const kind=spec?spec.page.opportunity:"";
+if(r.score_pct==null) return "-";
+if(kind==="funding") return "预计年化 "+(r.score_pct>=0?"+":"")+fmt(r.score_pct,1)+"%";
+if(kind==="spread") return "单次价差 "+fmt(r.score_pct,2)+"%";
+if(kind==="grid") return "日波动 "+fmt(r.score_pct,2)+"%";
+return fmt(r.score_pct,2)+"%";
+}
+function renderBest(){
+const tb=$("#bestTbl tbody"); if(!tb) return;
+if(!BESTALL){tb.innerHTML='<tr><td colspan="5" class="muted">加载中…</td></tr>'; return}
+tb.innerHTML=BESTALL.rows.map(r=>{
+const spec=specOf(r.strategy);
+const va=r.venue_a||r.venue||"", vb=r.venue_b||"";
+return '<tr class="pickRow"><td>'+esc(spec?spec.title:r.strategy)+"</td><td><b>"+
+esc(r.symbol)+"</b></td><td>"+bestDoText(spec, r)+"</td><td>"+
+bestScoreText(spec, r)+'</td><td><button class="mini" data-goto="'+
+esc(r.strategy)+'" data-va="'+esc(va)+'" data-vb="'+esc(vb)+
+'" data-sym="'+esc(r.symbol)+'">去配置</button></td></tr>';
+}).join("")||'<tr><td colspan="5" class="muted">暂无可排行的机会。</td></tr>';
 }
 
 // 点最佳机会卡片行：跳策略页并预填两腿场所 + 币种（网格还带建议区间）
@@ -530,7 +564,8 @@ const legRow=idx=>
 '<select class="vSel" data-leg="'+idx+'"></select>'+
 '<span class="dirB" data-dir="'+idx+'">-</span>'+
 '<span class="muted">金额 $</span><input class="legAmt" data-legamt="'+idx+'" readonly>'+
-'<span class="muted">数量</span><span data-legqty="'+idx+'">-</span></div>';
+'<span class="muted">数量</span><span data-legqty="'+idx+'">-</span>'+
+'<span class="legBal" data-legbal="'+idx+'">可用 —</span></div>';
 const presetBtns=["conservative","neutral","aggressive","custom"].map(k=>
 '<button data-preset="'+k+'"'+(k==="neutral"?' class="on"':"")+">"+
 ({conservative:"保守",neutral:"中性",aggressive:"激进",custom:"自定义"})[k]+"</button>").join("");
@@ -538,7 +573,7 @@ root.innerHTML=
 "<h2>"+esc(spec.title)+'</h2><p class="muted">'+esc(spec.blurb)+"</p>"+
 '<details class="block howBox"><summary>运作方式</summary><ol>'+steps+"</ol></details>"+
 '<div class="block"><h3>订单腿</h3><div class="legs">'+legRow(0)+legRow(1)+"</div>"+
-'<p class="muted">先选两所：下面的「选市场」会列出这两所共同上市的全部标的并按策略排序。方向由所选标的的机会自动定；金额与下方主金额联动（两腿自动配平，只读），数量按现价实时换算。</p></div>'+
+'<p class="muted">先选两所：下面的「选市场」会列出这两所共同上市的全部标的并按策略排序。方向由所选标的的机会自动定；金额与下方主金额联动（两腿自动配平，只读），数量按现价实时换算；每条腿下方显示该所可用余额（权益），随总览刷新更新。</p></div>'+
 '<div class="block"><h3>金额</h3>'+amtHtml+"</div>"+
 '<div class="block"><h3>选市场</h3><div class="symWrap">'+
 '<label>币种 <select class="symSel" data-f="symbol"></select></label>'+
@@ -546,7 +581,7 @@ root.innerHTML=
 '<p class="bad listNote"></p><div class="gridSug"></div></div>'+
 '<div class="block"><h3>配置</h3><div class="presetRow"><span class="muted">预设：</span>'+
 presetBtns+
-'<span class="muted">点预设整组填入表单（中性 = 原仓对齐默认值）；改动任何字段自动切到「自定义」。</span></div>'+
+'<span class="muted">先在「金额」区填好金额，再点预设：只套结构参数（杠杆/门槛/格数等），金额不改（中性 = 原仓对齐默认值）；改动任何字段自动切到「自定义」。</span></div>'+
 (primaryRest.length?'<div class="pform">'+primaryRest.map(f=>renderField(f,f.default,false)).join("")+"</div>":"")+
 (pg.note?'<p class="muted">'+esc(pg.note)+"</p>":"")+"</div>"+
 '<details class="block"><summary>高级选项（其余参数，改动随运行一并提交）</summary>'+
@@ -683,10 +718,16 @@ if(name==="custom"){setPresetUi(S, "custom"); return}
 const vals=(S.spec.page.presets||{})[name]; if(!vals) return;
 S.applying=true;
 applyPrefill(S.root, vals);
-if(st==="hedged_grid"&&vals._total_usd!=null){
-const inp=S.root.querySelector(".gridTotalInp");
-if(inp) inp.value=vals._total_usd;
-gridTotalToQty(st);
+// 预设只套结构参数，绝不改用户填的金额：金额派生量（溢价套利
+// 的单笔上限）按「当前主金额 × 档位比例」换算填入
+const ratios=S.spec.page.amount_ratios||{};
+const amtField=S.spec.page.amount;
+for(const fname in ratios){
+const ratio=(ratios[fname]||{})[name];
+const amt=amtField?numField(S, amtField):null;
+const el=S.root.querySelector('[data-f="'+fname+'"]');
+if(ratio!=null&&amt!=null&&el)
+el.value=Math.round(amt*ratio*100)/100;
 }
 S.applying=false;
 setPresetUi(S, name);
@@ -770,6 +811,13 @@ const price=row?(i===0?row.price_a:row.price_b):null;
 const dirEl=S.root.querySelector('[data-dir="'+i+'"]');
 const amtEl=S.root.querySelector('[data-legamt="'+i+'"]');
 const qtyEl=S.root.querySelector('[data-legqty="'+i+'"]');
+const balEl=S.root.querySelector('[data-legbal="'+i+'"]');
+if(balEl){
+const vv=LAST_OV?LAST_OV.venues.find(x=>x.venue_id===vid):null;
+balEl.textContent=(!vv||vv.available==null)?"可用 —"
+:("可用 $"+fmt(vv.available)+"（权益 $"+fmt(vv.equity)+"）"+
+(vv.mode==="paper"?" 模拟余额":""));
+}
 let dir="-", cls="dirB";
 if(kind==="grid"){dir=i===0?"网格双向":"反向对冲"}
 else if(kind==="funding"&&pr&&pr.longV){

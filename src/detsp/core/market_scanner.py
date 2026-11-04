@@ -724,6 +724,38 @@ class MarketScanner:
         out["rows"] = rows[:limit]
         return out
 
+    @staticmethod
+    def _best_score(strategy: str, row: dict) -> float | None:
+        """跨策略统一的「机会值」（%）：资金费类 = 预计年化 %，
+        溢价套利 = 单次价差 %（spread_bps / 100），中性网格 =
+        日波动 %。只用于总览混合列表排序，不同策略口径不同。"""
+        if strategy in ("funding_carry", "rotation_hedge"):
+            return row.get("apr_pct")
+        if strategy == "premium_arb":
+            sp = row.get("spread_bps")
+            return None if sp is None else sp / 100.0
+        if strategy == "hedged_grid":
+            return row.get("volatility_pct")
+        return None
+
+    def best_all(self, per_strategy: int = 5) -> dict:
+        """四策略各自 Top N 合并成一张表、按机会值降序（总览用）。
+
+        每行带 strategy 与 score_pct（机会值 %，口径见
+        _best_score）；suspect 已在 best() 里剔除，混口径行保留
+        mixed 标记由前端注明。同一策略可多行、与其他策略交错。
+        """
+        snap = self.full_snapshot()
+        merged: list[dict] = []
+        for st in ("hedged_grid", "premium_arb",
+                   "funding_carry", "rotation_hedge"):
+            for row in self.best(st, limit=per_strategy)["rows"]:
+                merged.append({**row, "strategy": st,
+                               "score_pct": self._best_score(st, row)})
+        merged.sort(key=lambda r: (r["score_pct"] is None,
+                                   -(r["score_pct"] or 0.0)))
+        return {"updated_at": snap["ts"], "rows": merged}
+
     # ----- 24 小时高低（中性网格定区间用）-----
     def _ensure_listings(self) -> None:
         """K 线判定上市前先保证上市清单可用（过期就顺带扫一次）。"""
