@@ -32,7 +32,8 @@ _YAML_TOP_KEYS = {"engine", "risk", "venues", "tasks", "caps", "watchlist"}
 _YAML_RISK_KEYS = {"min_corridor_pct", "close_corridor_pct", "max_consecutive_errors"}
 _YAML_CAPS_KEYS = {"global_usd", "venues", "strategies"}
 _TASK_KEYS = {"name", "strategy", "venue", "symbol", "venue_a", "venue_b",
-              "base_venue", "hedge_venue", "grid_venue", "params", "run_mode"}
+              "base_venue", "hedge_venue", "grid_venue", "params", "run_mode",
+              "run_preset", "amount_usd"}
 _TASK_STRATEGIES = ("hedged_grid", "rotation_hedge", "premium_arb",
                     "funding_carry")
 _TASK_REMOVED = ("grid", "volume_loop")   # 已移除的旧策略名，单独报错
@@ -191,12 +192,30 @@ def build_config(env: dict[str, str] | None = None, yaml_data: dict | None = Non
                 f"合法值：{_TASK_STRATEGIES}")
         if "params" in t and not isinstance(t["params"], dict):
             raise ConfigError(f"tasks[{i}].params 必须是映射")
-        # 运行模式：manual=自主（单笔）/ auto=全自动（监督器选标
-        # 循环）；缺省 manual，写了就必须合法
-        if "run_mode" in t and t["run_mode"] not in ("manual", "auto"):
-            raise ConfigError(
-                f"tasks[{i}].run_mode 非法：{t['run_mode']}，"
-                f"合法值：('manual', 'auto')")
+        # 运行模式（归一走 core.engine.normalize_run_mode 单一
+        # 事实源，延迟导入避免循环）：manual/semi_fixed/semi_auto/
+        # full_auto，旧名 auto 归一为 semi_auto；缺省 manual
+        from .engine import normalize_run_mode, normalize_run_preset
+
+        try:
+            run_mode_norm = normalize_run_mode(t.get("run_mode"))
+        except ValueError as e:
+            raise ConfigError(f"tasks[{i}].{e}") from e
+        # 预设档位：缺省 neutral，写了必须三档之一
+        try:
+            run_preset_norm = normalize_run_preset(t.get("run_preset"))
+        except ValueError as e:
+            raise ConfigError(f"tasks[{i}].{e}") from e
+        # amount_usd（仅 full_auto 中性网格用，总名义）：可选，
+        # 写了必须是大于 0 的数字
+        amount_norm = t.get("amount_usd")
+        if amount_norm is not None:
+            if isinstance(amount_norm, bool) or \
+                    not isinstance(amount_norm, (int, float)) or \
+                    float(amount_norm) <= 0:
+                raise ConfigError(
+                    f"tasks[{i}].amount_usd 必须是大于 0 的数字")
+            amount_norm = float(amount_norm)
         # H4：任务名必填且唯一（它就是归属 owner 与账本 strategy 口径）
         name = str(t.get("name") or "")
         if not name:
@@ -215,21 +234,26 @@ def build_config(env: dict[str, str] | None = None, yaml_data: dict | None = Non
 
         used: set[tuple[str, str]] = set()
         strat = t["strategy"]
-        # 全自动任务动态选标，占整个场所：symbol 记通配 "*"
-        sym = "*" if t.get("run_mode") == "auto" else _tf("symbol")
-        if strat == "hedged_grid":
-            used.add((_tf("grid_venue"), sym))
-            used.add((_tf("hedge_venue"), sym))
-        elif strat in ("rotation_hedge", "funding_carry"):
-            used.add((_tf("venue_a"), sym))
-            used.add((_tf("venue_b"), sym))
-        elif strat == "premium_arb":
-            used.add((_tf("base_venue"), sym))
-            used.add((_tf("hedge_venue"), sym))
-        # 通配感知冲突：同 venue 且 symbol 相等、或任一侧为 "*"
-        # （全自动任务）即冲突——auto 任务的两个场所不许再被占
+        if run_mode_norm == "full_auto":
+            # 全自动两腿未知：对全部场所通配占用，键 ("*", "*")
+            used.add(("*", "*"))
+        else:
+            # semi_auto 动态选标，占整个场所：symbol 记通配 "*"
+            sym = "*" if run_mode_norm == "semi_auto" else _tf("symbol")
+            if strat == "hedged_grid":
+                used.add((_tf("grid_venue"), sym))
+                used.add((_tf("hedge_venue"), sym))
+            elif strat in ("rotation_hedge", "funding_carry"):
+                used.add((_tf("venue_a"), sym))
+                used.add((_tf("venue_b"), sym))
+            elif strat == "premium_arb":
+                used.add((_tf("base_venue"), sym))
+                used.add((_tf("hedge_venue"), sym))
+        # 通配感知冲突：venue 与 symbol 任一维相等或任一侧为 "*"
+        # 通配即冲突——选标类任务占用的场所不许再被任何任务占，
+        # full_auto 的 ("*", "*") 与一切任务冲突
         dup = {k for k in used
-               if any(k[0] == sk[0]
+               if any((k[0] == sk[0] or k[0] == "*" or sk[0] == "*")
                       and (k[1] == sk[1] or k[1] == "*" or sk[1] == "*")
                       for sk in seen_keys)}
         if dup:
@@ -237,7 +261,13 @@ def build_config(env: dict[str, str] | None = None, yaml_data: dict | None = Non
                 f"tasks[{i}]（{name}）与已有任务占用同一 (venue,symbol)："
                 f"{sorted(dup)}，归属冲突，拒绝启动")
         seen_keys.extend(used)
-        tasks.append(dict(t))
+        # 归一结果写回任务 dict（下游 build_task 幂等再归一）
+        t_out = dict(t)
+        t_out["run_mode"] = run_mode_norm
+        t_out["run_preset"] = run_preset_norm
+        if amount_norm is not None:
+            t_out["amount_usd"] = amount_norm
+        tasks.append(t_out)
 
     watchlist: list[str] = []
     for i, s in enumerate(yaml_data.get("watchlist") or []):

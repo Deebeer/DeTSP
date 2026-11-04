@@ -30,8 +30,10 @@ def _build(venues, **params):
             "reconcile_seconds": 15, "execution_mode": "maker",
             "maker_timeout_seconds": 10}
     base.update(params)
+    # 第十轮夹具调整：maker 执行语义是原生信号驱动，钉
+    # semi_fixed（缺省 manual 已改为首 tick taker 打一笔）
     y = {"tasks": [{"name": "arb", "strategy": "premium_arb",
-                    "params": base}]}
+                    "run_mode": "semi_fixed", "params": base}]}
     cfg = build_config(env={}, yaml_data=y)
     engine = Engine.from_config(cfg, venues, ledger=Ledger())
     assert "arb" not in engine.errors, engine.errors

@@ -67,6 +67,9 @@ class PremiumParams:
     # Lighter 结算延迟，须 ≥ 对账周期才不被对账抢先）
     max_slippage_bps: float = 20.0      # delta 修正的滑点保护上限
     # （bps）：带滑点上限的 reduce-only 限价单，超限本轮不削（对照 M2）
+    close_band_bps: float = 0.0         # 回归平仓带（bps，DeTSP 新增，
+    # 非原仓）：0=关（现行行为）；>0 时有持仓且当前溢价偏离中枢
+    # 不超过此带宽就双腿 taker 全平，见 tick 的回归平仓检查
 
     def __post_init__(self) -> None:
         if self.upper_bps <= 0 or self.lower_bps <= 0:
@@ -111,6 +114,8 @@ class PremiumParams:
             raise ValueError("settle_grace_seconds 不能为负")
         if self.max_slippage_bps < 0:
             raise ValueError("max_slippage_bps 不能为负")
+        if self.close_band_bps < 0:
+            raise ValueError("close_band_bps 不能为负")
 
     @property
     def total_fee_bps(self) -> float:
@@ -265,6 +270,11 @@ class PremiumArbStrategy:
         self.single_cycle = False
         self.cycle_done = False
         self._cycle_seen = False
+        # 自主（manual）模式：引擎 build_task 注入。首 tick 立即打
+        # 一笔配对切片，之后不再 fire、平仓靠人工 stop；直接构造
+        # 默认 False
+        self.manual_immediate = False
+        self._manual_fired = False
         self.stopped = False
         self.last_error: str = ""
         self.recovery_notes: list[str] = []  # 启动对账事件
@@ -607,6 +617,66 @@ class PremiumArbStrategy:
             if final is not None:
                 self._finalize_maker(mk, final, now)
 
+    # ----- 回归平仓带（DeTSP 新增）与自主首笔 -----
+    def _mid_signed_premium_bps(self, base_book, hedge_book) -> float:
+        """盘口中间价口径的带符号溢价（bps）：与 executable 的
+        mid 版同口径——(base_mid − hedge_mid) / 两腿均价 × 10000。"""
+        base_mid, hedge_mid = base_book.mid, hedge_book.mid
+        avg = (base_mid + hedge_mid) / 2
+        if avg <= 0:
+            return 0.0
+        return (base_mid - hedge_mid) / avg * 10_000
+
+    def _check_close_band(self, base_book, hedge_book,
+                          now: float) -> bool:
+        """回归平仓：close_band_bps>0、有持仓、且当前溢价偏离
+        中枢在带内 → 双腿 taker 全平（_flatten 通道）。触发返回
+        True。maker 待成交期间不调用本函数（tick 结构保证）。"""
+        p = self.params
+        if p.close_band_bps <= 0:
+            return False
+        if self._pos_qty(p.base_venue) == 0 and \
+                self._pos_qty(p.hedge_venue) == 0:
+            return False
+        deviation = self._mid_signed_premium_bps(
+            base_book, hedge_book) - p.midline_bps
+        if abs(deviation) > p.close_band_bps:
+            return False
+        self._flatten()
+        # 平仓也算一次执行：刷新 _last_fire，复用执行冷却
+        # （semi_fixed 下冷却过后才再等信号重新开仓）
+        self._last_fire = now
+        if self.single_cycle:
+            self.cycle_done = True
+        return True
+
+    def _manual_fire(self, base_book, hedge_book, now: float) -> None:
+        """自主模式首笔：立即打一笔配对切片（双腿 taker）。
+
+        方向先按现行可成交信号（哪边越带用哪边）；两边都不越带
+        时按带符号 mid 价差定：价差 >0（base 贵）用 sell_base，
+        <0 用 buy_base，≈0 默认 buy_base。一笔后置 _manual_fired，
+        后续 tick 不再 fire。
+        """
+        p = self.params
+        signal = self._signal_with_surcharge(base_book, hedge_book)
+        if signal is None:
+            spread = self._mid_signed_premium_bps(base_book, hedge_book)
+            if spread > 1e-9:
+                signal = "sell_base"
+            elif spread < -1e-9:
+                signal = "buy_base"
+            else:
+                signal = "buy_base"   # 价差≈0：默认 buy_base
+        qty, notional = self._slice_qty()
+        if qty <= 0 or notional < p.min_order_notional_usd:
+            return
+        base_qty = self._pos_qty(p.base_venue)
+        if abs(base_qty * base_book.mid) + notional > p.max_position_usd:
+            return
+        self._fire_taker(signal, qty, now)
+        self._manual_fired = True
+
     # ----- 强平距离监控 -----
     def _corridor_guard(self, base_book, hedge_book) -> str:
         """持仓强平距离监控（公共口径）：返回 "ok" / "block"
@@ -661,6 +731,11 @@ class PremiumArbStrategy:
             self._corridor_guard(base_book, hedge_book)
             return
 
+        # 回归平仓带（信号处理前；_maker 非 None 的 tick 已在
+        # 上面返回，不会误平 maker 待成交期间的仓位）
+        if self._check_close_band(base_book, hedge_book, now):
+            return
+
         # 定期对账：净 delta 不平立即修正（安全动作，先于开仓
         # 信号）；结算宽限期内 _fix_delta 自行跳过（G1）
         if now - self._last_reconcile >= p.reconcile_seconds:
@@ -672,6 +747,14 @@ class PremiumArbStrategy:
             self._armed.clear()
             return
         block_fire = guard == "block"
+
+        if self.manual_immediate:
+            # 自主模式：首 tick 立即打一笔配对切片，一笔后不再
+            # fire（对账/强平监控/回归平仓在上面照常）；平仓靠
+            # 人工 stop（_flatten）
+            if not self._manual_fired and not block_fire:
+                self._manual_fire(base_book, hedge_book, now)
+            return
 
         signal = self._signal_with_surcharge(base_book, hedge_book)
         if signal is None or block_fire:

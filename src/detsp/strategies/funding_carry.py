@@ -162,6 +162,11 @@ class FundingCarryStrategy:
         # 宽限期内）：{"long_leg", "until"}，见 _resolve_pending
         self.single_cycle = False
         self.cycle_done = False
+        # 自主（manual）模式：引擎 build_task 注入。首 tick 不看
+        # 入场门槛立即按最优方向开仓，开仓后不做退出检查（费差
+        # 退出/最长持有都不触发），等人工 stop 全平；直接构造
+        # 默认 False
+        self.manual_immediate = False
         self.last_error: str = ""
         self.recovery_notes: list[str] = []  # 启动对账事件
 
@@ -456,6 +461,11 @@ class FundingCarryStrategy:
             return
 
         if self.phase == "open":
+            if self.manual_immediate:
+                # 自主模式：退出检查（费差跌破退出门槛、最长
+                # 持有）都不触发自动平仓，等人工 stop；安全
+                # 检查（孤腿/强平距离）在上面 _safety 照常保留
+                return
             if p.max_hold_seconds > 0 and \
                     now - self.opened_at >= p.max_hold_seconds:
                 self._close_both()
@@ -483,6 +493,20 @@ class FundingCarryStrategy:
             if now < self.cooldown_until:
                 return
             self.phase = "flat"
+
+        # flat：自主模式首笔——不看入场门槛、不等检查周期，
+        # 按当前最优方向（多低费/空高费）立即开仓。费率闸门
+        # （合理性/口径）仍保留：数据不可信时不开，记原因等
+        # 下一 tick 再试
+        if self.manual_immediate and not self._opened_once:
+            self._last_check = now
+            ok, reason, ha, hb = self._gate_rates()
+            if not ok:
+                self.last_error = reason
+                return
+            long_leg, _edge = best_carry_direction(ha, hb)
+            self._open_pair(long_leg, now)
+            return
 
         # flat：等入场检查周期
         if self._opened_once and (self.single_cycle or not p.reopen):

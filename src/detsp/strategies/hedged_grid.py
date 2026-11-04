@@ -220,6 +220,10 @@ class HedgedGridStrategy:
         self.owner = owner or self.name
         self.single_cycle = False
         self.cycle_done = False
+        # 自主（manual）模式标记：引擎 build_task 注入。网格的
+        # 铺格就是其开仓本质，manual_immediate 对行为无改变，
+        # 只保证四策略属性齐全、设置不报错；直接构造默认 False
+        self.manual_immediate = False
         self.started = False
         self.stopped = False
         self.recovering = False

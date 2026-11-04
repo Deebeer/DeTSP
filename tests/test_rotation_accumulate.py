@@ -35,6 +35,9 @@ def _venues():
 def _build(max_position_qty):
     y = {"tasks": [{
         "name": "hedge", "strategy": "rotation_hedge",
+        # 第十轮夹具调整：逐步建仓+到期轮换是原生循环语义，钉
+        # semi_fixed（缺省 manual 到期不自动平仓）
+        "run_mode": "semi_fixed",
         "params": {"symbol": "BTC", "venue_a": "arcus", "venue_b": "lighter",
                    "notional_usd": 300, "hold_seconds": 60,
                    "hold_min_seconds": 0, "hold_max_seconds": 0,

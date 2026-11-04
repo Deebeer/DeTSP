@@ -102,8 +102,10 @@ def _build(venues, **params):
             "max_position_usd": 1000, "max_order_notional_usd": 500,
             "execution_mode": "taker"}
     base.update(params)
+    # 第十轮夹具调整：冷却/再开是原生循环语义，钉 semi_fixed
+    # （缺省 manual 只打一笔、不再 fire）
     y = {"tasks": [{"name": "arb", "strategy": "premium_arb",
-                    "params": base}]}
+                    "run_mode": "semi_fixed", "params": base}]}
     cfg = build_config(env={}, yaml_data=y)
     engine = Engine.from_config(cfg, venues, ledger=Ledger())
     assert "arb" not in engine.errors, engine.errors

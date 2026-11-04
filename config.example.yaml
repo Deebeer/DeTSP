@@ -44,16 +44,25 @@ venues:
 # 任务名（name）必填且唯一，它是归属与账本的标识。
 # 同一 (场所, 币种) 只能被一个任务占用（双腿策略占两个场所），
 # 重复配置在加载时直接报错。
-# run_mode（任务顶层字段，可选）：manual = 自主（自己选标、开
-# 一笔、平完结束，不自动重开）；auto = 全自动（只定两所/金额/
-# 门槛，系统自动选标→开仓→平仓→冷却→再选标循环，点停止才停）。
-# 缺省 manual；全自动任务按「该场所任意币种」占位，与同场所的
-# 其他任务都算冲突。
+# run_mode（任务顶层字段，可选）：四值——manual = 自主（两腿/
+# 标的/金额都自己定，点开仓立即开、手动平仓）；semi_fixed =
+# 半自动·固定标的（定死一个标的，系统按条件开→平→再开循环）；
+# semi_auto = 半自动·自动选标（定两腿/金额/条件，系统每轮重新
+# 选标循环）；full_auto = 全自动（只定策略/金额/风险档，两腿、
+# 标的、参数系统全定）。缺省 manual；旧值 auto 自动按 semi_auto
+# 处理。自动选标类任务（semi_auto / full_auto）按「该场所任意
+# 币种」占位，与同场所的其他任务都算冲突。
+# run_preset（任务顶层字段，可选）：仅 full_auto 用的风险档，
+# conservative（保守）/ neutral（中性，缺省）/ aggressive（激进）。
+# amount_usd（任务顶层字段，可选）：仅 full_auto 的中性网格用，
+# 填目标总名义（USD），系统按它反推每格量。
 # 启用示例：去掉对应行首的 "# "，并把占位符换成自己实测/设定的值。
 tasks: []
 #  - name: <任务名，如 hgrid-btc-arcus>
 #    strategy: hedged_grid        # 中性网格：WGALL 网格 + Parallax 对锁
-#    run_mode: manual          # 运行模式：manual 自主（开一笔、平完结束）/ auto 全自动（自动选标循环）
+#    run_mode: manual          # 运行模式四值：manual 自主 / semi_fixed 半自动·固定标的 / semi_auto 半自动·自动选标 / full_auto 全自动（旧值 auto 按 semi_auto 处理）
+#    run_preset: neutral       # 仅 full_auto 用：风险档 conservative 保守 / neutral 中性 / aggressive 激进
+#    amount_usd: <目标总名义 USD>  # 仅 full_auto 的中性网格用：系统按它反推每格量（其余策略删掉此行）
 #    params:
 #      grid_venue: <venue_id>     # 网格腿
 #      hedge_venue: <venue_id>    # 对冲腿（与网格腿净仓位反向等量）
@@ -76,7 +85,8 @@ tasks: []
 #      # 太密时磨损会吃掉网格利润；死区太小也会频繁调平。
 #  - name: <任务名，如 arb-entropy-rh>
 #    strategy: premium_arb        # 溢价套利：entropy-arb 价差带逻辑
-#    run_mode: manual          # 运行模式：manual 自主（开一笔、平完结束）/ auto 全自动（自动选标循环）
+#    run_mode: manual          # 运行模式四值：manual 自主 / semi_fixed 半自动·固定标的 / semi_auto 半自动·自动选标 / full_auto 全自动（旧值 auto 按 semi_auto 处理）
+#    run_preset: neutral       # 仅 full_auto 用：风险档 conservative 保守 / neutral 中性 / aggressive 激进
 #    params:
 #      symbol: <币种>
 #      base_venue: <venue_id>     # 基准腿
@@ -84,6 +94,7 @@ tasks: []
 #      midline_bps: <实测中枢，占位符——必须用录制+分析工具实测>
 #      upper_bps: <上方入场带>
 #      lower_bps: <下方入场带>
+#      close_band_bps: 0          # 可选：回归平仓带（bps），价差回到中枢±此值内双腿全平（DeTSP 新增，原仓无此字段）；0=关
 #      max_position_usd: <仓位上限>
 #      max_order_notional_usd: <单笔上限>
 #      execution_mode: taker      # taker 双腿立即成交 / maker 主腿
@@ -103,7 +114,8 @@ tasks: []
 #      leverage_hedge: <杠杆，与账户实际设置一致>
 #  - name: <任务名，如 hedge-arcus-lighter>
 #    strategy: rotation_hedge     # 轮换对冲刷量：Parallax
-#    run_mode: manual          # 运行模式：manual 自主（开一笔、平完结束）/ auto 全自动（自动选标循环）
+#    run_mode: manual          # 运行模式四值：manual 自主 / semi_fixed 半自动·固定标的 / semi_auto 半自动·自动选标 / full_auto 全自动（旧值 auto 按 semi_auto 处理）
+#    run_preset: neutral       # 仅 full_auto 用：风险档 conservative 保守 / neutral 中性 / aggressive 激进
 #    params:
 #      symbol: <币种>
 #      venue_a: <venue_id>
@@ -115,6 +127,7 @@ tasks: []
 #      notional_min_usd: 0        # 可选：与 notional_max_usd 配合，>0 时每轮在区间内随机抽金额
 #      notional_max_usd: 0
 #      cooldown_seconds: 30       # 平仓后的冷却（Parallax 原仓默认 30）
+#      min_entry_edge_bps_per_hour: 0  # 可选：最小费差门槛（bps/小时），费差达到才开新一轮（DeTSP 新增，原仓无此字段）；0=关
 #      arcus_maker: true          # 可选：任一腿是 Arcus 时该腿走 maker 挂单开仓（Parallax 任务表单默认限价；另一腿 taker 对冲）
 #      maker_wait_seconds: 120    # maker 挂单最长等待（秒），超时撤单按最终量对冲
 #      settle_grace_seconds: 10   # 开仓结算宽限期：宽限内不做单腿定性（防异步结算误平）
@@ -125,7 +138,8 @@ tasks: []
 #      accumulate_interval_seconds: 60   # 逐步建仓的加仓间隔
 #  - name: <任务名，如 carry-arcus-lighter>
 #    strategy: funding_carry      # 资金费 carry：Parallax 资金费选向独立成策略
-#    run_mode: manual          # 运行模式：manual 自主（开一笔、平完结束）/ auto 全自动（自动选标循环）
+#    run_mode: manual          # 运行模式四值：manual 自主 / semi_fixed 半自动·固定标的 / semi_auto 半自动·自动选标 / full_auto 全自动（旧值 auto 按 semi_auto 处理）
+#    run_preset: neutral       # 仅 full_auto 用：风险档 conservative 保守 / neutral 中性 / aggressive 激进
 #    params:
 #      symbol: <币种>
 #      venue_a: <venue_id>

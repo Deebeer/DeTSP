@@ -67,6 +67,10 @@ def _venues(fa=0.0001, fb=0.0005):
 
 
 def _build(venues, _run_mode=None, _scanner=None, **params):
+    # 第十轮夹具调整：本文件验的是 carry 原生语义（门槛入场/
+    # 迟滞退出/重开），缺省自主（manual）已改为立即开仓且不
+    # 自动退出，故缺省钉 semi_fixed（原生循环）；显式传模式
+    # 的用例（全自动重开）不受影响
     base = {"symbol": "BTC", "venue_a": "arcus", "venue_b": "lighter",
             "notional_usd": 300, "leverage": 5,
             "min_entry_edge_bps_per_hour": 2.0,
@@ -74,8 +78,7 @@ def _build(venues, _run_mode=None, _scanner=None, **params):
             "check_seconds": 10, "cooldown_seconds": 30}
     base.update(params)
     task = {"name": "carry", "strategy": "funding_carry", "params": base}
-    if _run_mode:
-        task["run_mode"] = _run_mode
+    task["run_mode"] = _run_mode or "semi_fixed"
     y = {"tasks": [task]}
     cfg = build_config(env={}, yaml_data=y)
     engine = Engine.from_config(cfg, venues, ledger=Ledger(),

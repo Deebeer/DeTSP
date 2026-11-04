@@ -62,6 +62,9 @@ class RotationParams:
     # 仓做单腿定性，期满按真实持仓定案（审查 G1）
     max_slippage_bps: float = 20.0      # 削腿（不平衡修正）的滑点
     # 保护上限（bps）：带滑点上限的限价单，超限本轮不削（对照 M2）
+    min_entry_edge_bps_per_hour: float = 0.0  # 开新一轮的最小净费差
+    # 门槛（bps/小时，DeTSP 新增，非原仓）：0=关（现行行为）；>0 时
+    # 当前最优方向的净费差低于门槛就留在 idle 等下一 tick，不开仓
 
     def __post_init__(self) -> None:
         if self.venue_a == self.venue_b:
@@ -70,6 +73,8 @@ class RotationParams:
             raise ValueError("notional_usd 必须大于 0")
         if self.max_position_qty < 0:
             raise ValueError("max_position_qty 不能为负（0=禁用）")
+        if self.min_entry_edge_bps_per_hour < 0:
+            raise ValueError("min_entry_edge_bps_per_hour 不能为负")
         if self.settle_grace_seconds < 0:
             raise ValueError("settle_grace_seconds 不能为负")
         if self.max_slippage_bps < 0:
@@ -183,6 +188,9 @@ class RotationHedgeStrategy:
         self._last_add_at = -1e18    # 最近一次加仓时间（逐步建仓间隔）
         self.single_cycle = False
         self.cycle_done = False
+        # 自主（manual）模式：引擎 build_task 注入。立即开一轮且
+        # 持有到期不自动平仓，等人工 stop 全平；直接构造默认 False
+        self.manual_immediate = False
         self._has_opened = False
         self.last_error: str = ""
         self.recovery_notes: list[str] = []  # S3 启动对账事件
@@ -341,6 +349,17 @@ class RotationHedgeStrategy:
         if not ok:
             self.last_error = reason
             return
+        # 最小费差门槛（DeTSP 新增）：当前可选方向的最大净费差
+        # （空腿小时费率 − 多腿小时费率，与 carry 同口径）低于
+        # 门槛就留在 idle 等下一 tick——不报错、不开仓。门槛为 0
+        # 时不拦（现行行为）；manual_immediate 人工开仓不等条件，
+        # 同样不拦。本函数只在 idle 开新一轮时调用，idle 发现
+        # 仓位按 open 接管的路径不经过这里，不受门槛影响
+        if not self.manual_immediate \
+                and p.min_entry_edge_bps_per_hour > 0:
+            edge_bps = abs(fa - fb) * 10_000
+            if edge_bps < p.min_entry_edge_bps_per_hour:
+                return
         long_leg, short_leg = choose_direction(fa, fb)
         bal = {leg: ex.venue(self._venue_id(leg)).balance().get("available", 0.0)
                for leg in ("a", "b")}
@@ -749,7 +768,10 @@ class RotationHedgeStrategy:
             if not has_position:
                 self._finish_round(now)
                 return
-            if should_rotate(self.opened_at, now, self.hold_drawn):
+            # manual_immediate：持有到期不自动平仓，等人工 stop
+            # 全平（其余安全保护在 _safety 里照常执行）
+            if not self.manual_immediate and should_rotate(
+                    self.opened_at, now, self.hold_drawn):
                 self._close_both(now)
                 return
             # 逐步建仓：未达 max_position_qty 且间隔已到 → 加一档

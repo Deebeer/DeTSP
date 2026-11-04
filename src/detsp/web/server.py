@@ -23,6 +23,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
 from ..core.engine import Engine, build_task, task_occupied_keys
+
+try:
+    from ..core.engine import normalize_run_mode
+except ImportError:  # 后端归一函数未就绪时的兜底（语义与契约一致）
+    def normalize_run_mode(value):
+        v = str(value or "manual")
+        if v == "auto":
+            return "semi_auto"
+        return v
+
 from ..core.ledger import Ledger
 from ..core.panel_tasks import save_panel_tasks
 from ..core.secret_fields import save_secrets, secrets_status
@@ -32,6 +42,91 @@ from .page import PAGE_HTML
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8320
 _LOOPBACK = ("127.0.0.1", "localhost", "::1")
+
+# 运行模式四值（第十轮）与全自动风险档三值；旧值 auto 归一 semi_auto
+RUN_MODES = ("manual", "semi_fixed", "semi_auto", "full_auto")
+RUN_PRESETS = ("conservative", "neutral", "aggressive")
+_RUN_MODE_ERROR = ("运行模式不合法：{v}，只许 manual（自主）/ "
+                   "semi_fixed（半自动·固定标的）/ semi_auto"
+                   "（半自动·自动选标）/ full_auto（全自动）；"
+                   "旧值 auto 按 semi_auto 处理")
+
+
+def _normalize_run_mode(value) -> str:
+    """归一 + 校验：合法返回四值之一，非法抛 ValueError。"""
+    v = normalize_run_mode(value or "manual")
+    if v not in RUN_MODES:
+        raise ValueError(_RUN_MODE_ERROR.format(v=value))
+    return v
+
+
+def _normalize_run_mode_or(value, default: str = "manual") -> str:
+    """展示口径的归一：坏值不抛错，回退缺省（列表不能因旧数据挂掉）。"""
+    try:
+        return _normalize_run_mode(value)
+    except Exception:  # noqa: BLE001 — 展示路径容错
+        return default
+
+
+def _validate_run_preset(value) -> str:
+    v = str(value or "neutral")
+    if v not in RUN_PRESETS:
+        raise ValueError(
+            f"风险档不合法：{value}，只许 conservative（保守）/ "
+            f"neutral（中性）/ aggressive（激进）")
+    return v
+
+
+def _validate_amount_usd(value):
+    """amount_usd 透传校验：None 原样返回，给了必须是正数。"""
+    if value is None:
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"amount_usd 必须是数字：{value}")
+    if v <= 0:
+        raise ValueError(f"amount_usd 必须大于 0：{value}")
+    return v
+
+
+def _validate_params_for_mode(strategy, params, run_mode):
+    """按运行模式校验参数（与 core.engine.build_task 同口径）。
+
+    自动选标类（semi_auto/full_auto）有些必填字段由监督器逐轮
+    供给（symbol、网格区间；full_auto 另含两腿场所、网格每格量、
+    溢价带）：校验前只给缺失的这类字段填占位让必填检查通过，
+    校验后从结果摘除——用户实填字段仍走全量校验，存盘不带占位。
+    其余模式直接走 validate_params。
+    """
+    raw = dict(params or {})
+    if run_mode not in ("semi_auto", "full_auto"):
+        return validate_params(strategy, raw)
+    supplied: dict = {"symbol": "AUTO"}
+    if strategy == "hedged_grid":
+        supplied.update({"lower_price": 1.0, "upper_price": 2.0})
+    if run_mode == "full_auto":
+        # 两腿场所占位只填本策略自己的字段（多了会被判未知参数）
+        supplied.update({
+            "hedged_grid": {"grid_venue": "arcus",
+                            "hedge_venue": "lighter"},
+            "rotation_hedge": {"venue_a": "arcus", "venue_b": "lighter"},
+            "funding_carry": {"venue_a": "arcus", "venue_b": "lighter"},
+            "premium_arb": {"base_venue": "arcus",
+                            "hedge_venue": "lighter"},
+        }.get(strategy, {}))
+        if strategy == "hedged_grid":
+            supplied.update({"qty_per_grid": 0.01})
+        if strategy == "premium_arb":
+            supplied.update({"midline_bps": 0.0, "upper_bps": 10.0,
+                             "lower_bps": 10.0})
+    filled = dict(supplied)
+    filled.update(raw)
+    clean = validate_params(strategy, filled)
+    for k in supplied:
+        if k not in raw:
+            clean.pop(k, None)
+    return clean
 
 
 def web_settings(env: dict) -> tuple[str, int]:
@@ -329,26 +424,33 @@ class PanelState:
         for t in self.engine.tasks:
             seen.add(t.name)
             cfg = self.task_cfgs.get(t.name, {})
-            run_mode = getattr(t, "run_mode", None) or \
-                cfg.get("run_mode") or "manual"
+            run_mode = _normalize_run_mode_or(
+                getattr(t, "run_mode", None) or cfg.get("run_mode")
+                or "manual")
             rt = t.runtime
-            is_auto = run_mode == "auto"
+            # 自动选标类（semi_auto/full_auto，含旧值 auto 归一后）
+            # 的当前标的/阶段/轮数取自监督器运行时；其余为空/0
+            is_cycle = run_mode in ("semi_auto", "full_auto")
+            venues_rt = getattr(rt, "current_venues", None)
             out.append({
                 "id": t.name, "name": t.name, "strategy": t.strategy_type,
                 "status": self._task_status(t),
                 "source": self._source(t.name),
                 "last_error": t.last_error or self.engine.errors.get(t.name, ""),
                 "params": {k: v for k, v in cfg.items() if k != "name"},
-                # 运行模式（第九轮）：auto 任务的当前标的/阶段/轮数
-                # 取自监督器运行时；manual 任务 auto_* 为空/0
+                # 运行模式（第十轮四值，归一后输出）+ 风险档 +
+                # 当前两腿（从 runtime 读，没有则空 list）
                 "run_mode": run_mode,
+                "run_preset": cfg.get("run_preset")
+                or getattr(t, "run_preset", None) or "neutral",
                 "auto_phase": getattr(rt, "auto_phase", "")
-                if is_auto else "",
+                if is_cycle else "",
                 "current_symbol": getattr(rt, "current_symbol", None)
-                if is_auto else None,
+                if is_cycle else None,
+                "current_venues": list(venues_rt) if venues_rt else [],
                 "cycles_completed": int(
                     getattr(rt, "cycles_completed", 0) or 0)
-                if is_auto else 0,
+                if is_cycle else 0,
             })
         for name, cfg in self.task_cfgs.items():
             if name not in seen:   # 组装失败的任务也要在面板可见
@@ -360,8 +462,11 @@ class PanelState:
                     "source": self._source(name),
                     "last_error": self.engine.errors.get(name, "组装失败"),
                     "params": {k: v for k, v in cfg.items() if k != "name"},
-                    "run_mode": cfg.get("run_mode") or "manual",
+                    "run_mode": _normalize_run_mode_or(
+                        cfg.get("run_mode") or "manual"),
+                    "run_preset": cfg.get("run_preset") or "neutral",
                     "auto_phase": "", "current_symbol": None,
+                    "current_venues": [],
                     "cycles_completed": 0,
                 })
         for name, cfg in self.panel_cfgs.items():
@@ -376,8 +481,11 @@ class PanelState:
                     "last_error": self.panel_skip_errors.get(
                         name, "未加载"),
                     "params": {k: v for k, v in cfg.items() if k != "name"},
-                    "run_mode": cfg.get("run_mode") or "manual",
+                    "run_mode": _normalize_run_mode_or(
+                        cfg.get("run_mode") or "manual"),
+                    "run_preset": cfg.get("run_preset") or "neutral",
                     "auto_phase": "", "current_symbol": None,
+                    "current_venues": [],
                     "cycles_completed": 0,
                 })
         return out
@@ -448,12 +556,14 @@ class PanelState:
             return {"ok": False, "error": "引擎主循环繁忙，命令超时，请重试"}
 
     def create_task(self, name, strategy, params,
-                    run_mode="manual") -> dict:
+                    run_mode="manual", run_preset=None,
+                    amount_usd=None) -> dict:
         return self._run(lambda: self._do_create_task(
-            name, strategy, params, run_mode))
+            name, strategy, params, run_mode, run_preset, amount_usd))
 
     def _do_create_task(self, name, strategy, params,
-                        run_mode="manual") -> dict:
+                        run_mode="manual", run_preset=None,
+                        amount_usd=None) -> dict:
         name = str(name or "").strip()
         if not name:
             return {"ok": False, "error": "任务名必填"}
@@ -461,20 +571,25 @@ class PanelState:
             return {"ok": False, "error":
                     f"未知策略：{strategy}，可用策略："
                     f"{' / '.join(PARAMS_CLASSES)}"}
-        run_mode = str(run_mode or "manual")
-        if run_mode not in ("manual", "auto"):
-            return {"ok": False, "error":
-                    f"运行模式不合法：{run_mode}，只许 manual（自主）/ "
-                    f"auto（全自动）"}
+        try:
+            # 归一后再落盘：新写入一律新值（auto → semi_auto）
+            run_mode = _normalize_run_mode(run_mode)
+            run_preset = _validate_run_preset(run_preset)
+            amount_usd = _validate_amount_usd(amount_usd)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
         if name in self.task_cfgs or name in self.panel_cfgs or \
                 any(t.name == name for t in self.engine.tasks):
             return {"ok": False, "error": f"任务名已存在：{name}"}
         try:
-            clean = validate_params(strategy, params or {})
+            clean = _validate_params_for_mode(strategy, params,
+                                              run_mode)
         except ValueError as e:
             return {"ok": False, "error": f"参数不合法：{e}"}
         cfg = {"name": name, "strategy": strategy, "params": clean,
-               "run_mode": run_mode}
+               "run_mode": run_mode, "run_preset": run_preset}
+        if amount_usd is not None:
+            cfg["amount_usd"] = amount_usd
         try:
             self.engine.add_task_dynamic(cfg)
         except Exception as e:  # 占用冲突/caps/启动对账失败：原样说清
@@ -485,11 +600,13 @@ class PanelState:
         self._event(f"创建任务「{name}」（{strategy}）")
         return {"ok": True, "task": name}
 
-    def update_task(self, name, params, run_mode=None) -> dict:
+    def update_task(self, name, params, run_mode=None, run_preset=None,
+                    amount_usd=None) -> dict:
         return self._run(lambda: self._do_update_task(
-            name, params, run_mode))
+            name, params, run_mode, run_preset, amount_usd))
 
-    def _do_update_task(self, name, params, run_mode=None) -> dict:
+    def _do_update_task(self, name, params, run_mode=None,
+                        run_preset=None, amount_usd=None) -> dict:
         name = str(name or "").strip()
         if name not in self.panel_cfgs:
             if name in self.task_cfgs:
@@ -506,17 +623,27 @@ class PanelState:
         if run_mode is None:
             # 编辑弹窗不带模式时保持原模式，不许悄悄改语义
             run_mode = old_cfg.get("run_mode") or "manual"
-        run_mode = str(run_mode or "manual")
-        if run_mode not in ("manual", "auto"):
-            return {"ok": False, "error":
-                    f"运行模式不合法：{run_mode}，只许 manual（自主）/ "
-                    f"auto（全自动）"}
+        if run_preset is None:
+            # 同理：弹窗不带风险档时保持原档（缺省 neutral）
+            run_preset = old_cfg.get("run_preset") or "neutral"
+        if amount_usd is None:
+            amount_usd = old_cfg.get("amount_usd")
         try:
-            clean = validate_params(strategy, params or {})
+            # 归一后再落盘：旧值 auto 写回时也变 semi_auto
+            run_mode = _normalize_run_mode(run_mode)
+            run_preset = _validate_run_preset(run_preset)
+            amount_usd = _validate_amount_usd(amount_usd)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        try:
+            clean = _validate_params_for_mode(strategy, params,
+                                              run_mode)
         except ValueError as e:
             return {"ok": False, "error": f"参数不合法：{e}"}
         new_cfg = {"name": name, "strategy": strategy, "params": clean,
-                   "run_mode": run_mode}
+                   "run_mode": run_mode, "run_preset": run_preset}
+        if amount_usd is not None:
+            new_cfg["amount_usd"] = amount_usd
         # 运行中改参数 = 先停（撤单+平仓）再按新参数重组
         was_stopped = name in self.stopped_by_user
         in_engine = any(t.name == name for t in self.engine.tasks)
@@ -565,9 +692,9 @@ class PanelState:
         ex = self.engine.executor
         if ex is not None:
             occupied = set(task_occupied_keys(cfg))
-            if (cfg.get("run_mode") or "manual") == "auto" and \
-                    t_obj is not None:
-                # 全自动任务的占用键是通配 "*"，真实持仓在监督器
+            if _normalize_run_mode_or(cfg.get("run_mode") or "manual") \
+                    in ("semi_auto", "full_auto") and t_obj is not None:
+                # 自动选标任务的占用键是通配 "*"，真实持仓在监督器
                 # 当前标的上：把当前标的的两腿也纳入持仓检查
                 cur = getattr(t_obj.runtime, "current_symbol", None)
                 if cur:
@@ -858,7 +985,9 @@ def make_handler(state: PanelState):
                 res = state.create_task(body.get("name"),
                                         body.get("strategy"),
                                         body.get("params") or {},
-                                        body.get("run_mode") or "manual")
+                                        body.get("run_mode") or "manual",
+                                        body.get("run_preset"),
+                                        body.get("amount_usd"))
                 self._json(res, 200 if res.get("ok") else 400)
             elif parts == ["api", "tasks", "update"]:
                 body = self._json_body()
@@ -866,7 +995,9 @@ def make_handler(state: PanelState):
                     return
                 res = state.update_task(body.get("name"),
                                         body.get("params") or {},
-                                        body.get("run_mode"))
+                                        body.get("run_mode"),
+                                        body.get("run_preset"),
+                                        body.get("amount_usd"))
                 self._json(res, 200 if res.get("ok") else 400)
             elif parts == ["api", "tasks", "delete"]:
                 body = self._json_body()

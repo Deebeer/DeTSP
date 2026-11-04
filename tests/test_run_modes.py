@@ -1,11 +1,13 @@
-"""第九轮：两种运行模式（自主 manual / 全自动 auto）。
+"""第九轮两种模式 + 第十轮三模式四值（manual / semi_fixed /
+semi_auto / full_auto，旧值 auto 归一 semi_auto）。
 
-覆盖：run_mode 校验与缺省；自主模式下 carry 平仓后 cycle_done
-且不重开（params 里 reopen=True 也一样）、rotation 只跑一轮、
-premium 只做一笔；AutoCycle 监督器用假 scanner 跑通
-「选标 A → 开 → 平 → 冷却 → 选标 B → 开」且轮数递增、stop 后
-内层仓位已平；面板页含模式切换、server 创建 auto 任务后
-/api/tasks 带 run_mode=auto 并落盘。
+覆盖：run_mode 四值校验、缺省与归一；第十轮 manual 改为立即
+开仓、人工平仓（自动平仓条件不生效）；semi_fixed 原生同标的
+循环；AutoCycle 监督器（pair 固定两腿选标 / all_pairs 全自动
+跨所选组合）跑通选标→开→平→冷却→再选标且轮数递增、stop 后
+内层仓位已平；两缺口（rotation 费差门槛、premium 回归平仓带）；
+specs 五段映射全覆盖；面板页含四模式切换、server 创建任务传
+run_mode=auto 落盘归一为 semi_auto。
 """
 
 import json
@@ -93,7 +95,10 @@ def test_run_mode_default_is_manual_and_single_cycle():
                                   "params": dict(CARRY_PARAMS)})
     task = engine.tasks[0]
     assert task.run_mode == "manual"
+    assert task.run_preset == "neutral"
     assert task.runtime.single_cycle is True
+    # 第十轮：自主模式同时设 manual_immediate（立即开仓语义）
+    assert task.runtime.manual_immediate is True
     assert task.runtime.cycle_done is False
 
 
@@ -139,31 +144,41 @@ def test_auto_task_conflicts_with_any_symbol_same_venue():
         build_config(env={}, yaml_data={"tasks": [auto, other]})
 
 
-# ── 自主模式：carry 只跑一笔（reopen=True 也不重开） ──
+# ── 自主模式：carry 立即开仓且不自动退出（第十轮语义大改） ──
+# 第九轮原用例 test_carry_manual_cycle_done_and_no_reopen 断言
+# 「达门槛开仓、最长持有到期自动平仓置 cycle_done」，与第十轮
+# manual 语义（不看门槛立即开、退出检查不触发、人工 stop 平仓）
+# 冲突，已按新语义改写为下面两个用例；原生循环行为移交
+# semi_fixed 用例覆盖（见本文件后部）。
 
-def test_carry_manual_cycle_done_and_no_reopen():
+def test_carry_manual_immediate_opens_below_threshold_and_never_auto_exits():
     venues = _venues()
+    # 费差只有 1 bps/小时（a 0.0001 / b 0.0002），低于入场门槛 2
+    venues["lighter"].set_funding("BTC", 0.0002)
     engine = _engine(venues, {
         "name": "carry", "strategy": "funding_carry",
         "params": {**CARRY_PARAMS, "max_hold_seconds": 50.0,
                    "reopen": True, "cooldown_seconds": 30}})
     rt = engine.tasks[0].runtime
-    engine.tick(now=1000)
+    engine.tick(now=1000)   # 不看门槛：首 tick 立即按最优方向开仓
     assert _legs(engine) == (pytest.approx(0.005), pytest.approx(-0.005))
-    engine.tick(now=1051)   # 最长持有到 → 平仓
-    assert _legs(engine) == (0.0, 0.0)
-    assert rt.cycle_done is True
-    # params 原值没被改（运行时语义，不是改配置）
-    assert rt.params.reopen is True
-    # 引擎已停用该任务并记中文事件
-    assert engine.tasks[0].disabled is True
-    assert any("自主模式：本笔已平仓，任务结束" in e
-               for e in engine.events)
-    engine.tick(now=1200)   # 冷却早过、优势还在，也绝不重开
+    assert rt.phase == "open"
+    # 费差跌到退出门槛以下（多腿 a 费率反超）+ 超最长持有：不平
+    venues["arcus"].set_funding("BTC", 0.0009)
+    engine.tick(now=1051)
+    engine.tick(now=1100)
+    engine.tick(now=1200)
+    assert _legs(engine) == (pytest.approx(0.005), pytest.approx(-0.005))
+    assert rt.cycle_done is False
+    assert engine.tasks[0].disabled is False
+    # 人工 stop 照常全平
+    rt.stop()
     assert _legs(engine) == (0.0, 0.0)
 
 
-# ── 自主模式：rotation 只跑一轮 ──
+# ── 自主模式：rotation 立即开一轮、到期不平、人工 stop 收尾 ──
+# 第九轮原用例断言「到期自动平仓结束一轮」，与第十轮 manual
+# 语义（到期不平仓、等人工 stop）冲突，已按新语义改写。
 
 def test_rotation_manual_only_one_round():
     venues = _venues()
@@ -176,18 +191,23 @@ def test_rotation_manual_only_one_round():
                    "leverage_a": 5, "leverage_b": 5,
                    "arcus_maker": False}})
     rt = engine.tasks[0].runtime
-    engine.tick(now=1000)
+    engine.tick(now=1000)   # 立即开一轮
     assert _legs(engine) == (pytest.approx(0.005), pytest.approx(-0.005))
-    engine.tick(now=1061)   # 到期平仓，第一轮结束
+    engine.tick(now=1061)   # 持有到期：manual 不自动平仓
+    assert _legs(engine) == (pytest.approx(0.005), pytest.approx(-0.005))
+    assert rt.cycle_done is False
+    assert engine.tasks[0].disabled is False
+    rt.stop()               # 人工 stop 全平，本轮结束
     assert _legs(engine) == (0.0, 0.0)
     assert rt.cycle_done is True
+    engine.tick(now=1200)   # 引擎据 cycle_done 停用，不进第二轮
     assert engine.tasks[0].disabled is True
-    engine.tick(now=1200)   # 冷却早过，不进第二轮
     assert _legs(engine) == (0.0, 0.0)
-    assert rt.phase != "open"
 
 
-# ── 自主模式：premium 只做一笔 ──
+# ── 自主模式：premium 首 tick 打一笔、之后不 fire、人工 stop 平 ──
+# 第九轮原用例断言「溢价反转自动反向平仓」，与第十轮 manual
+# 语义（一笔后不再 fire、平仓靠人工 stop）冲突，已按新语义改写。
 
 def test_premium_manual_only_one_cycle():
     base = PaperVenue(venue_id="entropy", prices={"SNDK": 100.0})
@@ -202,16 +222,21 @@ def test_premium_manual_only_one_cycle():
                    "max_order_notional_usd": 500,
                    "reconcile_seconds": 15}})
     rt = engine.tasks[0].runtime
-    engine.tick(now=0)      # 溢价信号 → 开仓 -5/+5
+    engine.tick(now=0)      # 首 tick 立即打一笔配对切片 -5/+5
     pa = engine.executor.position("entropy", "SNDK")
     assert pa is not None and pa.qty == pytest.approx(-5)
-    hedge.set_price("SNDK", 101.0)   # 溢价反转 → 反向一笔平掉
+    hedge.set_price("SNDK", 101.0)   # 溢价反转：manual 不再 fire
     engine.tick(now=1)
+    pa = engine.executor.position("entropy", "SNDK")
+    assert pa is not None and pa.qty == pytest.approx(-5)
+    assert rt.cycle_done is False
+    assert engine.tasks[0].disabled is False
+    rt.stop()               # 人工 stop 全平，本笔结束
     assert engine.executor.position("entropy", "SNDK") is None
     assert engine.executor.position("lighter_rh", "SNDK") is None
     assert rt.cycle_done is True
+    engine.tick(now=2)      # 引擎据 cycle_done 停用，绝不再开
     assert engine.tasks[0].disabled is True
-    engine.tick(now=2)      # 信号还在，也不许再开新仓
     assert engine.executor.position("entropy", "SNDK") is None
 
 
@@ -226,7 +251,10 @@ def test_auto_cycle_scans_opens_cools_rescans():
         "params": {**CARRY_PARAMS, "max_hold_seconds": 50.0,
                    "cooldown_seconds": 5}}, scanner=scanner)
     rt = engine.tasks[0].runtime
-    assert engine.tasks[0].run_mode == "auto"
+    # 第十轮：旧名 auto 归一为 semi_auto（半自动·自动选标）
+    assert engine.tasks[0].run_mode == "semi_auto"
+    assert rt.selection_scope == "pair"
+    assert rt.current_venues == ["arcus", "lighter"]
     assert rt.auto_phase in ("scanning", "running")
 
     engine.tick(now=1000)   # 选标 BTC → 开仓
@@ -301,12 +329,13 @@ def test_auto_grid_uses_price_band_when_no_candles():
 # ── 面板：模式切换文案 + 创建 auto 任务落盘 ──
 
 def test_page_has_run_mode_switch_and_descriptions():
-    assert 'data-mode="manual"' in PAGE_HTML
-    assert 'data-mode="auto"' in PAGE_HTML
-    assert "自主模式" in PAGE_HTML and "全自动模式" in PAGE_HTML
-    assert "不自动重开" in PAGE_HTML          # 自主说明大白话
-    assert "一直循环，点停止才停" in PAGE_HTML  # 全自动说明大白话
-    assert "由系统自动选" in PAGE_HTML        # 选市场区的自动选标注明
+    # 第十轮：四值三模式切换（旧值 auto 已取消，归一为 semi_auto）
+    for m in ("manual", "semi_fixed", "semi_auto", "full_auto"):
+        assert f'data-mode="{m}"' in PAGE_HTML
+    assert "半自动·固定标的" in PAGE_HTML and "半自动·自动选标" in PAGE_HTML
+    assert "立即开仓" in PAGE_HTML            # 自主说明大白话
+    assert "循环到你停止" in PAGE_HTML        # 全自动说明大白话
+    assert "标的由系统自动选" in PAGE_HTML    # 选市场区的自动选标注明
     assert "run_mode" in PAGE_HTML            # 提交带模式
 
 
@@ -368,18 +397,19 @@ def test_panel_create_auto_task_persists_run_mode(panel):
     assert status == 200 and res["ok"] is True
     _, body = _req(base, "/api/tasks")
     t = next(x for x in body["tasks"] if x["name"] == "auto-1")
-    assert t["run_mode"] == "auto"
+    # 第十轮：创建时传旧值 auto，落盘与输出一律归一为 semi_auto
+    assert t["run_mode"] == "semi_auto"
     assert t["auto_phase"] == "scanning"
     assert t["current_symbol"] is None
     assert t["cycles_completed"] == 0
     saved = load_panel_tasks(store)
-    assert saved[0]["run_mode"] == "auto"
+    assert saved[0]["run_mode"] == "semi_auto"
     # 非法模式被拒
     status, res = _req(base, "/api/tasks/create", "POST",
                        token=state.api_token,
                        body={"name": "auto-2", "strategy": "rotation_hedge",
                              "params": ROT_PARAMS, "run_mode": "turbo"})
-    assert status == 400 and "运行模式" in res["error"]
+    assert status == 400 and "run_mode 非法" in res["error"]
 
 
 def test_panel_create_manual_task_default_mode(panel):
@@ -394,3 +424,341 @@ def test_panel_create_manual_task_default_mode(panel):
     assert t["run_mode"] == "manual"
     assert t["auto_phase"] == "" and t["cycles_completed"] == 0
     assert load_panel_tasks(store)[0]["run_mode"] == "manual"
+
+
+# ═══════════ 第十轮：三模式后端 ═══════════
+
+from detsp.core.engine import normalize_run_mode, normalize_run_preset
+
+
+def test_normalize_run_mode_four_values_and_auto_alias():
+    assert normalize_run_mode(None) == "manual"
+    assert normalize_run_mode("") == "manual"
+    assert normalize_run_mode("manual") == "manual"
+    assert normalize_run_mode("semi_fixed") == "semi_fixed"
+    assert normalize_run_mode("semi_auto") == "semi_auto"
+    assert normalize_run_mode("full_auto") == "full_auto"
+    assert normalize_run_mode("auto") == "semi_auto"
+    with pytest.raises(ValueError, match="manual"):
+        normalize_run_mode("turbo")
+    assert normalize_run_preset(None) == "neutral"
+    with pytest.raises(ValueError):
+        normalize_run_preset("wild")
+
+
+def test_modes_normalized_in_config_and_build_task():
+    # config 入口：auto 归一 semi_auto 并写回，run_preset/amount 校验
+    cfg = build_config(env={}, yaml_data={"tasks": [{
+        "name": "c1", "strategy": "funding_carry", "run_mode": "auto",
+        "run_preset": "aggressive", "amount_usd": 500,
+        "params": dict(CARRY_PARAMS)}]})
+    t0 = cfg.tasks[0]
+    assert t0["run_mode"] == "semi_auto"
+    assert t0["run_preset"] == "aggressive"
+    assert t0["amount_usd"] == 500.0
+    for bad in ({"run_mode": "turbo"}, {"run_preset": "wild"},
+                {"amount_usd": -1}, {"amount_usd": "x"}):
+        with pytest.raises(ConfigError):
+            build_config(env={}, yaml_data={"tasks": [{
+                "name": "c1", "strategy": "funding_carry",
+                "params": dict(CARRY_PARAMS), **bad}]})
+    # build_task 入口：四值各归其位（空任务引擎的 executor 上组装；
+    # 直接构造的两个模式用不同标的避开归属 claim 冲突）
+    venues = _venues()
+    cfg2 = build_config(env={}, yaml_data={"tasks": []})
+    eng = Engine.from_config(cfg2, venues, ledger=Ledger())
+    for mode, is_sup, sym in (("manual", False, "BTC"),
+                              ("semi_fixed", False, "ETH"),
+                              ("semi_auto", True, "BTC"),
+                              ("full_auto", True, "ETH")):
+        task = build_task({"name": f"t-{mode}", "strategy": "funding_carry",
+                           "run_mode": mode,
+                           "params": {**CARRY_PARAMS, "symbol": sym}},
+                          eng.executor, eng.risk_cfg,
+                          scanner=FakeScanner([_row("BTC")]))
+        assert task.run_mode == mode
+        assert task.run_preset == "neutral"
+        if is_sup:
+            assert task.runtime.selection_scope == \
+                ("pair" if mode == "semi_auto" else "all_pairs")
+            task.runtime.stop()
+        else:
+            assert task.runtime.single_cycle is (mode == "manual")
+            assert task.runtime.manual_immediate is (mode == "manual")
+    with pytest.raises(ValueError, match="run_preset"):
+        build_task({"name": "bad", "strategy": "funding_carry",
+                    "run_preset": "wild", "params": dict(CARRY_PARAMS)},
+                   eng.executor, eng.risk_cfg)
+
+
+def test_full_auto_occupied_keys_and_config_conflict():
+    full = {"name": "f1", "strategy": "funding_carry",
+            "run_mode": "full_auto", "params": dict(CARRY_PARAMS)}
+    assert task_occupied_keys(full) == {("*", "*")}
+    other = {"name": "m1", "strategy": "funding_carry",
+             "params": {**CARRY_PARAMS, "symbol": "ETH"}}
+    with pytest.raises(ConfigError):
+        build_config(env={}, yaml_data={"tasks": [full, other]})
+    with pytest.raises(ConfigError):
+        build_config(env={}, yaml_data={"tasks": [other, full]})
+
+
+# ── semi_fixed：carry 原生循环（reopen 第二轮不被截断） ──
+
+def test_semi_fixed_carry_reopen_cycles_again():
+    venues = _venues()
+    engine = _engine(venues, {
+        "name": "carry", "strategy": "funding_carry",
+        "run_mode": "semi_fixed",
+        "params": {**CARRY_PARAMS, "max_hold_seconds": 50.0,
+                   "reopen": True, "cooldown_seconds": 30}})
+    rt = engine.tasks[0].runtime
+    assert rt.single_cycle is False and rt.manual_immediate is False
+    engine.tick(now=1000)
+    assert _legs(engine) == (pytest.approx(0.005), pytest.approx(-0.005))
+    engine.tick(now=1051)   # 最长持有到 → 平仓进冷却（原生退出）
+    assert _legs(engine) == (0.0, 0.0)
+    assert rt.cycle_done is False
+    assert engine.tasks[0].disabled is False
+    engine.tick(now=1200)   # 冷却早过、优势还在 → 原生第二轮
+    assert _legs(engine) == (pytest.approx(0.005), pytest.approx(-0.005))
+    assert engine.tasks[0].disabled is False
+
+
+# ── rotation 最小费差门槛（新字段） ──
+
+def _rotation_task(**extra):
+    params = {"symbol": "BTC", "venue_a": "arcus", "venue_b": "lighter",
+              "notional_usd": 300, "hold_seconds": 60,
+              "hold_min_seconds": 0, "hold_max_seconds": 0,
+              "cooldown_seconds": 30, "leverage_a": 5, "leverage_b": 5,
+              "arcus_maker": False}
+    params.update(extra)
+    return {"name": "hedge", "strategy": "rotation_hedge",
+            "run_mode": "semi_fixed", "params": params}
+
+
+def test_rotation_min_entry_edge_blocks_then_opens():
+    venues = _venues()   # 费差 4 bps/小时
+    engine = _engine(venues, _rotation_task(
+        min_entry_edge_bps_per_hour=10.0))
+    rt = engine.tasks[0].runtime
+    engine.tick(now=1000)   # 4 < 10：留在 idle，不开、不报错
+    assert _legs(engine) == (0.0, 0.0)
+    assert rt.phase == "idle"
+    assert rt.last_error == ""
+    venues["lighter"].set_funding("BTC", 0.002)   # 费差变 19 ≥ 10
+    engine.tick(now=1001)
+    assert _legs(engine) == (pytest.approx(0.005), pytest.approx(-0.005))
+    assert rt.phase == "open"
+
+
+def test_rotation_min_entry_edge_zero_is_original_behavior():
+    venues = _venues()
+    engine = _engine(venues, _rotation_task(
+        min_entry_edge_bps_per_hour=0.0))
+    engine.tick(now=1000)
+    assert _legs(engine) == (pytest.approx(0.005), pytest.approx(-0.005))
+
+
+def test_rotation_manual_immediate_ignores_min_entry_edge():
+    venues = _venues()
+    task = _rotation_task(min_entry_edge_bps_per_hour=10.0)
+    task.pop("run_mode")   # 缺省 manual
+    engine = _engine(venues, task)
+    engine.tick(now=1000)   # 人工开仓不等门槛
+    assert _legs(engine) == (pytest.approx(0.005), pytest.approx(-0.005))
+
+
+# ── premium 回归平仓带（新字段） ──
+
+def _premium_engine(close_band=0.0, run_mode="semi_fixed"):
+    base = PaperVenue(venue_id="entropy", prices={"SNDK": 100.0})
+    hedge = PaperVenue(venue_id="lighter_rh", prices={"SNDK": 99.0})
+    venues = {"entropy": base, "lighter_rh": hedge}
+    engine = _engine(venues, {
+        "name": "arb", "strategy": "premium_arb", "run_mode": run_mode,
+        "params": {"symbol": "SNDK", "base_venue": "entropy",
+                   "hedge_venue": "lighter_rh", "midline_bps": 0,
+                   "upper_bps": 50, "lower_bps": 50, "persist_seconds": 0,
+                   "max_position_usd": 1000,
+                   "max_order_notional_usd": 500,
+                   "reconcile_seconds": 15,
+                   "close_band_bps": close_band}})
+    return engine, hedge
+
+
+def _premium_legs(engine):
+    pb = engine.executor.position("entropy", "SNDK")
+    ph = engine.executor.position("lighter_rh", "SNDK")
+    return (pb.qty if pb else 0.0), (ph.qty if ph else 0.0)
+
+
+def test_premium_close_band_flattens_on_regression():
+    engine, hedge = _premium_engine(close_band=20.0)
+    rt = engine.tasks[0].runtime
+    engine.tick(now=0)      # 越带开仓 -5/+5
+    assert _premium_legs(engine) == (pytest.approx(-5), pytest.approx(5))
+    hedge.set_price("SNDK", 100.05)   # 价差回归到 ≈-5 bps，进带内
+    engine.tick(now=1)
+    assert _premium_legs(engine) == (0.0, 0.0)
+    assert rt._last_fire == 1   # 复用执行冷却：平仓刷新 _last_fire
+
+
+def test_premium_close_band_sets_cycle_done_in_manual():
+    engine, hedge = _premium_engine(close_band=20.0, run_mode="manual")
+    rt = engine.tasks[0].runtime
+    engine.tick(now=0)      # manual 首笔 -5/+5
+    assert _premium_legs(engine) == (pytest.approx(-5), pytest.approx(5))
+    hedge.set_price("SNDK", 100.05)
+    engine.tick(now=1)      # 回归平仓 + single_cycle 置 cycle_done
+    assert _premium_legs(engine) == (0.0, 0.0)
+    assert rt.cycle_done is True
+    assert rt._last_fire == 1
+
+
+def test_premium_close_band_zero_never_triggers():
+    engine, hedge = _premium_engine(close_band=0.0)
+    engine.tick(now=0)
+    assert _premium_legs(engine) == (pytest.approx(-5), pytest.approx(5))
+    hedge.set_price("SNDK", 100.05)   # 同样回归，带宽 0=关：不平
+    engine.tick(now=1)
+    assert _premium_legs(engine) == (pytest.approx(-5), pytest.approx(5))
+
+
+# ── specs 五段映射 ──
+
+def test_section_map_covers_every_field_exactly_once():
+    import dataclasses
+    import string as _string
+
+    from detsp.strategies.specs import (
+        PAGE_META, PARAMS_CLASSES, SECTION_MAP, SECTION_ORDER,
+        strategy_specs)
+
+    assert SECTION_ORDER == ("交易对象", "开仓条件", "平仓条件",
+                             "平仓后怎么办", "保护")
+    specs = {s["strategy"]: s for s in strategy_specs()}
+    for stype, cls in PARAMS_CLASSES.items():
+        names = [f.name for f in dataclasses.fields(cls)]
+        mapping = SECTION_MAP[stype]
+        # 每字段恰好一段（不多不少），段值合法
+        assert set(mapping) == set(names), stype
+        assert set(mapping.values()) <= set(SECTION_ORDER), stype
+        # specs 输出的 section 与映射一致
+        for f in specs[stype]["fields"]:
+            assert f["section"] == mapping[f["name"]]
+        # 段总结：键是段名（grid 无平仓后段）、占位符都是真字段
+        summaries = specs[stype]["page"]["section_summaries"]
+        assert summaries == PAGE_META[stype]["section_summaries"]
+        expect_keys = {"开仓条件", "平仓条件", "保护"}
+        if stype != "hedged_grid":
+            expect_keys.add("平仓后怎么办")
+        assert set(summaries) == expect_keys, stype
+        for seg, tpl in summaries.items():
+            holders = [fn for _, fn, _, _ in
+                       _string.Formatter().parse(tpl) if fn]
+            assert holders, (stype, seg)
+            assert set(holders) <= set(names), (stype, seg, holders)
+
+
+# ── full_auto：跨所选组合 + 内层组装 ──
+
+class FakeBestScanner:
+    """full_auto 假扫描器：best 第一行即选中组合。"""
+
+    def __init__(self, rows):
+        self.rows = list(rows)
+
+    def best(self, strategy, limit=5):
+        return {"strategy": strategy, "rows": list(self.rows)}
+
+    def pairs(self, venue_a, venue_b, strategy):
+        return {"rows": []}
+
+    def candles(self, venue_id, symbol):
+        return {"ok": False, "error": "假扫描器无 K 线"}
+
+
+def test_full_auto_premium_assembles_from_best_row():
+    base = PaperVenue(venue_id="entropy", prices={"SNDK": 100.0})
+    hedge = PaperVenue(venue_id="lighter_rh", prices={"SNDK": 99.0})
+    venues = {"entropy": base, "lighter_rh": hedge}
+    scanner = FakeBestScanner([{
+        "symbol": "SNDK", "venue_a": "entropy", "venue_b": "lighter_rh",
+        "signed_spread_bps": 123.456, "spread_bps": 123.456,
+        "price_a": 100.0, "price_b": 99.0, "has_price": True,
+        "suspect": False}])
+    engine = _engine(venues, {
+        "name": "arb-full", "strategy": "premium_arb",
+        "run_mode": "full_auto", "run_preset": "neutral",
+        "params": {"max_position_usd": 1000,
+                   "max_order_notional_usd": 500}}, scanner=scanner)
+    task = engine.tasks[0]
+    assert task.run_mode == "full_auto" and task.run_preset == "neutral"
+    rt = task.runtime
+    engine.tick(now=0)
+    assert rt.auto_phase == "running"
+    assert rt.current_symbol == "SNDK"
+    assert rt.current_venues == ["entropy", "lighter_rh"]
+    inner = rt._inner
+    assert inner is not None and inner.single_cycle is True
+    assert inner.params.base_venue == "entropy"
+    assert inner.params.hedge_venue == "lighter_rh"
+    assert inner.params.symbol == "SNDK"
+    # 中枢 = 快照带符号价差取整到 0.1；上下带没给 → 系统默认 10/10
+    assert inner.params.midline_bps == pytest.approx(123.5)
+    assert inner.params.upper_bps == 10.0
+    assert inner.params.lower_bps == 10.0
+    rt.stop()
+
+
+def test_full_auto_grid_qty_from_amount_usd():
+    venues = _venues()
+    scanner = FakeBestScanner([{
+        "symbol": "BTC", "venue": "arcus", "venue_b": "lighter",
+        "price": 60_000.0, "volatility_pct": 3.0, "suspect": False}])
+    engine = _engine(venues, {
+        "name": "grid-full", "strategy": "hedged_grid",
+        "run_mode": "full_auto", "amount_usd": 6_000.0,
+        "params": {"grid_count": 10}}, scanner=scanner)
+    rt = engine.tasks[0].runtime
+    engine.tick(now=1000)
+    assert rt.auto_phase == "running"
+    assert rt.current_venues == ["arcus", "lighter"]
+    inner = rt._inner
+    assert inner is not None
+    # 每格量 = 总名义 6000 /（格数 10 × 现价 60000）= 0.01
+    assert inner.params.qty_per_grid == pytest.approx(0.01)
+    assert inner.params.lower_price == pytest.approx(54_000.0)
+    assert inner.params.upper_price == pytest.approx(66_000.0)
+    rt.stop()
+
+
+def test_full_auto_grid_without_amount_or_qty_stays_scanning():
+    venues = _venues()
+    scanner = FakeBestScanner([{
+        "symbol": "BTC", "venue": "arcus", "venue_b": "lighter",
+        "price": 60_000.0, "volatility_pct": 3.0, "suspect": False}])
+    engine = _engine(venues, {
+        "name": "grid-full", "strategy": "hedged_grid",
+        "run_mode": "full_auto", "params": {}}, scanner=scanner)
+    rt = engine.tasks[0].runtime
+    engine.tick(now=1000)
+    assert rt.auto_phase == "scanning"
+    assert rt._inner is None
+    assert "缺少每格数量" in rt.last_error
+
+
+def test_full_auto_no_candidate_stays_scanning():
+    venues = _venues()
+    scanner = FakeBestScanner([])
+    engine = _engine(venues, {
+        "name": "carry-full", "strategy": "funding_carry",
+        "run_mode": "full_auto",
+        "params": {"notional_usd": 300}}, scanner=scanner)
+    rt = engine.tasks[0].runtime
+    engine.tick(now=1000)
+    assert rt.auto_phase == "scanning"
+    assert rt.current_symbol is None
+    assert rt.last_error

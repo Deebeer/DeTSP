@@ -33,6 +33,41 @@ from .registry import OwnershipRegistry
 from .risk import ErrorCounter, KillSwitch, RiskHaltError
 
 
+RUN_MODES = ("manual", "semi_fixed", "semi_auto", "full_auto")
+RUN_PRESETS = ("conservative", "neutral", "aggressive")
+
+
+def normalize_run_mode(value) -> str:
+    """运行模式归一（单一事实源，engine 与 config 共用）。
+
+    None/缺省 -> manual（自主）；旧名 auto -> semi_auto（半自动②，
+    第九轮全自动）；其余合法值原样；非法值抛 ValueError。
+    """
+    if value is None or value == "":
+        return "manual"
+    v = str(value)
+    if v == "auto":
+        return "semi_auto"
+    if v in RUN_MODES:
+        return v
+    raise ValueError(
+        f"run_mode 非法：{value}，只许 manual（自主）/ "
+        f"semi_fixed（半自动·固定标的）/ semi_auto（半自动·自动选标）"
+        f"/ full_auto（全自动），auto 是 semi_auto 的旧名")
+
+
+def normalize_run_preset(value) -> str:
+    """配置预设归一：缺省 neutral，三档之外抛 ValueError。"""
+    if value is None or value == "":
+        return "neutral"
+    v = str(value)
+    if v in RUN_PRESETS:
+        return v
+    raise ValueError(
+        f"run_preset 非法：{value}，只许 conservative（保守）/ "
+        f"neutral（中性）/ aggressive（激进）")
+
+
 @dataclass
 class Task:
     """一个可执行任务：策略运行时 + 独立错误计数。"""
@@ -41,9 +76,13 @@ class Task:
     strategy_type: str
     runtime: object  # HedgedGridStrategy / RotationHedgeStrategy /
     # PremiumArbStrategy / FundingCarryStrategy / AutoCycleRuntime
-    # 运行模式：manual=自主（单笔，平仓后任务结束）/ auto=全自动
-    # （监督器自动选标循环，见 core.auto_cycle）
+    # 运行模式（归一后）：manual=自主 / semi_fixed=半自动·固定标的
+    # / semi_auto=半自动·自动选标 / full_auto=全自动
     run_mode: str = "manual"
+    # 配置预设档位（仅 full_auto 组装内层参数时用，其余模式保留值）
+    run_preset: str = "neutral"
+    # 全自动中性网格的总名义（USD，可选）：折算 qty_per_grid 用
+    amount_usd: float | None = None
     errors: ErrorCounter = field(default_factory=ErrorCounter)
     last_error: str = ""
     disabled: bool = False
@@ -59,9 +98,15 @@ def task_occupied_keys(task_cfg: dict) -> set[tuple[str, str]]:
         return str((task_cfg.get("params") or {}).get(key) or "")
 
     strat = task_cfg.get("strategy")
-    # 全自动任务不绑单个标的（监督器动态选标）：占用口径用通配
-    # "*"——该任务的两个场所不许再被任何其他任务占用
-    sym = "*" if task_cfg.get("run_mode") == "auto" else _tf("symbol")
+    # 选标类任务不绑单个标的（监督器动态选标）：占用口径用通配
+    # "*"——semi_auto 的两个场所不许再被任何其他任务占用；
+    # full_auto 两腿也未知，对全部场所通配占用，记 ("*", "*")
+    # （冲突判定须把 venue="*" 也当通配，见 core.config 同口径）
+    _rm = task_cfg.get("run_mode")
+    _rm = "semi_auto" if _rm == "auto" else _rm
+    if _rm == "full_auto":
+        return {("*", "*")}
+    sym = "*" if _rm == "semi_auto" else _tf("symbol")
     used: set[tuple[str, str]] = set()
     if strat == "hedged_grid":
         used.add((_tf("grid_venue"), sym))
@@ -119,22 +164,41 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg,
     funding_carry。已移除的旧策略名（grid / volume_loop）与未知
     名字一样报错，并明确列出可用策略，避免用户对着旧配置猜。
 
-    运行模式（task 顶层 run_mode，不进 params）：manual=自主
-    （缺省）——运行时设 single_cycle，一笔平仓后引擎停用任务；
-    auto=全自动——运行时是 AutoCycleRuntime 监督器，由它自动
-    选标、逐笔组装内层单笔运行时循环运行（scanner 为行情扫描
-    器，缺省时监督器内部惰性自建）。
+    运行模式（task 顶层 run_mode，不进 params，归一见
+    normalize_run_mode；run_preset/amount_usd 同为顶层字段）：
+    - manual=自主（缺省）：运行时设 single_cycle + manual_immediate，
+      立即开一笔、平仓靠人工，安全平仓后引擎停用任务；
+    - semi_fixed=半自动·固定标的：不设 single_cycle/manual_immediate，
+      策略原生循环（carry 保留用户 reopen 原值）；
+    - semi_auto=半自动·自动选标（旧名 auto）：AutoCycleRuntime
+      固定两腿场所自动选标循环（selection_scope="pair"）；
+    - full_auto=全自动：AutoCycleRuntime 跨全部场所对选组合
+      （selection_scope="all_pairs"），内层参数按
+      用户实填 > PRESETS[run_preset] > dataclass 默认组装。
     """
     from ..strategies.specs import validate_params
 
     available = "hedged_grid / premium_arb / rotation_hedge / funding_carry"
     name = str(task_cfg.get("name") or task_cfg.get("strategy") or "task")
     stype = task_cfg.get("strategy")
-    run_mode = task_cfg.get("run_mode") or "manual"
-    if run_mode not in ("manual", "auto"):
-        raise ValueError(
-            f"任务 {name} 的 run_mode 非法：{run_mode}，"
-            f"只许 manual（自主）/ auto（全自动）")
+    try:
+        run_mode = normalize_run_mode(task_cfg.get("run_mode"))
+    except ValueError as e:
+        raise ValueError(f"任务 {name} 的 {e}") from e
+    try:
+        run_preset = normalize_run_preset(task_cfg.get("run_preset"))
+    except ValueError as e:
+        raise ValueError(f"任务 {name} 的 {e}") from e
+    amount_raw = task_cfg.get("amount_usd")
+    if amount_raw is None:
+        amount_usd = None
+    else:
+        if isinstance(amount_raw, bool) or \
+                not isinstance(amount_raw, (int, float)) or \
+                float(amount_raw) <= 0:
+            raise ValueError(
+                f"任务 {name} 的 amount_usd 必须是大于 0 的数字")
+        amount_usd = float(amount_raw)
     params_raw = dict(task_cfg.get("params") or {})
     # venue/symbol 也可写在 task 顶层，合并进参数（params 内优先）
     for k in ("venue", "symbol", "venue_a", "venue_b",
@@ -145,15 +209,34 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg,
     if stype in ("grid", "volume_loop"):
         raise ValueError(
             f"策略 {stype} 已移除，可用策略：{available}")
-    # 全自动任务不写 symbol（监督器逐轮选标）、中性网格不写区间
-    # 上下限（监督器逐轮按 K 线/价格定）：这两类「监督器供给
-    # 字段」在校验前填占位让必填检查通过，校验后从 clean 摘除，
-    # 用户实填字段仍走全量校验，口径不放松
+    # 选标类任务不写 symbol（监督器逐轮选标）、中性网格不写区间
+    # 上下限（监督器逐轮按 K 线/价格定）：这类「监督器供给字段」
+    # 在校验前填占位让必填检查通过，校验后从 clean 摘除，用户
+    # 实填字段仍走全量校验，口径不放松。full_auto 连两腿场所、
+    # 溢价带与网格每格量都可由监督器供给（选标行/系统默认/
+    # amount_usd 折算），占位面更大，口径相同
     auto_supplied: set[str] = set()
-    if run_mode == "auto":
+    if run_mode in ("semi_auto", "full_auto"):
         supplied = {"symbol": "AUTO"}
         if stype == "hedged_grid":
             supplied.update({"lower_price": 1.0, "upper_price": 2.0})
+        if run_mode == "full_auto":
+            _venue_ph = {
+                "hedged_grid": {"grid_venue": "arcus",
+                                "hedge_venue": "lighter"},
+                "rotation_hedge": {"venue_a": "arcus",
+                                   "venue_b": "lighter"},
+                "funding_carry": {"venue_a": "arcus",
+                                  "venue_b": "lighter"},
+                "premium_arb": {"base_venue": "arcus",
+                                "hedge_venue": "lighter"},
+            }.get(str(stype), {})
+            supplied.update(_venue_ph)
+            if stype == "hedged_grid":
+                supplied.update({"qty_per_grid": 0.01})
+            if stype == "premium_arb":
+                supplied.update({"midline_bps": 0.0, "upper_bps": 10.0,
+                                 "lower_bps": 10.0})
         for k, v in supplied.items():
             if k not in params_raw:
                 params_raw[k] = v
@@ -168,23 +251,33 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg,
             f"未知策略类型：{stype}，可用策略：{available}")
     for k in auto_supplied:
         clean.pop(k, None)
-    if run_mode == "auto":
+    if run_mode in ("semi_auto", "full_auto"):
         # 延迟导入避免与 core.auto_cycle 循环依赖
         from .auto_cycle import AutoCycleRuntime
 
         runtime = AutoCycleRuntime(
             strategy_type=stype, params=clean, executor=executor,
-            risk_cfg=risk_cfg, owner=name, scanner=scanner)
+            risk_cfg=risk_cfg, owner=name, scanner=scanner,
+            selection_scope="pair" if run_mode == "semi_auto"
+            else "all_pairs",
+            run_preset=run_preset, amount_usd=amount_usd)
     else:
         runtime = build_runtime(stype, clean, executor, risk_cfg, name)
-        # 自主模式：只跑一笔，平仓后策略置 cycle_done，引擎随即
-        # 停用任务（见 Engine.tick），不自动重开
-        runtime.single_cycle = True
-        if stype == "funding_carry":
-            runtime.recovery_notes.append(
-                "自主模式：本笔平仓后任务结束，不按 reopen 参数自动重开")
+        if run_mode == "manual":
+            # 自主模式：只跑一笔 + 立即开仓语义（manual_immediate，
+            # 各策略 tick 内实现）；安全平仓置 cycle_done 后引擎
+            # 停用任务（见 Engine.tick），不自动重开
+            runtime.single_cycle = True
+            runtime.manual_immediate = True
+            if stype == "funding_carry":
+                runtime.recovery_notes.append(
+                    "自主模式：立即开一笔，本笔平仓后任务结束，"
+                    "不按 reopen 参数自动重开")
+        # semi_fixed：什么都不设——策略原生循环，carry 的
+        # reopen 用用户原值，rotation/premium/grid 原生节奏
     return Task(name=name, strategy_type=str(stype), runtime=runtime,
-                run_mode=run_mode)
+                run_mode=run_mode, run_preset=run_preset,
+                amount_usd=amount_usd)
 
 
 @dataclass

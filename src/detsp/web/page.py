@@ -20,19 +20,27 @@ Top 5 合并、按机会值 % 降序，点行跳策略页并带入两腿与
 （含 page 元数据：两腿字段、主金额、primary、预设三档、运作
 方式文案）生成，流程仿 Mob Exchange 的 Delta 中性配置面板，
 自上而下：页头（策略名 + 说明 + 「运作方式」折叠）→ 运行模式
-（第九轮：自主/全自动两段切换，各配大白话说明；切全自动时
-选市场的币种下拉禁用并注明由系统自动选标，提交带 run_mode，
-任务列表与策略记录的任务名带模式徽标、全自动任务显示当前
-标的与已循环轮数）→ 订单腿
+（第十轮：四值三模式——自主 manual / 半自动·固定标的
+semi_fixed / 半自动·自动选标 semi_auto / 全自动 full_auto，
+各配大白话说明；旧值 auto 按 semi_auto 处理；semi_auto 时
+选市场的币种下拉禁用并注明由系统自动选标，full_auto 时隐藏
+订单腿与选市场、只留金额 + 风险档 + 系统参数只读展示，提交
+带 run_mode（full_auto 另带 run_preset，网格另带 amount_usd），
+任务列表与策略记录的任务名带模式徽标、自动选标类任务显示
+当前标的与已循环轮数）→ 订单腿
 （先选两所，每行带该所可用余额与该标的最高杠杆/保证金模式）
 → 金额（自由输入；网格是目标总名义，反推每格量）→ 选市场
 （统计行「共同 N · A所上市 X · B所上市 Y」+ 币种下拉 + 所选
 标的在两腿的实际价格行，价格行下还有一行「标的数据」指标条，
 按策略列所选标的的资金费/费差/年化、价差、波动与 24h 高低等
 关键指标，供填配置时参考）→ 配置（一个区块：保守/中性/激进/
-自定义预设 + 常用字段；预设只套结构参数、绝不改用户填的金额，
-金额派生量按比例换算；区块内下方是可折叠的「自动化配置」子
-区，含其余全部字段，按开仓/平仓/保护/其他分组）→ 交易预览
+自定义预设 + 按五段组织的字段——交易对象 / 开仓条件 / 平仓
+条件 / 平仓后怎么办 / 保护，段序与段归属来自 specs 的
+field.section，page.section_summaries 给每段一句随表单值实时
+更新的总结句；保护段默认折叠，其余段常显；specs 尚未带
+section 时回退旧分组渲染（primary 常用字段 + adv_group 分组），
+不白屏；预设只套结构参数、绝不改用户填的金额，金额派生量
+按比例换算）→ 交易预览
 （按平台分列标记价/预估执行价/所需保证金 + 入场条件指示 +
 所填杠杆超过某所该标的上限时的黄色警告）→ 运行按钮 →
 运行中仓位（本策略任务与持仓，含启停改删/平仓）。运行中的
@@ -168,6 +176,12 @@ details div{font-size:12px;padding:6px 4px;line-height:1.8}
 .symData .sdLab{color:var(--mut)}
 .stateRow{display:flex;gap:16px;align-items:center;margin:10px 0}
 .advBox{margin-top:16px;border-top:1px dashed var(--line);padding-top:10px}
+.cfgSec{margin:14px 0 4px;border-top:1px dashed var(--line);padding-top:10px}
+.cfgSec h4{margin:0 0 2px;font-size:12px;color:var(--bright);letter-spacing:.05em}
+details.cfgSec summary{cursor:pointer;color:var(--bright);font-size:12px;letter-spacing:.05em}
+.secSummary{color:var(--mut);font-size:12px;margin:2px 0 6px;line-height:1.55}
+.fullAutoCfg{margin-top:12px;border-top:1px dashed var(--line);padding-top:10px}
+.faParams{line-height:1.9;font-size:12px}
 </style>
 </head>
 <body>
@@ -323,8 +337,8 @@ return names.map(g=>"<fieldset><legend>"+esc(g)+"</legend>"+
 groups[g].map(f=>renderField(f,(values&&values[f.name]!==undefined)?values[f.name]:f.default,symbolSelect)).join("")+"</fieldset>").join("");
 }
 
-// 自动化配置子区专用渲染：按开仓 / 平仓 / 保护 / 其他语义分组
-//（specs 的 adv_group），与弹窗用的 fieldsHtml（按 group）分开
+// 兜底分组渲染（specs 无 section 时用）：按开仓 / 平仓 / 保护 /
+// 其他语义分组（specs 的 adv_group），与弹窗 fieldsHtml 分开
 function advFieldsHtml(fields){
 const order=["开仓","平仓","保护","其他"];
 const groups={};
@@ -332,6 +346,121 @@ fields.forEach(f=>{const g=f.adv_group||"其他";(groups[g]=groups[g]||[]).push(
 return order.filter(g=>groups[g]&&groups[g].length).map(g=>
 "<fieldset><legend>"+esc(g)+"</legend>"+
 groups[g].map(f=>renderField(f,f.default,false)).join("")+"</fieldset>").join("");
+}
+
+// ---------- 配置五段（第十轮）：交易对象 / 开仓条件 / 平仓条件 /
+// 平仓后怎么办 / 保护。段归属来自 specs 的 field.section；任一
+// 字段都没带 section 时返回 null，调用方回退上面的旧分组渲染
+//（primary + adv_group），保证后端未就绪的中间状态不白屏。
+const SECTION_ORDER=["交易对象","开仓条件","平仓条件","平仓后怎么办","保护"];
+function isConfigField(spec, f){
+const pg=spec.page;
+return pg.venue_fields.indexOf(f.name)<0&&f.name!=="symbol"&&f.name!==pg.amount;
+}
+function configFieldHtml(f){
+let html=renderField(f, f.default, false);
+// 网格 manual 例外标记：out_of_range_action 是网格唯一的退出
+// 方式，manual 隐藏平仓段时靠这个标记单独豁免显示它一个字段
+if(f.name==="out_of_range_action")
+html=html.replace('<label class="fld">',
+'<label class="fld" data-manual-keep="1">');
+return html;
+}
+function sectionsHtml(spec, configFields){
+if(!configFields.some(f=>f.section)) return null;
+const groups={};
+configFields.forEach(f=>{const g=f.section||"交易对象";
+(groups[g]=groups[g]||[]).push(f)});
+return SECTION_ORDER.filter(g=>groups[g]&&groups[g].length).map(g=>{
+const inner='<p class="secSummary" data-sec-summary="'+esc(g)+'" style="display:none"></p>'+
+'<div class="pform">'+groups[g].map(configFieldHtml).join("")+"</div>";
+if(g==="保护")   // 保护段默认折叠，其余段常显
+return '<details class="cfgSec" data-section="'+esc(g)+'"><summary>'+
+esc(g)+"</summary>"+inner+"</details>";
+return '<div class="cfgSec" data-section="'+esc(g)+'"><h4>'+esc(g)+
+"</h4>"+inner+"</div>";
+}).join("");
+}
+function legacyConfigHtml(primaryRest, advanced){
+return (primaryRest.length?'<div class="pform">'+
+primaryRest.map(f=>renderField(f,f.default,false)).join("")+"</div>":"")+
+'<details class="advBox"><summary>其余字段（按开仓 / 平仓 / 保护 / 其他分组）</summary>'+
+'<div class="aform">'+advFieldsHtml(advanced)+"</div></details>";
+}
+
+// ---------- 段总结句：模板 {字段名} 占位符 → 当前表单值 ----------
+// 数值原样、布尔开/关、枚举显示选项文案；0 值只做通用处理：
+// 字段说明里写了「0=不限」显示不限、写了「0=关」显示关，不为
+// 单个字段写死。模板缺失（section_summaries 没有该段）不显示。
+function formatSummaryValue(spec, name, v){
+const f=spec.fields.find(x=>x.name===name);
+if(v==null||v==="") return "—";
+if(typeof v==="boolean"||(f&&f.type==="bool")) return v?"开":"关";
+if(f&&f.type==="enum"&&f.options){
+const o=f.options.find(x=>x.value===v); if(o) return o.label;
+}
+const num=Number(v);
+if(typeof v!=="object"&&v!==""&&!isNaN(num)){
+if(num===0&&f){
+const d=(f.desc||"")+" "+(f.label||"");
+if(d.indexOf("0=不限")>=0) return "不限";
+if(d.indexOf("0=关")>=0) return "关";
+}
+return String(v);
+}
+return String(v);
+}
+function fillSummaryTemplate(spec, tpl, values){
+return String(tpl).replace(/\\{([a-zA-Z0-9_]+)\\}/g,(m, name)=>
+formatSummaryValue(spec, name, values?values[name]:undefined));
+}
+function currentFormValues(S){
+const values={};
+S.spec.fields.forEach(f=>{if(f.default!=null) values[f.name]=f.default});
+Object.assign(values, collectFrom(S.root, S.spec));
+return values;
+}
+// 全自动的总结句/只读参数取值：该档预设（page.presets）合并
+// Params 默认，金额派生量与 applyPreset 同口径按比例换算
+function mergedPresetValues(S){
+const values={};
+S.spec.fields.forEach(f=>{if(f.default!=null) values[f.name]=f.default});
+Object.assign(values, (S.spec.page.presets||{})[S.runPreset||"neutral"]||{});
+const ratios=S.spec.page.amount_ratios||{}, amtField=S.spec.page.amount;
+for(const fname in ratios){
+const ratio=(ratios[fname]||{})[S.runPreset||"neutral"];
+const amt=amtField?numField(S, amtField):null;
+if(ratio!=null&&amt!=null) values[fname]=Math.round(amt*ratio*100)/100;
+}
+return values;
+}
+function updateSectionSummaries(st){
+const S=SPAGES[st]; if(!S) return;
+const sums=(S.spec.page&&S.spec.page.section_summaries)||{};
+const vals=S.runMode==="full_auto"?mergedPresetValues(S):currentFormValues(S);
+S.root.querySelectorAll("[data-sec-summary]").forEach(el=>{
+if(el.closest(".fullAutoCfg")) return;   // 全自动区自己渲染
+const sec=el.getAttribute("data-sec-summary"), tpl=sums[sec];
+if(!tpl){el.style.display="none"; el.textContent=""; return}
+el.textContent=fillSummaryTemplate(S.spec, tpl, vals);
+el.style.display=el.dataset.forceHide==="1"?"none":"";
+});
+renderFullAutoCfg(st, vals, sums);
+}
+function renderFullAutoCfg(st, valsOpt, sumsOpt){
+const S=SPAGES[st]; if(!S) return;
+const sums=sumsOpt||(S.spec.page&&S.spec.page.section_summaries)||{};
+const box=S.root.querySelector(".fullAutoSums"); if(!box) return;
+const vals=valsOpt||mergedPresetValues(S);
+box.innerHTML=["开仓条件","平仓条件","平仓后怎么办","保护"].map(sec=>{
+const tpl=sums[sec]; if(!tpl) return "";
+return '<p class="secSummary">'+esc(sec)+"："+
+esc(fillSummaryTemplate(S.spec, tpl, vals))+"</p>";
+}).join("");
+const fa=S.root.querySelector(".faParams");
+if(fa) fa.innerHTML=S.spec.fields.filter(f=>isConfigField(S.spec, f)).map(f=>
+esc(f.label)+"："+esc(formatSummaryValue(S.spec, f.name, vals[f.name]))
+).join("<br>");
 }
 
 function buildForm(st, values){
@@ -628,6 +757,14 @@ if(!root) return;
 const amtField=pg.amount?fieldOf(spec, pg.amount):null;
 const primaryRest=spec.fields.filter(f=>f.primary&&pg.venue_fields.indexOf(f.name)<0&&f.name!=="symbol"&&f.name!==pg.amount);
 const advanced=spec.fields.filter(f=>!f.primary&&pg.venue_fields.indexOf(f.name)<0);
+// 配置区字段集合：两腿场所、symbol、金额主字段已在订单腿/
+// 金额/选市场区展示，不重复渲染；其余全部按五段渲染（或回退）
+const configFields=spec.fields.filter(f=>isConfigField(spec, f));
+const secHtml=sectionsHtml(spec, configFields);
+const configInner=secHtml!==null?secHtml:legacyConfigHtml(primaryRest, advanced);
+const runPresetBtns=["conservative","neutral","aggressive"].map(k=>
+'<button data-run-preset="'+k+'"'+(k==="neutral"?' class="on"':"")+">"+
+({conservative:"保守",neutral:"中性",aggressive:"激进"})[k]+"</button>").join("");
 const steps=(pg.how_it_works||[]).map(s=>"<li>"+esc(s)+"</li>").join("");
 const amtHtml=amtField
 ? '<div class="amtRow"><div class="amtMain">'+renderField(amtField, amtField.default, false, pg.amount_desc||"")+"</div></div>"
@@ -650,26 +787,34 @@ root.innerHTML=
 "<h2>"+esc(spec.title)+'</h2><p class="muted">'+esc(spec.blurb)+"</p>"+
 '<details class="block howBox"><summary>运作方式</summary><ol>'+steps+"</ol></details>"+
 '<div class="block"><h3>运行模式</h3>'+
-'<div class="modeRow"><button data-mode="manual" class="on">自主模式</button><button data-mode="auto">全自动模式</button></div>'+
+'<div class="modeRow"><button data-mode="manual" class="on">自主</button><button data-mode="semi_fixed">半自动·固定标的</button><button data-mode="semi_auto">半自动·自动选标</button><button data-mode="full_auto">全自动</button></div>'+
 '<p class="muted modeDesc"></p></div>'+
-'<div class="block"><h3>订单腿</h3><div class="legs">'+legRow(0)+legRow(1)+"</div>"+
+'<div class="block fullAutoNote" style="display:none"><p class="muted">全自动：两腿和标的都由系统选，你只选策略、在下面填金额、选风险档。</p></div>'+
+'<div class="block legsBlock"><h3>订单腿</h3><div class="legs">'+legRow(0)+legRow(1)+"</div>"+
 '<p class="muted">先选两所：下面的「选市场」会列出这两所共同上市的全部标的并按策略排序。方向由所选标的的机会自动定；金额与下方主金额联动（两腿自动配平，只读），数量按现价实时换算；每条腿下方显示该所可用余额（权益）与该标的在该所的最高杠杆/保证金模式（各所各标的不同、有的仅逐仓；未知则显示未知），随数据刷新更新。</p></div>'+
-'<div class="block"><h3>金额</h3>'+amtHtml+"</div>"+
-'<div class="block"><span class="upd pairsUpd"></span><h3>选市场</h3>'+
+'<div class="block amountBlock"><h3>金额</h3>'+amtHtml+"</div>"+
+'<div class="block marketBlock"><span class="upd pairsUpd"></span><h3>选市场</h3>'+
 '<div class="pairsStats muted"></div>'+
-'<p class="muted autoPickNote" style="display:none">全自动模式：标的由系统自动选——每次开仓都按当前策略口径选排第一的共同标的，下方下拉不用选。</p>'+
+'<p class="muted autoPickNote" style="display:none">半自动·自动选标：标的由系统自动选——每轮开仓都按当前策略口径重新选排第一的共同标的，下方下拉不用选。</p>'+
 '<div class="symWrap"><label>币种 <select class="symSel" data-f="symbol"></select></label></div>'+
 '<div class="pairPrices muted"></div>'+
 '<div class="symData"></div>'+
 '<p class="bad listNote"></p><div class="gridSug"></div></div>'+
-'<div class="block"><h3>配置</h3>'+
-'<p class="muted">先在「金额」区填好金额，再点预设：只套结构参数（杠杆/门槛/格数等），金额不改（中性 = 原仓对齐默认值）；改动任何字段自动切到「自定义」。</p>'+
+'<div class="block configBlock"><h3>配置</h3>'+
+'<div class="configFields">'+
+'<p class="muted">先在「金额」区填好金额，再点预设：只套结构参数（杠杆/门槛/格数等），金额不改（中性 = 原仓对齐默认值）；改动任何字段自动切到「自定义」。配置按五段排：交易对象 / 开仓条件 / 平仓条件 / 平仓后怎么办 / 保护，每段标题下有一句随你填写实时变化的总结。</p>'+
 '<div class="presetRow"><span class="muted">预设：</span>'+
 presetBtns+"</div>"+
-(primaryRest.length?'<div class="pform">'+primaryRest.map(f=>renderField(f,f.default,false)).join("")+"</div>":"")+
 (pg.note?'<p class="muted">'+esc(pg.note)+"</p>":"")+
-'<details class="advBox"><summary>自动化配置（自动开仓、平仓的细节，不改也能正常运行）</summary>'+
-'<div class="aform">'+advFieldsHtml(advanced)+"</div></details></div>"+
+configInner+"</div>"+
+'<div class="fullAutoCfg" style="display:none">'+
+'<p class="muted">全自动只定这三样：策略（本页）、金额（上面「金额」区）、风险档（下面三档）。两腿、标的和其余参数都由系统按风险档定。</p>'+
+'<div class="presetRow runPresetRow"><span class="muted">风险档：</span>'+
+runPresetBtns+"</div>"+
+'<div class="fullAutoSums"></div>'+
+'<details class="fullAutoParams"><summary>看系统用的参数</summary>'+
+'<div class="faParams muted"></div>'+
+'<p class="muted">只读展示这一档实际会用的参数（预设合并默认值）。要改参数请切到半自动。</p></details></div></div>'+
 '<div class="block"><span class="upd prevUpd"></span><h3>交易预览</h3><div class="preview"><p class="muted">加载中…</p></div></div>'+
 '<div class="block"><p class="bad runErr"></p>'+
 '<button class="runBtn">▶ 运行</button> <span class="ok runOk"></span>'+
@@ -677,7 +822,7 @@ presetBtns+"</div>"+
 '<div class="block"><h3>运行中仓位</h3><table class="ttasks"><thead><tr>'+
 "<th>名称</th><th>标的</th><th>来源</th><th>状态</th><th>持仓</th><th>今日成交</th><th>最近错误</th><th>操作</th>"+
 '</tr></thead><tbody></tbody></table></div>';
-const S={spec:spec, root:root, runMode:"manual", selSymbol:"", candles:{}, candleFetching:{},
+const S={spec:spec, root:root, runMode:"manual", runPreset:"neutral", selSymbol:"", candles:{}, candleFetching:{},
 pairsRows:[], pairsMeta:null, pairKey:"", pairSeq:0, pairsStale:false,
 totalManual:false,
 pendingSymbol:"", pendingPrefill:null, presetName:"neutral", applying:false,
@@ -702,6 +847,7 @@ S.vA.addEventListener("change",onVenue);
 S.vB.addEventListener("change",onVenue);
 S.symSel.addEventListener("change",()=>{S.selSymbol=S.symSel.value; renderPairPrices(st); renderSymData(st); renderLegs(st); renderPreview(st); updateGridSug(st); syncGridTotal(st)});
 root.querySelectorAll("[data-preset]").forEach(b=>b.addEventListener("click",()=>applyPreset(st, b.dataset.preset)));
+root.querySelectorAll("[data-run-preset]").forEach(b=>b.addEventListener("click",()=>setRunPreset(st, b.dataset.runPreset)));
 root.querySelectorAll("[data-mode]").forEach(b=>b.addEventListener("click",()=>setRunMode(st, b.dataset.mode)));
 setRunMode(st, "manual");
 const gt=root.querySelector(".gridTotalInp");
@@ -709,8 +855,10 @@ if(gt) gt.addEventListener("input",()=>{S.totalManual=true; gridTotalToQty(st)})
 root.addEventListener("input",e=>{
 if(e.target.dataset&&["qty_per_grid","grid_count"].indexOf(e.target.dataset.f)>=0) S.totalManual=false;
 if(!S.applying&&(e.target.closest(".pform")||e.target.closest(".aform")||e.target.closest(".amtRow"))) markCustom(st);
+updateSectionSummaries(st);
 renderLegs(st); renderPreview(st);
 });
+root.addEventListener("change",()=>updateSectionSummaries(st));
 root.querySelector(".runBtn").addEventListener("click",()=>runStrategy(st));
 }
 
@@ -730,29 +878,99 @@ const f=fieldOf(S.spec, name);
 return f?f.default:null;
 }
 
-// ---------- 运行模式（自主 / 全自动，第九轮） ----------
-// 自主：自己选标、开一笔、手动或按条件平仓、平完结束；
-// 全自动：只定两所/金额/门槛，系统自动选标→开仓→平仓→冷却→
-// 再选标循环，点停止才停。切换只影响新建任务的提交参数。
+// ---------- 运行模式（第十轮：四值三模式） ----------
+// manual 自主 / semi_fixed 半自动·固定标的 / semi_auto 半自动·
+// 自动选标 / full_auto 全自动；旧值 auto 一律归一为 semi_auto。
+// 切换只影响新建任务的提交参数与本页显隐，不刷新页面。
 const MODE_DESCS={
-manual:"自主模式：自己选标的、点运行开一笔；平仓靠手动点平仓，或按配置里的条件自动平仓；平完这一笔任务就结束，不自动重开、不自动换标。",
-auto:"全自动模式：只定两所、金额和门槛，点运行后系统自动选当前最好的标的开仓，按条件平仓、冷却后自动重新选标开下一笔，一直循环，点停止才停。"};
+manual:"自主：两腿、标的、金额都你定；点「开仓」立即开仓，平仓你手动点。",
+semi_fixed:"半自动·固定标的：你定两腿/标的/金额和条件，系统在这个标的上按条件开仓→平仓→再开仓，循环到你停止。",
+semi_auto:"半自动·自动选标：你定两腿/金额和条件，每轮系统重新选标，自动开仓→平仓→再选标，循环到你停止。",
+full_auto:"全自动：只选策略、金额和风险档，两腿/标的/参数系统全定，循环到你停止。"};
+const MODE_BADGE_LABELS={manual:"自主",semi_fixed:"半自动·固定标的",
+semi_auto:"半自动·自动选标",full_auto:"全自动"};
+const RUN_PRESET_LABELS={conservative:"保守",neutral:"中性",aggressive:"激进"};
+function normalizeModeClient(mode){
+if(mode==="auto") return "semi_auto";
+return ["manual","semi_fixed","semi_auto","full_auto"].indexOf(mode)>=0
+?mode:"manual";
+}
+function setRunPreset(st, name){
+const S=SPAGES[st]; if(!S) return;
+S.runPreset=RUN_PRESET_LABELS[name]?name:"neutral";
+S.root.querySelectorAll("[data-run-preset]").forEach(b=>
+b.classList.toggle("on", b.dataset.runPreset===S.runPreset));
+updateSectionSummaries(st);
+}
+// manual 隐藏开/平/平仓后三段；网格例外（最终做法）：网格的
+// out_of_range_action 是唯一退出方式，给它的字段打了
+// data-manual-keep 标记，隐藏时它所在段只显示它一个字段、
+// 段总结句隐藏，其余字段藏起（见 configFieldHtml/此处逻辑）
+function applySectionVisibility(S){
+const hideSecs=["开仓条件","平仓条件","平仓后怎么办"];
+S.root.querySelectorAll(".cfgSec").forEach(secEl=>{
+const sec=secEl.getAttribute("data-section");
+const sum=secEl.querySelector("[data-sec-summary]");
+if(S.runMode==="manual"&&hideSecs.indexOf(sec)>=0){
+const keep=secEl.querySelector("[data-manual-keep]");
+if(keep){
+secEl.style.display="";
+secEl.querySelectorAll(".fld").forEach(l=>{
+l.style.display=l.hasAttribute("data-manual-keep")?"":"none"});
+secEl.querySelectorAll(".fhelp").forEach(h=>{h.style.display="none"});
+if(sum) sum.dataset.forceHide="1";
+}else{
+secEl.style.display="none";
+}
+}else{
+secEl.style.display="";
+secEl.querySelectorAll(".fld").forEach(l=>{l.style.display=""});
+secEl.querySelectorAll(".fhelp").forEach(h=>{h.style.display=""});
+if(sum) delete sum.dataset.forceHide;
+}
+});
+}
 function setRunMode(st, mode){
 const S=SPAGES[st]; if(!S) return;
-S.runMode=mode==="auto"?"auto":"manual";
+S.runMode=normalizeModeClient(mode);
 S.root.querySelectorAll("[data-mode]").forEach(b=>b.classList.toggle("on", b.dataset.mode===S.runMode));
 const desc=S.root.querySelector(".modeDesc");
-if(desc) desc.textContent=MODE_DESCS[S.runMode];
+if(desc){
+let txt=MODE_DESCS[S.runMode];
+if(st==="hedged_grid"&&S.runMode==="manual")
+txt+=" 网格例外：网格在区间内自动铺格交易，开/停由你手动。";
+desc.textContent=txt;
+}
 const note=S.root.querySelector(".autoPickNote");
-if(note) note.style.display=S.runMode==="auto"?"":"none";
-if(S.symSel) S.symSel.disabled=S.runMode==="auto";
+if(note) note.style.display=S.runMode==="semi_auto"?"":"none";
+if(S.symSel) S.symSel.disabled=S.runMode==="semi_auto";
+const full=S.runMode==="full_auto";
+const legs=S.root.querySelector(".legsBlock");
+if(legs) legs.style.display=full?"none":"";
+const mkt=S.root.querySelector(".marketBlock");
+if(mkt) mkt.style.display=full?"none":"";
+const faNote=S.root.querySelector(".fullAutoNote");
+if(faNote) faNote.style.display=full?"":"none";
+const cfgF=S.root.querySelector(".configFields");
+if(cfgF) cfgF.style.display=full?"none":"";
+const faCfg=S.root.querySelector(".fullAutoCfg");
+if(faCfg) faCfg.style.display=full?"":"none";
+applySectionVisibility(S);
+const rb=S.root.querySelector(".runBtn");
+if(rb) rb.textContent=S.runMode==="manual"?"▶ 开仓":"▶ 运行";
+updateSectionSummaries(st);
 renderPreview(st);
 }
-// 任务的模式徽标（任务列表与策略记录共用）
+// 任务的模式徽标（任务列表与策略记录共用）：四值文案；旧值
+// auto 显示为半自动·自动选标；全自动另带风险档中文
 function modeBadge(name){
 const t=TASKS.find(x=>x.name===name);
 if(!t) return "";
-return ' <span class="tag">'+(t.run_mode==="auto"?"全自动":"自主")+"</span>";
+const mode=normalizeModeClient(t.run_mode);
+let txt=MODE_BADGE_LABELS[mode]||"自主";
+if(mode==="full_auto")
+txt+=" · "+(RUN_PRESET_LABELS[t.run_preset]||"中性");
+return ' <span class="tag">'+esc(txt)+"</span>";
 }
 
 // ---------- 共同标的（pairs）：选两所后拉全量共同上市并排序 ----------
@@ -807,6 +1025,7 @@ const errs=meta.errors||{};
 const errTxt=Object.keys(errs).map(v=>v+" "+errs[v]).join("；");
 S.listNote.textContent=errTxt||(rows.length?"":"所选两所暂无共同上市标的，换一对场所试试。");
 if(S.pendingPrefill){applyPrefill(S.root, S.pendingPrefill); S.pendingPrefill=null}
+updateSectionSummaries(st);
 renderLegs(st); renderPreview(st); updateGridSug(st); syncGridTotal(st);
 }
 
@@ -929,6 +1148,7 @@ el.value=Math.round(amt*ratio*100)/100;
 }
 S.applying=false;
 setPresetUi(S, name);
+updateSectionSummaries(st);
 renderLegs(st); renderPreview(st);
 }
 
@@ -977,7 +1197,7 @@ S.gridSug.innerHTML='<span class="muted">近 24h 高 '+d4(cd.high)+" / 低 "+d4(
 '<button class="mini" data-sug="1">填入区间</button>';
 S.gridSug.querySelector("[data-sug]").addEventListener("click",()=>{
 applyPrefill(S.root, {lower_price:cd.suggested_lower, upper_price:cd.suggested_upper});
-markCustom(st); renderLegs(st); renderPreview(st);
+markCustom(st); updateSectionSummaries(st); renderLegs(st); renderPreview(st);
 });
 }
 else if(cd){S.gridSug.innerHTML='<span class="muted">'+esc(cd.error||"无 K 线数据")+"</span>"}
@@ -1139,9 +1359,13 @@ return mm==="isolated_only"
 ? '<p style="color:var(--yel)">⚠ '+esc(L.vid)+" 该标的仅逐仓（isolated only），账户须为逐仓模式。</p>"
 : "";
 }).join("");
-const modeTxt=S.runMode==="auto"
-?"运行模式：全自动——系统自动选标、开仓、平仓、再选标循环，点停止才停。"
-:"运行模式：自主——开一笔，手动或按条件平仓，平完这一笔任务结束。";
+const modeTxt=S.runMode==="full_auto"
+?"运行模式：全自动——只选策略、金额和风险档，系统定两腿/标的/参数，自动选标、开仓、平仓、再选标循环，点停止才停。"
+:S.runMode==="semi_auto"
+?"运行模式：半自动·自动选标——你定两腿/金额/条件，系统每轮重新选标，自动开仓、平仓、再选标循环，点停止才停。"
+:S.runMode==="semi_fixed"
+?"运行模式：半自动·固定标的——在你选的标的上按条件开仓、平仓、再开仓，循环到你点停止。"
+:"运行模式：自主——点「开仓」立即开仓，平仓你手动点，平完这一笔任务结束。";
 S.previewEl.innerHTML="<table><thead><tr><th>腿</th><th>平台</th><th>标记价</th><th>预估执行价</th><th>名义</th><th>所需保证金</th></tr></thead><tbody>"+
 rowsHtml+"</tbody></table>"+
 '<p>总名义：<b>'+(totN!=null?"$"+fmt(totN):"-")+'</b>　总保证金：<b>'+(totM!=null?"$"+fmt(totM):"-")+"</b></p>"+
@@ -1156,9 +1380,15 @@ function renderStratTasks(st){
 const S=SPAGES[st]; if(!S) return;
 const list=TASKS.filter(t=>t.strategy===st);
 S.tbody.innerHTML=list.map(t=>{
-const sym=t.run_mode==="auto"
-?((t.current_symbol||"选标中")+"（已循环 "+(t.cycles_completed||0)+" 轮）")
-:((t.params&&t.params.params&&t.params.params.symbol)||"-");
+const tMode=normalizeModeClient(t.run_mode);
+let sym;
+if(tMode==="semi_auto"||tMode==="full_auto"){
+sym=(t.current_symbol||"选标中")+"（已循环 "+(t.cycles_completed||0)+" 轮）";
+if(tMode==="full_auto"&&t.current_venues&&t.current_venues.length)
+sym+=" · 两腿 "+t.current_venues.join(" / ");
+}else{
+sym=((t.params&&t.params.params&&t.params.params.symbol)||"-");
+}
 const poss=taskPositions(t.name);
 const posHtml=poss.length?poss.map(p=>esc(p.venue)+" "+esc(p.symbol)+" "+p.qty+" @ "+p.entry_price+
 ' <button class="mini stop" data-act="close" data-venue="'+esc(p.venue)+'" data-symbol="'+esc(p.symbol)+'" data-owner="'+esc(t.name)+'">平仓</button>').join("<br>"):"-";
@@ -1184,13 +1414,25 @@ const params={};
 params[pg.venue_fields[0]]=S.vA.value;
 params[pg.venue_fields[1]]=S.vB.value;
 Object.assign(params, collectFrom(S.root, spec));
-if(S.runMode==="auto"&&!params.symbol)
-params.symbol=(S.pairsRows&&S.pairsRows.length&&S.pairsRows[0].symbol)||"BTC";  // 全自动时 symbol 只是占位，后端选标时忽略
+if((S.runMode==="semi_auto"||S.runMode==="full_auto")&&!params.symbol)
+params.symbol=(S.pairsRows&&S.pairsRows.length&&S.pairsRows[0].symbol)||"BTC";  // 自动选标时 symbol 只是占位，后端选标时忽略
 const now=new Date();
 const pad=n=>String(n).padStart(2,"0");
 const name=pg.name_prefix+"-"+(params.symbol||"NA")+"-"+pad(now.getHours())+pad(now.getMinutes())+pad(now.getSeconds());
 S.runErr.textContent=""; S.runOk.textContent="";
-const r=await postJson("/api/tasks/create",{name:name, strategy:st, params:params, run_mode:S.runMode});
+const body={name:name, strategy:st, params:params, run_mode:S.runMode};
+if(S.runMode==="full_auto"){
+body.run_preset=S.runPreset||"neutral";
+if(st==="hedged_grid"){
+// 全自动网格：金额区的目标总名义走顶层 amount_usd，
+// params 里的 qty_per_grid 不提交（后端按总名义反推）
+const gt=S.root.querySelector(".gridTotalInp");
+const tot=gt?Number(gt.value):NaN;
+if(tot>0) body.amount_usd=tot;
+delete params.qty_per_grid;
+}
+}
+const r=await postJson("/api/tasks/create",body);
 if(!r.ok){S.runErr.textContent=r.error||"创建失败"; return}
 S.runOk.textContent="已创建并运行："+r.task;
 refresh();

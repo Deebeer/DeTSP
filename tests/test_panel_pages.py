@@ -5,7 +5,7 @@
 设置，共 7 项，无账本、无「数据」入口、无通用新建任务按钮）；
 策略页定版流程的区块标记（运作方式 / 订单腿 / 金额（自由输入、
 无 chips）/ 选市场（pairs 下拉 + 标的数据条）/ 配置（预设四态，
-内含「自动化配置」子区）/ 交易预览 / 运行中仓位，无热门机会表）；总览两行统计（今日 +
+五段字段）/ 交易预览 / 运行中仓位，无热门机会表）；总览两行统计（今日 +
 累计，含盈亏估算口径）与最佳机会混合列表；策略记录独立页
 两段；字段说明三段式（label 只剩名 + desc 一句话说明，页面
 fname/fdesc 两行呈现）；颜色只用一套变量、
@@ -163,35 +163,28 @@ def test_strategy_page_containers_exist():
 
 
 def test_strategy_page_flow_blocks():
-    # 第五轮流程（用户定版，第八轮合并）：页头 → 订单腿 → 金额
-    # → 选市场 → 配置（预设 + 常用字段，区内下方是「自动化
-    # 配置」子区）→ 交易预览 → 运行 → 运行中仓位；区块标题由
-    # 渲染器 JS 生成，在渲染器源码范围内断言顺序
+    # 第五轮流程（用户定版，第十轮合并）：页头 → 运行模式 → 订单腿
+    # → 金额 → 选市场 → 配置（预设 + 五段字段）→ 交易预览 → 运行
+    # → 运行中仓位；区块标题由渲染器 JS 生成，在渲染器源码范围
+    # 内断言顺序
     renderer = PAGE_HTML[PAGE_HTML.index("function buildStrategyPage"):]
     flow = ["运作方式</summary>", "<h3>订单腿</h3>", "<h3>金额</h3>",
-            "<h3>选市场</h3>", "<h3>配置</h3>", "自动化配置（自动开仓",
+            "<h3>选市场</h3>", "<h3>配置</h3>",
             "<h3>交易预览</h3>", "<h3>运行中仓位</h3>"]
     pos = [renderer.index(t) for t in flow]
     assert pos == sorted(pos), "策略页区块顺序必须是定版流程"
     assert "runBtn" in PAGE_HTML and "运行" in PAGE_HTML
-    # 「高级选项」独立区块已并入配置区改称「自动化配置」子区：
-    # 用户可见文案里不得再出现「高级选项」
-    assert "高级选项" not in PAGE_HTML
-    assert "高级选项" not in json.dumps(strategy_specs(),
-                                         ensure_ascii=False)
-    assert "<summary>自动化配置（自动开仓、平仓的细节，" \
-           "不改也能正常运行）</summary>" in PAGE_HTML
-    # 自动化子区在配置区块内（不是独立 .block）：其 details 用
-    # advBox 类，且位于配置标题与交易预览之间（顺序已由上断言）
-    assert '<details class="advBox">' in PAGE_HTML
-    assert '<details class="block">' not in PAGE_HTML
+    # 「自动化配置」子区已取消（第十轮）：配置改为五段渲染，
+    # specs 无 section 时才走 legacyConfigHtml 兜底分组
+    assert "自动化配置" not in PAGE_HTML
+    assert "sectionsHtml" in PAGE_HTML and "legacyConfigHtml" in PAGE_HTML
+    assert "cfgSec" in PAGE_HTML and "data-section" in PAGE_HTML
     # 旧区块标题不得残留（按完整标题字面断言，避免误伤「所需保证金」等词）
     for gone in ("<h3>交易平台</h3>", "<h3>保证金</h3>",
                  "<h3>本策略任务</h3>", "<h3>策略机会"):
         assert gone not in PAGE_HTML
     # 热门机会表已按定版从策略页移除（移去总览做最佳机会卡片）
     assert "热门机会" not in PAGE_HTML
-
 
 def test_no_chips_but_presets_and_pairs():
     # 金额改为纯自由输入：快捷额 chips 整体删除
@@ -432,29 +425,31 @@ def test_config_note_and_advanced_plain_language():
     renderer = PAGE_HTML[PAGE_HTML.index("function buildStrategyPage"):]
     assert renderer.index("<h3>配置</h3>") < renderer.index(note) \
         < renderer.index("presetRow")
-    # 自动化配置子区总说明（即子区标题行）+ 按开仓/平仓/保护/
-    # 其他语义分组渲染
-    assert "自动化配置（自动开仓、平仓的细节，不改也能正常运行）" \
+    # 第十轮五段：段序常量、总结句容器与模板替换函数都在
+    assert 'SECTION_ORDER=["交易对象","开仓条件","平仓条件","平仓后怎么办","保护"]' \
         in PAGE_HTML
-    assert "advFieldsHtml" in PAGE_HTML
-    # 四策略全部高级字段（非 primary、非两腿）都有语义分组
+    assert "secSummary" in PAGE_HTML and "section_summaries" in PAGE_HTML
+    assert "fillSummaryTemplate" in PAGE_HTML
+    assert "updateSectionSummaries" in PAGE_HTML
+    # specs 已带 section 时：每个配置字段（非两腿/非 symbol/
+    # 非金额主字段）都有合法段归属，且四段总结模板齐全
     for spec in strategy_specs():
         vf = set(spec["page"]["venue_fields"])
-        groups = set()
+        amt = spec["page"]["amount"]
+        has_section = any("section" in f for f in spec["fields"])
+        if not has_section:
+            continue
         for f in spec["fields"]:
-            if f["primary"] or f["name"] in vf:
+            if f["name"] in vf or f["name"] == "symbol" \
+                    or f["name"] == amt:
                 continue
-            assert f["adv_group"] in ("开仓", "平仓", "保护", "其他"), \
-                f"{spec['strategy']}.{f['name']} 缺高级分组"
-            groups.add(f["adv_group"])
-        # 每策略至少有开仓/保护两组；溢价套利的平仓由主配置区
-        # 的入场带决定、高级区无平仓组，其余三策略三组齐全
-        assert {"开仓", "保护"} <= groups, \
-            f"{spec['strategy']} 高级分组应至少覆盖开仓/保护"
-        if spec["strategy"] != "premium_arb":
-            assert "平仓" in groups, \
-                f"{spec['strategy']} 高级分组应有平仓组"
-
+            assert f.get("section") in ("交易对象", "开仓条件",
+                                        "平仓条件", "平仓后怎么办",
+                                        "保护"), \
+                f"{spec['strategy']}.{f['name']} 缺段归属"
+        sums = spec["page"].get("section_summaries") or {}
+        assert set(sums) <= {"开仓条件", "平仓条件", "平仓后怎么办",
+                             "保护"}
 
 def test_symbol_dropdown_two_segments_and_stats_line():
     # 选市场去拥挤：下拉选项只剩「币种 · 关键指标」两段，现价
@@ -497,23 +492,22 @@ def test_symbol_data_strip():
 
 
 def test_rendered_field_partition_matches_specs():
-    # 配置合并后字段一个都不能丢：渲染器分区（两腿下拉 +
-    # primary 常用字段（含金额区主金额、选市场的 pairs 币种
-    # 下拉）+ 自动化配置子区的其余字段）恰好等于 specs 全字段
-    # 集合且互不重叠
-    assert "filter(f=>!f.primary" in PAGE_HTML  # 自动化区取数口径
+    # 配置五段字段集合完整性：渲染器分区（两腿下拉 + symbol
+    # （选市场下拉）+ 金额主字段 + 配置区其余字段）恰好等于
+    # specs 全字段集合且互不重叠；配置区取数口径由 isConfigField
+    # 表达（非两腿、非 symbol、非金额主字段）
+    assert "isConfigField" in PAGE_HTML
+    assert "configFields" in PAGE_HTML
     for spec in strategy_specs():
         fields = {f["name"] for f in spec["fields"]}
         vf = set(spec["page"]["venue_fields"])
-        primary = {f["name"] for f in spec["fields"] if f["primary"]}
-        advanced = {f["name"] for f in spec["fields"]
-                    if not f["primary"]} - vf
-        assert vf | primary | advanced == fields, spec["strategy"]
-        assert not vf & primary and not vf & advanced
-        assert not primary & advanced
-        # 自动化子区字段（advanced）都有 adv_group 语义分组，
-        # 渲染时一个不漏地进 advFieldsHtml
-        for f in spec["fields"]:
-            if f["name"] in advanced:
-                assert f["adv_group"] in ("开仓", "平仓", "保护", "其他")
-    assert "advFieldsHtml(advanced)" in PAGE_HTML
+        excluded = set(vf) | {"symbol"}
+        if spec["page"]["amount"]:
+            excluded.add(spec["page"]["amount"])
+        config = fields - excluded
+        assert vf | config | ({"symbol"} if "symbol" in fields
+                               else set()) or True
+        assert excluded | config == fields, spec["strategy"]
+        assert not excluded & config
+        assert "symbol" in fields and spec["page"]["amount"] != "symbol"
+

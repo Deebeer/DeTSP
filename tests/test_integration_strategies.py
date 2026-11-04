@@ -21,8 +21,11 @@ def hedged_grid_yaml(action="close"):
 
 
 def rotation_yaml(maker=False):
+    # 第十轮夹具调整：轮换/套利的原生往返语义钉 semi_fixed
+    # （缺省 manual 已改为立即开仓、到期不自动平仓）
     return {"tasks": [{
         "name": "hedge", "strategy": "rotation_hedge",
+        "run_mode": "semi_fixed",
         "params": {"symbol": "BTC", "venue_a": "arcus", "venue_b": "lighter",
                    "notional_usd": 300, "hold_seconds": 60,
                    "hold_min_seconds": 0, "hold_max_seconds": 0,
@@ -33,6 +36,7 @@ def rotation_yaml(maker=False):
 def arb_yaml():
     return {"tasks": [{
         "name": "arb", "strategy": "premium_arb",
+        "run_mode": "semi_fixed",
         "params": {"symbol": "SNDK", "base_venue": "entropy",
                    "hedge_venue": "lighter_rh", "midline_bps": 0,
                    "upper_bps": 50, "lower_bps": 50, "persist_seconds": 0,
