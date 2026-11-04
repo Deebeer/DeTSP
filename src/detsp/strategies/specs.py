@@ -239,10 +239,11 @@ _FIELD_META: dict[str, dict[str, dict]] = {
     },
 }
 
-# 高级选项分组（面板「高级选项」折叠区内的小分组标题）：四策略
-# 都是全自动运行，高级字段是机器人自动开/平仓行为的旋钮，按
-# 语义分 开仓 / 平仓 / 保护 / 其他 四组。只有非 primary、非两腿
-# 场所字段（即进高级选项的那些）需要登记；未登记者归「其他」。
+# 自动化配置分组（面板「配置」区内「自动化配置」子区的小分组
+# 标题）：四策略都是全自动运行，这些字段是机器人自动开/平仓
+# 行为的旋钮，按语义分 开仓 / 平仓 / 保护 / 其他 四组。只有非
+# primary、非两腿场所字段（即进自动化配置的那些）需要登记；
+# 未登记者归「其他」。
 ADV_GROUPS: dict[str, dict[str, str]] = {
     "hedged_grid": {
         "mode": "开仓", "skip_band_frac": "开仓",
@@ -360,8 +361,8 @@ PRESET_LABELS = {"conservative": "保守", "neutral": "中性",
 
 # 策略页（左侧边栏布局）元数据：每策略一页，页面由通用渲染器按
 # 本表生成。venue_fields/venue_labels 是「订单腿」区的两腿场所
-# 下拉；primary 是「金额」区的常用字段（其余字段进折叠的「高级
-# 选项」）；opportunity 决定 pairs 排序与总览最佳机会的口径；amount 是
+# 下拉；primary 是「金额」区的常用字段（其余字段进「配置」区内
+# 折叠的「自动化配置」子区）；opportunity 决定 pairs 排序与总览最佳机会的口径；amount 是
 # 页面顶部大输入框的主金额字段（中性网格无单一金额，为 None，
 # 用每格量×格数×现价折算总名义）；market_value 是「选市场」下拉
 # 里每个币后面带的机会值类型；how_it_works 是页头「运作方式」
@@ -400,15 +401,15 @@ PAGE_META: dict[str, dict] = {
             "两所一多一空等额对锁，方向按当下资金费选：多费率低的一所、空费率高的一所。",
             "持有一段时长（默认每轮在 1~2 小时之间随机）刷成交量，顺带吃两所费差。",
             "到期双腿平仓，冷却后按最新资金费重新选向，再开下一轮。",
-            "Arcus 腿可走 maker 挂单开仓，降低手续费（高级选项里开关）。",
+            "Arcus 腿可走 maker 挂单开仓，降低手续费（自动化配置里开关）。",
         ],
         "primary": ("symbol", "notional_usd", "leverage_a", "leverage_b",
                     "hold_min_seconds", "hold_max_seconds"),
         "note": "方向由策略按资金费自动选（多费率低的一所、空费率"
                 "高的一所）；持有时长默认按 Parallax 原仓表单在最短"
                 " 1 小时 ~ 最长 2 小时之间每轮随机抽取，到点自动平仓"
-                "轮换（最长 ≤ 最短或最短填 0 时关闭随机，改用高级"
-                "选项里的固定 hold_seconds）。",
+                "轮换（最长 ≤ 最短或最短填 0 时关闭随机，改用自动化"
+                "配置里的固定 hold_seconds）。",
     },
     "premium_arb": {
         "venue_fields": ("base_venue", "hedge_venue"),
@@ -427,8 +428,8 @@ PAGE_META: dict[str, dict] = {
         "primary": ("symbol", "max_position_usd", "execution_mode",
                     "midline_bps", "upper_bps", "lower_bps",
                     "leverage_base", "leverage_hedge"),
-        "note": "顶部金额是最大持仓名义（不是单笔）；单笔上限在高级"
-                "选项里，点预设时按最大持仓的比例换算（保守 25% / "
+        "note": "顶部金额是最大持仓名义（不是单笔）；单笔上限在自动化"
+                "配置里，点预设时按最大持仓的比例换算（保守 25% / "
                 "中性 50% / 激进 100%），改金额不会被预设覆盖。"
                 "溢价带（中枢/上带/下带）必须先实测再填：用录制器"
                 "采集盘口后跑 analyze 得建议值（见使用说明第 6 节），"
@@ -494,8 +495,8 @@ def strategy_specs() -> list[dict]:
                 "default": None if required else f.default,
                 "group": meta.get("group", "参数"),
                 "primary": f.name in primary,
-                # 高级选项折叠区内的语义分组（开仓/平仓/保护/
-                # 其他）；primary 与两腿字段不进高级区，为 None
+                # 自动化配置子区内的语义分组（开仓/平仓/保护/
+                # 其他）；primary 与两腿字段不进该子区，为 None
                 "adv_group": ADV_GROUPS.get(stype, {}).get(f.name),
             }
             if "help" in meta:

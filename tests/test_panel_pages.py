@@ -4,8 +4,8 @@
 中性网格 / 溢价套利 / 资金费套利 / 轮换对冲刷量 / 策略记录 /
 设置，共 7 项，无账本、无「数据」入口、无通用新建任务按钮）；
 策略页定版流程的区块标记（运作方式 / 订单腿 / 金额（自由输入、
-无 chips）/ 选市场（pairs 下拉）/ 配置（预设四态）/ 高级选项 /
-交易预览 / 运行中仓位，无热门机会表）；总览两行统计（今日 +
+无 chips）/ 选市场（pairs 下拉 + 标的数据条）/ 配置（预设四态，
+内含「自动化配置」子区）/ 交易预览 / 运行中仓位，无热门机会表）；总览两行统计（今日 +
 累计，含盈亏估算口径）与最佳机会混合列表；策略记录独立页
 两段；字段说明三段式（label 只剩名 + desc 一句话说明，页面
 fname/fdesc 两行呈现）；颜色只用一套变量、
@@ -163,16 +163,28 @@ def test_strategy_page_containers_exist():
 
 
 def test_strategy_page_flow_blocks():
-    # 第五轮流程（用户定版）：页头 → 订单腿 → 金额 → 选市场 →
-    # 配置（预设）→ 高级选项 → 交易预览 → 运行 → 运行中仓位；
-    # 区块标题由渲染器 JS 生成，在渲染器源码范围内断言顺序
+    # 第五轮流程（用户定版，第八轮合并）：页头 → 订单腿 → 金额
+    # → 选市场 → 配置（预设 + 常用字段，区内下方是「自动化
+    # 配置」子区）→ 交易预览 → 运行 → 运行中仓位；区块标题由
+    # 渲染器 JS 生成，在渲染器源码范围内断言顺序
     renderer = PAGE_HTML[PAGE_HTML.index("function buildStrategyPage"):]
     flow = ["运作方式</summary>", "<h3>订单腿</h3>", "<h3>金额</h3>",
-            "<h3>选市场</h3>", "<h3>配置</h3>", "高级选项（其余参数",
+            "<h3>选市场</h3>", "<h3>配置</h3>", "自动化配置（自动开仓",
             "<h3>交易预览</h3>", "<h3>运行中仓位</h3>"]
     pos = [renderer.index(t) for t in flow]
     assert pos == sorted(pos), "策略页区块顺序必须是定版流程"
     assert "runBtn" in PAGE_HTML and "运行" in PAGE_HTML
+    # 「高级选项」独立区块已并入配置区改称「自动化配置」子区：
+    # 用户可见文案里不得再出现「高级选项」
+    assert "高级选项" not in PAGE_HTML
+    assert "高级选项" not in json.dumps(strategy_specs(),
+                                         ensure_ascii=False)
+    assert "<summary>自动化配置（自动开仓、平仓的细节，" \
+           "不改也能正常运行）</summary>" in PAGE_HTML
+    # 自动化子区在配置区块内（不是独立 .block）：其 details 用
+    # advBox 类，且位于配置标题与交易预览之间（顺序已由上断言）
+    assert '<details class="advBox">' in PAGE_HTML
+    assert '<details class="block">' not in PAGE_HTML
     # 旧区块标题不得残留（按完整标题字面断言，避免误伤「所需保证金」等词）
     for gone in ("<h3>交易平台</h3>", "<h3>保证金</h3>",
                  "<h3>本策略任务</h3>", "<h3>策略机会"):
@@ -384,15 +396,26 @@ def test_index_page_serves_sidebar_layout(panel_base):
 # ── 第七轮：总览顺序 / 去拥挤 / 配置说明 / 高级大白话 ──────
 
 def test_overview_block_order():
-    # 总览主体顺序定版：今日统计 → 累计统计 → 盈亏口径小字 →
-    # 场所表 → 最佳机会表 → 安全警告 / 停机 / 系统事件
+    # 总览顺序（第八轮定版）：页头三行（标题「总览」→ 安全警告
+    # → 运行状态/全局停机）→ 今日统计 → 累计统计 → 盈亏口径
+    # 小字 → 场所表 → 最佳机会表 → 系统事件
     ov = PAGE_HTML[PAGE_HTML.index('id="page-overview"'):
                    PAGE_HTML.index('id="page-records"')]
-    flow = ["今日成交量", "累计成交量", 'id="pnlNote"', 'id="venues"',
-            "最佳机会", 'id="bestTbl"', 'class="warn"',
-            'id="killbox"', 'id="events"']
+    flow = ["<h2>总览", 'class="warn"', 'id="killbox"',
+            "今日成交量", "累计成交量", 'id="pnlNote"', 'id="venues"',
+            "最佳机会", 'id="bestTbl"', 'id="events"']
     pos = [ov.index(t) for t in flow]
-    assert pos == sorted(pos), "总览区块顺序必须是第七轮定版"
+    assert pos == sorted(pos), "总览区块顺序必须是第八轮定版"
+    # 标题只留「总览」：模式后缀（DRY_RUN 等）与 #mode 元素删除
+    # （模式在场所表「模式」列里已有），且标题行不重复
+    assert ov.count("<h2>总览") == 1
+    assert 'id="mode"' not in PAGE_HTML
+    assert "DRY_RUN 只决策不下单" not in PAGE_HTML
+    # 页头第三行：RUNNING 与全局停机按钮同一行（stateRow 渲染）
+    assert "stateRow" in PAGE_HTML
+    assert "RUNNING" in PAGE_HTML and "⛔ 全局停机" in PAGE_HTML
+    # 安全警告原文保留（只挪位置）
+    assert "不要改绑公网地址" in ov and "不等于登录鉴权" in ov
     # 场所表列定版：场所/模式/权益/可用/持仓/挂单数
     venues = ov[ov.index('id="venues"'):ov.index("最佳机会")]
     for col in ("场所", "模式", "权益", "可用", "持仓", "挂单数"):
@@ -409,9 +432,10 @@ def test_config_note_and_advanced_plain_language():
     renderer = PAGE_HTML[PAGE_HTML.index("function buildStrategyPage"):]
     assert renderer.index("<h3>配置</h3>") < renderer.index(note) \
         < renderer.index("presetRow")
-    # 高级选项总说明 + 按开仓/平仓/保护/其他语义分组渲染
-    assert "以下参数控制机器人自动开仓、平仓的行为细节，" \
-           "保持默认也能正常运行。" in PAGE_HTML
+    # 自动化配置子区总说明（即子区标题行）+ 按开仓/平仓/保护/
+    # 其他语义分组渲染
+    assert "自动化配置（自动开仓、平仓的细节，不改也能正常运行）" \
+        in PAGE_HTML
     assert "advFieldsHtml" in PAGE_HTML
     # 四策略全部高级字段（非 primary、非两腿）都有语义分组
     for spec in strategy_specs():
@@ -444,3 +468,52 @@ def test_symbol_dropdown_two_segments_and_stats_line():
     assert "（按策略排序后可交易" not in PAGE_HTML
     assert '" · 可交易 "' in PAGE_HTML
     assert '"共同 "' in PAGE_HTML and '" 上市 "' in PAGE_HTML
+
+
+# ── 第八轮：标的数据条 / 渲染字段集合完整性 ────────────────
+
+def test_symbol_data_strip():
+    # 选市场价格行下方有「标的数据」指标条：按策略从 pairs 行
+    # 渲染关键指标，费率带口径，网格带 candles 的高低/建议区间
+    seg = PAGE_HTML[PAGE_HTML.index("function renderSymData"):
+                    PAGE_HTML.index("function legLevText")]
+    assert "标的数据" in PAGE_HTML and "symData" in PAGE_HTML
+    # 资金费类（资金费套利/轮换）：两腿费率+口径、费差、年化、价差
+    for marker in ("A腿资金费", "B腿资金费", "费差", "预计年化",
+                   "价差", "rate_kind_a", "rate_kind_b", "rateKindTxt",
+                   "edge_bps_h", "apr_pct"):
+        assert marker in seg, marker
+    # 溢价套利：两腿价、带符号价差、两腿资金费
+    for marker in ("基准腿价", "对冲腿价", "基准腿资金费",
+                   "对冲腿资金费", "signed_spread_bps"):
+        assert marker in seg, marker
+    # 中性网格：现价、日波动、24h 高低、建议区间、两腿资金费
+    for marker in ("现价", "日波动", "24h 高", "24h 低", "建议区间",
+                   "网格腿资金费", "volatility_pct", "suggested_lower"):
+        assert marker in seg, marker
+    # 无数据显「—」；渲染挂在选币与 pairs 刷新路径上
+    assert '"—"' in seg
+    assert "renderSymData(st)" in PAGE_HTML
+
+
+def test_rendered_field_partition_matches_specs():
+    # 配置合并后字段一个都不能丢：渲染器分区（两腿下拉 +
+    # primary 常用字段（含金额区主金额、选市场的 pairs 币种
+    # 下拉）+ 自动化配置子区的其余字段）恰好等于 specs 全字段
+    # 集合且互不重叠
+    assert "filter(f=>!f.primary" in PAGE_HTML  # 自动化区取数口径
+    for spec in strategy_specs():
+        fields = {f["name"] for f in spec["fields"]}
+        vf = set(spec["page"]["venue_fields"])
+        primary = {f["name"] for f in spec["fields"] if f["primary"]}
+        advanced = {f["name"] for f in spec["fields"]
+                    if not f["primary"]} - vf
+        assert vf | primary | advanced == fields, spec["strategy"]
+        assert not vf & primary and not vf & advanced
+        assert not primary & advanced
+        # 自动化子区字段（advanced）都有 adv_group 语义分组，
+        # 渲染时一个不漏地进 advFieldsHtml
+        for f in spec["fields"]:
+            if f["name"] in advanced:
+                assert f["adv_group"] in ("开仓", "平仓", "保护", "其他")
+    assert "advFieldsHtml(advanced)" in PAGE_HTML

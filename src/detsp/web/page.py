@@ -5,12 +5,14 @@
 对冲刷量 / 策略记录 / 设置——没有账本页、没有独立「数据」页，
 也没有通用新建任务入口：新建任务只能从各策略页发起。
 
-总览（顺序定版）：今日与累计两行统计（成交量/手续费/笔数/盈亏
-估算，口径见 server.overview）→ 盈亏口径小字 → 场所表（权益/
-可用/持仓/挂单数）→「最佳机会」混合列表（/api/best 不带
-strategy 参数时返回四策略各自 Top 5 合并、按机会值 % 降序，
-点行跳策略页并带入两腿与标的）→ 安全警告、KillSwitch、系统
-事件。
+总览（顺序定版）：页头三行——标题「总览」→ 安全警告（原文）
+→ 运行状态与全局停机按钮同一行；其后是今日与累计两行统计
+（成交量/手续费/笔数/盈亏估算，口径见 server.overview）→
+盈亏口径小字 → 场所表（权益/可用/持仓/挂单数）→「最佳机会」
+混合列表（/api/best 不带 strategy 参数时返回四策略各自
+Top 5 合并、按机会值 % 降序，点行跳策略页并带入两腿与
+标的）→ 系统事件。运行模式（模拟/实盘）只看场所表的模式列，
+标题上不重复标注。
 「策略记录」是独立页（/api/records：运行仓位按开始时间倒序、
 仓位历史按平仓时间倒序，历史由后端追踪仓位消失落库）。
 
@@ -21,9 +23,12 @@ strategy 参数时返回四策略各自 Top 5 合并、按机会值 % 降序，
 （先选两所，每行带该所可用余额与该标的最高杠杆/保证金模式）
 → 金额（自由输入；网格是目标总名义，反推每格量）→ 选市场
 （统计行「共同 N · A所上市 X · B所上市 Y」+ 币种下拉 + 所选
-标的在两腿的实际价格行）→ 配置（保守/中性/激进/自定义预设
-+ 常用字段；预设只套结构参数、绝不改用户填的金额，金额派
-生量按比例换算）→ 高级选项（其余字段，折叠）→ 交易预览
+标的在两腿的实际价格行，价格行下还有一行「标的数据」指标条，
+按策略列所选标的的资金费/费差/年化、价差、波动与 24h 高低等
+关键指标，供填配置时参考）→ 配置（一个区块：保守/中性/激进/
+自定义预设 + 常用字段；预设只套结构参数、绝不改用户填的金额，
+金额派生量按比例换算；区块内下方是可折叠的「自动化配置」子
+区，含其余全部字段，按开仓/平仓/保护/其他分组）→ 交易预览
 （按平台分列标记价/预估执行价/所需保证金 + 入场条件指示 +
 所填杠杆超过某所该标的上限时的黄色警告）→ 运行按钮 →
 运行中仓位（本策略任务与持仓，含启停改删/平仓）。运行中的
@@ -154,6 +159,11 @@ details div{font-size:12px;padding:6px 4px;line-height:1.8}
 .sec input{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:5px 8px;width:100%;box-sizing:border-box;margin-top:3px;font:inherit}
 .pairPrices{margin-top:8px}
 .gridSug{margin-top:10px}
+.symData{margin-top:8px;font-size:12px;line-height:1.7}
+.symData .sdT{color:var(--bright)}
+.symData .sdLab{color:var(--mut)}
+.stateRow{display:flex;gap:16px;align-items:center;margin:10px 0}
+.advBox{margin-top:16px;border-top:1px dashed var(--line);padding-top:10px}
 </style>
 </head>
 <body>
@@ -174,8 +184,11 @@ details div{font-size:12px;padding:6px 4px;line-height:1.8}
 <main id="main">
 
 <section class="page on" id="page-overview">
-<h2>总览 <span class="muted" id="mode"></span><span class="upd" id="ovUpd"></span></h2>
-<h2>总览 <span class="muted" id="mode"></span><span class="upd" id="ovUpd"></span></h2>
+<h2>总览 <span class="upd" id="ovUpd"></span></h2>
+<p class="warn">⚠ 本面板只允许绑本机 127.0.0.1 使用，POST 操作带随机
+token 校验（防跨站借道），但<b>不等于登录鉴权</b>：不要改绑公网地址、
+不要做端口映射。</p>
+<div id="killbox"></div>
 <p>今日成交量：<b id="tvol">-</b>　今日手续费：<b id="tfee">-</b>　
 今日成交笔数：<b id="tcnt">-</b>　今日盈亏（估算）：<b id="tpnl">-</b></p>
 <p>累计成交量：<b id="avol">-</b>　累计手续费：<b id="afee">-</b>　
@@ -190,10 +203,6 @@ details div{font-size:12px;padding:6px 4px;line-height:1.8}
 <table id="bestTbl"><thead><tr>
 <th>策略</th><th>标的</th><th>做法</th><th>机会值（按此排序，口径不同）</th><th>操作</th>
 </tr></thead><tbody></tbody></table>
-<p class="warn">⚠ 本面板只允许绑本机 127.0.0.1 使用，POST 操作带随机
-token 校验（防跨站借道），但<b>不等于登录鉴权</b>：不要改绑公网地址、
-不要做端口映射。</p>
-<div id="killbox"></div>
 <div id="events"></div>
 </section>
 
@@ -310,8 +319,8 @@ return names.map(g=>"<fieldset><legend>"+esc(g)+"</legend>"+
 groups[g].map(f=>renderField(f,(values&&values[f.name]!==undefined)?values[f.name]:f.default,symbolSelect)).join("")+"</fieldset>").join("");
 }
 
-// 高级选项专用渲染：按开仓 / 平仓 / 保护 / 其他语义分组（specs
-// 的 adv_group），与弹窗用的 fieldsHtml（按 group）分开
+// 自动化配置子区专用渲染：按开仓 / 平仓 / 保护 / 其他语义分组
+//（specs 的 adv_group），与弹窗用的 fieldsHtml（按 group）分开
 function advFieldsHtml(fields){
 const order=["开仓","平仓","保护","其他"];
 const groups={};
@@ -444,11 +453,11 @@ ov=LAST_OV; OVSTALE=true;   // 刷新失败：保留旧数据，时间戳标黄�
 }
 LAST_OV=ov;
 setUpd($("#ovUpd"), ov.updated_at, OVSTALE);
-$("#mode").textContent="（"+(ov.dry_run?"DRY_RUN 只决策不下单":"实盘模式")+"）";
 const ks=ov.killswitch;
+// 页头第三行：运行状态与全局停机按钮同一行左右排布
 $("#killbox").innerHTML=ks.halted
 ? '<p class="bad">⛔ 全局停机中：'+esc(ks.reason)+' <button data-act="killreset">解除停机</button></p>'
-: '<p class="ok"><span class="dot g"></span>RUNNING</p><button class="kill" data-act="kill">⛔ 全局停机</button>';
+: '<div class="stateRow"><span class="ok"><span class="dot g"></span>RUNNING</span><button class="kill" data-act="kill">⛔ 全局停机</button></div>';
 $("#tvol").textContent=fmt(ov.today.volume);
 $("#tfee").textContent=fmt(ov.today.fees,4);
 $("#tcnt").textContent=ov.today.fills;
@@ -643,16 +652,16 @@ root.innerHTML=
 '<div class="pairsStats muted"></div>'+
 '<div class="symWrap"><label>币种 <select class="symSel" data-f="symbol"></select></label></div>'+
 '<div class="pairPrices muted"></div>'+
+'<div class="symData"></div>'+
 '<p class="bad listNote"></p><div class="gridSug"></div></div>'+
 '<div class="block"><h3>配置</h3>'+
 '<p class="muted">先在「金额」区填好金额，再点预设：只套结构参数（杠杆/门槛/格数等），金额不改（中性 = 原仓对齐默认值）；改动任何字段自动切到「自定义」。</p>'+
 '<div class="presetRow"><span class="muted">预设：</span>'+
 presetBtns+"</div>"+
 (primaryRest.length?'<div class="pform">'+primaryRest.map(f=>renderField(f,f.default,false)).join("")+"</div>":"")+
-(pg.note?'<p class="muted">'+esc(pg.note)+"</p>":"")+"</div>"+
-'<details class="block"><summary>高级选项（其余参数，改动随运行一并提交）</summary>'+
-'<p class="muted">以下参数控制机器人自动开仓、平仓的行为细节，保持默认也能正常运行。</p>'+
-'<div class="aform">'+advFieldsHtml(advanced)+"</div></details>"+
+(pg.note?'<p class="muted">'+esc(pg.note)+"</p>":"")+
+'<details class="advBox"><summary>自动化配置（自动开仓、平仓的细节，不改也能正常运行）</summary>'+
+'<div class="aform">'+advFieldsHtml(advanced)+"</div></details></div>"+
 '<div class="block"><span class="upd prevUpd"></span><h3>交易预览</h3><div class="preview"><p class="muted">加载中…</p></div></div>'+
 '<div class="block"><p class="bad runErr"></p>'+
 '<button class="runBtn">▶ 运行</button> <span class="ok runOk"></span>'+
@@ -668,6 +677,7 @@ vA:root.querySelector('[data-leg="0"]'), vB:root.querySelector('[data-leg="1"]')
 symSel:root.querySelector(".symSel"),
 pairsStats:root.querySelector(".pairsStats"),
 pairPrices:root.querySelector(".pairPrices"),
+symData:root.querySelector(".symData"),
 pairsUpd:root.querySelector(".pairsUpd"),
 prevUpd:root.querySelector(".prevUpd"),
 listNote:root.querySelector(".listNote"),
@@ -682,7 +692,7 @@ if(VENUES.length>1) S.vB.selectedIndex=1;
 const onVenue=()=>{S.pendingSymbol=pageSymbol(S); loadPairs(st)};
 S.vA.addEventListener("change",onVenue);
 S.vB.addEventListener("change",onVenue);
-S.symSel.addEventListener("change",()=>{S.selSymbol=S.symSel.value; renderPairPrices(st); renderLegs(st); renderPreview(st); updateGridSug(st); syncGridTotal(st)});
+S.symSel.addEventListener("change",()=>{S.selSymbol=S.symSel.value; renderPairPrices(st); renderSymData(st); renderLegs(st); renderPreview(st); updateGridSug(st); syncGridTotal(st)});
 root.querySelectorAll("[data-preset]").forEach(b=>b.addEventListener("click",()=>applyPreset(st, b.dataset.preset)));
 const gt=root.querySelector(".gridTotalInp");
 if(gt) gt.addEventListener("input",()=>{S.totalManual=true; gridTotalToQty(st)});
@@ -757,6 +767,7 @@ S.pairsStats.textContent="共同 "+(meta.common??"-")+" · "+S.vA.value+" 上市
 (rows.length!==(meta.common??rows.length)?" · 可交易 "+rows.length+" 个":"");
 setUpd(S.pairsUpd, meta.updated_at, S.pairsStale);
 renderPairPrices(st);
+renderSymData(st);
 const errs=meta.errors||{};
 const errTxt=Object.keys(errs).map(v=>v+" "+errs[v]).join("；");
 S.listNote.textContent=errTxt||(rows.length?"":"所选两所暂无共同上市标的，换一对场所试试。");
@@ -778,6 +789,54 @@ esc(vb)+" "+px(row.price_b)+"（"+esc(kinds[vb]||"价格")+"）";
 if(row.mixed) html+=' <span class="tag">混口径，仅供参考</span>';
 if(row.suspect) html+=' <span class="tag">疑似同名不同资产</span>';
 S.pairPrices.innerHTML=html;
+}
+
+// 资金费口径的中文短名（pairs 行 rate_kind_* 原值的展示口径）
+function rateKindTxt(k){
+return {predicted:"预测", current:"当期", last_settled:"上期已结算"}[k]||"口径未知";
+}
+
+// 「标的数据」指标条：价格行下方一行小字，按策略列所选标的
+// 的关键指标，供填配置时参考——全部取自当前 pairs 行（网格
+// 的 24h 高低/建议区间取自 candles 缓存），不新增接口；随选
+// 币与 pairs 刷新（20 秒）更新，某项无数据显「—」
+function renderSymData(st){
+const S=SPAGES[st]; if(!S||!S.symData) return;
+const row=pairRow(st), kind=S.spec.page.opportunity;
+const px=x=>x==null?null:fmt(x, x<10?4:2);
+const bpsH=x=>x==null?null:((x>=0?"+":"")+fmt(x,3)+" bps/时");
+const items=[];
+if(!row){
+S.symData.innerHTML='<span class="sdT">标的数据</span>：暂无所选标的的数据';
+return;
+}
+if(kind==="funding"){
+items.push(["A腿资金费", row.rate_a_bps_h==null?null:
+bpsH(row.rate_a_bps_h)+"（"+rateKindTxt(row.rate_kind_a)+"）"]);
+items.push(["B腿资金费", row.rate_b_bps_h==null?null:
+bpsH(row.rate_b_bps_h)+"（"+rateKindTxt(row.rate_kind_b)+"）"]);
+items.push(["费差", row.edge_bps_h==null?null:fmt(row.edge_bps_h,3)+" bps/时"]);
+items.push(["预计年化", row.apr_pct==null?null:((row.apr_pct>=0?"+":"")+fmt(row.apr_pct,1)+"%")]);
+items.push(["价差", row.spread_bps==null?null:fmt(row.spread_bps,1)+" bps"]);
+}else if(kind==="spread"){
+items.push(["基准腿价", px(row.price_a)]);
+items.push(["对冲腿价", px(row.price_b)]);
+items.push(["价差", row.signed_spread_bps==null?null:
+((row.signed_spread_bps>=0?"+":"")+fmt(row.signed_spread_bps,2)+" bps")]);
+items.push(["基准腿资金费", bpsH(row.rate_a_bps_h)]);
+items.push(["对冲腿资金费", bpsH(row.rate_b_bps_h)]);
+}else{
+const cd=S.candles[S.vA.value+"|"+pageSymbol(S)], okC=!!(cd&&cd.ok);
+items.push(["现价", px(row.price_a)]);
+items.push(["日波动", row.volatility_pct==null?null:fmt(row.volatility_pct,2)+"%"]);
+items.push(["24h 高", okC?px(cd.high):null]);
+items.push(["24h 低", okC?px(cd.low):null]);
+items.push(["建议区间", okC?(px(cd.suggested_lower)+" ~ "+px(cd.suggested_upper)):null]);
+items.push(["网格腿资金费", bpsH(row.rate_a_bps_h)]);
+items.push(["对冲腿资金费", bpsH(row.rate_b_bps_h)]);
+}
+S.symData.innerHTML='<span class="sdT">标的数据</span>：'+items.map(([lab, v])=>
+'<span class="sdLab">'+esc(lab)+'</span>：'+(v==null?"—":esc(v))).join(" · ");
 }
 
 // 腿的杠杆行文案：最高杠杆 + 保证金模式（数据来自 pairs 行，
@@ -902,6 +961,7 @@ error:d.error};
 }catch(e){S.candles[key]={ok:false, error:"网络异常，K线暂时取不到"}}
 S.candleFetching[key]=false;
 updateGridSug(st);
+renderSymData(st);
 }
 
 // ---------- 订单腿（方向徽标 + 金额/数量联动） ----------
