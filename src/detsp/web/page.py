@@ -5,11 +5,12 @@
 对冲刷量 / 策略记录 / 设置——没有账本页、没有独立「数据」页，
 也没有通用新建任务入口：新建任务只能从各策略页发起。
 
-总览：今日与累计两行统计（成交量/手续费/笔数/盈亏估算，口径见
-server.overview）、各所权益/持仓/挂单、KillSwitch、系统事件，
-外加「最佳机会」混合列表（/api/best 不带 strategy 参数时返回
-四策略各自 Top 5 合并、按机会值 % 降序，点行跳策略页并带入
-两腿与标的）。
+总览（顺序定版）：今日与累计两行统计（成交量/手续费/笔数/盈亏
+估算，口径见 server.overview）→ 盈亏口径小字 → 场所表（权益/
+可用/持仓/挂单数）→「最佳机会」混合列表（/api/best 不带
+strategy 参数时返回四策略各自 Top 5 合并、按机会值 % 降序，
+点行跳策略页并带入两腿与标的）→ 安全警告、KillSwitch、系统
+事件。
 「策略记录」是独立页（/api/records：运行仓位按开始时间倒序、
 仓位历史按平仓时间倒序，历史由后端追踪仓位消失落库）。
 
@@ -62,12 +63,12 @@ PAGE_HTML = """<!DOCTYPE html>
 --acc、警告 --yel。结构色（底/面/边框）也全部走变量，任何地方
 不许再出现这套之外的杂色（旧主题的蓝色/圆角一类早已清除）。 */
 :root{--bg:#0b0e11;--panel:#11161c;--panel2:#0d1117;--line:#232a32;--line2:#30363d;--txt:#c9d1d9;--bright:#e6edf3;--mut:#8b949e;--dim:#484f58;--acc:#3fb950;--red:#f85149;--redline:#5a2b2b;--yel:#d29922;--onacc:#06130a}
-body{font-family:ui-monospace,"JetBrains Mono",Consolas,"Courier New",monospace;margin:0;background:var(--bg);color:var(--txt);font-size:13px;line-height:1.55;font-variant-numeric:tabular-nums}
-h1{font-size:17px;color:var(--bright)} h2{font-size:15px;margin:16px 0 8px;color:var(--bright);letter-spacing:.03em}
+body{font-family:ui-monospace,"JetBrains Mono",Consolas,"Courier New",monospace;margin:0;background:var(--bg);color:var(--txt);font-size:13px;line-height:1.6;font-variant-numeric:tabular-nums}
+h1{font-size:17px;color:var(--bright)} h2{font-size:15px;margin:22px 0 12px;color:var(--bright);letter-spacing:.03em}
 h3{font-size:13px}
 a{color:var(--acc)}
-table{border-collapse:collapse;width:100%;margin:6px 0}
-th,td{border:1px solid var(--line);padding:4px 8px;font-size:12px;text-align:left;vertical-align:top}
+table{border-collapse:collapse;width:100%;margin:8px 0}
+th,td{border:1px solid var(--line);padding:6px 10px;font-size:12px;text-align:left;vertical-align:top}
 th{background:var(--panel2);color:var(--mut);text-transform:uppercase;letter-spacing:.06em;font-size:11px;font-weight:600}
 tbody tr:nth-child(even){background:rgba(255,255,255,.016)}
 button{background:transparent;color:var(--txt);border:1px solid var(--line2);padding:4px 12px;border-radius:0;cursor:pointer;font:inherit;font-size:12px}
@@ -87,9 +88,9 @@ pre{background:var(--panel2);border:1px solid var(--line);padding:8px;overflow:a
 #overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:10}
 #modal{background:var(--panel);border:1px solid var(--line);max-width:560px;margin:40px auto;padding:16px 20px;max-height:85vh;overflow:auto}
 #modal h3{margin-top:0;color:var(--bright)}
-fieldset{border:1px solid var(--line);margin:10px 0;padding:8px 12px}
+fieldset{border:1px solid var(--line);margin:12px 0;padding:12px 14px}
 fieldset legend{color:var(--mut);font-size:11px;padding:0 6px;text-transform:uppercase;letter-spacing:.05em}
-.fld{display:block;margin:7px 0;font-size:12px}
+.fld{display:block;margin:10px 0;font-size:12px}
 .fname{display:block;color:var(--bright)}
 .fdesc{display:block;color:var(--mut);font-size:11px;margin-top:1px;line-height:1.45}
 .upd{float:right;font-size:11px;color:var(--mut);font-weight:normal;letter-spacing:0;text-transform:none}
@@ -106,10 +107,10 @@ fieldset legend{color:var(--mut);font-size:11px;padding:0 6px;text-transform:upp
 #sidebar button.on{color:var(--acc);border-left-color:var(--acc);background:rgba(63,185,80,.06)}
 #sidebar .sideSep{border-top:1px solid var(--line);margin:8px 0}
 #sidebar .sideNote{font-size:11px;color:var(--mut);line-height:1.6;margin-top:12px}
-#main{flex:1;min-width:0;padding:4px 22px 30px}
+#main{flex:1;min-width:0;padding:8px 26px 40px}
 .page{display:none}.page.on{display:block}
-.block{border:1px solid var(--line);background:var(--panel);padding:10px 14px;margin:12px 0}
-.block h3{margin:0 0 8px;font-size:12px;color:var(--bright);letter-spacing:.05em}
+.block{border:1px solid var(--line);background:var(--panel);padding:16px 18px;margin:18px 0}
+.block h3{margin:0 0 10px;font-size:12px;color:var(--bright);letter-spacing:.05em}
 .block h3::before{content:"[ ";color:var(--acc)}
 .block h3::after{content:" ]";color:var(--acc)}
 label.inl{display:inline-block;margin:0 18px 4px 0;font-size:12px}
@@ -119,7 +120,7 @@ label.inl select{display:block;margin-top:4px;background:var(--bg);color:var(--t
 .pform{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:0 16px}
 .runBtn{background:var(--acc);color:var(--onacc);border-color:var(--acc);font-size:15px;padding:10px 30px;font-weight:bold;width:100%}
 .runBtn:hover{background:transparent;color:var(--acc);border-color:var(--acc)}
-.amtRow{display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;margin-bottom:8px}
+.amtRow{display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px}
 .amtMain{flex:0 1 320px}
 .amtMain .fld{font-size:13px;color:var(--mut)}
 .amtMain input{font-size:19px;padding:7px 10px}
@@ -129,7 +130,7 @@ label.inl select{display:block;margin-top:4px;background:var(--bg);color:var(--t
 .pickRow:hover td{background:rgba(63,185,80,.08)}
 .symWrap{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
 .symWrap select{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:6px 10px;min-width:340px;font:inherit;font-size:13px}
-.legRow{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:7px 0;border-bottom:1px dashed var(--line)}
+.legRow{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:10px 0;border-bottom:1px dashed var(--line)}
 .legRow:last-child{border-bottom:none}
 .legRow .legLab{flex:0 0 74px;color:var(--mut);font-size:12px}
 .legRow select{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:5px 8px;min-width:160px;font:inherit}
@@ -149,8 +150,10 @@ td.na{color:var(--dim)}
 .chip.on{background:var(--acc);color:var(--onacc);border-color:var(--acc)}
 details{margin:6px 0}
 details summary{cursor:pointer;color:var(--mut);font-size:12px}
-details div{font-size:12px;padding:6px 4px;line-height:1.7}
+details div{font-size:12px;padding:6px 4px;line-height:1.8}
 .sec input{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:5px 8px;width:100%;box-sizing:border-box;margin-top:3px;font:inherit}
+.pairPrices{margin-top:8px}
+.gridSug{margin-top:10px}
 </style>
 </head>
 <body>
@@ -172,24 +175,25 @@ details div{font-size:12px;padding:6px 4px;line-height:1.7}
 
 <section class="page on" id="page-overview">
 <h2>总览 <span class="muted" id="mode"></span><span class="upd" id="ovUpd"></span></h2>
-<p class="warn">⚠ 本面板只允许绑本机 127.0.0.1 使用，POST 操作带随机
-token 校验（防跨站借道），但<b>不等于登录鉴权</b>：不要改绑公网地址、
-不要做端口映射。</p>
-<div id="killbox"></div>
+<h2>总览 <span class="muted" id="mode"></span><span class="upd" id="ovUpd"></span></h2>
 <p>今日成交量：<b id="tvol">-</b>　今日手续费：<b id="tfee">-</b>　
 今日成交笔数：<b id="tcnt">-</b>　今日盈亏（估算）：<b id="tpnl">-</b></p>
 <p>累计成交量：<b id="avol">-</b>　累计手续费：<b id="afee">-</b>　
 累计成交笔数：<b id="acnt">-</b>　累计盈亏（估算）：<b id="apnl">-</b></p>
 <p class="muted" id="pnlNote"></p>
+<table id="venues"><thead><tr>
+<th>场所</th><th>模式</th><th>权益</th><th>可用</th><th>持仓</th><th>挂单数</th>
+</tr></thead><tbody></tbody></table>
 <h3>最佳机会 <span class="upd" id="bestUpd"></span></h3>
 <p class="muted">四策略各自的当前最佳标的合并成一张表，按机会值
 从大到小排列；点任意一行跳到对应策略页并带入两腿与标的。</p>
 <table id="bestTbl"><thead><tr>
 <th>策略</th><th>标的</th><th>做法</th><th>机会值（按此排序，口径不同）</th><th>操作</th>
 </tr></thead><tbody></tbody></table>
-<table id="venues"><thead><tr>
-<th>场所</th><th>模式</th><th>权益</th><th>可用</th><th>持仓</th><th>挂单数</th>
-</tr></thead><tbody></tbody></table>
+<p class="warn">⚠ 本面板只允许绑本机 127.0.0.1 使用，POST 操作带随机
+token 校验（防跨站借道），但<b>不等于登录鉴权</b>：不要改绑公网地址、
+不要做端口映射。</p>
+<div id="killbox"></div>
 <div id="events"></div>
 </section>
 
@@ -304,6 +308,17 @@ const names=Object.keys(groups);
 if(names.length<=1) return fields.map(f=>renderField(f,(values&&values[f.name]!==undefined)?values[f.name]:f.default,symbolSelect)).join("");
 return names.map(g=>"<fieldset><legend>"+esc(g)+"</legend>"+
 groups[g].map(f=>renderField(f,(values&&values[f.name]!==undefined)?values[f.name]:f.default,symbolSelect)).join("")+"</fieldset>").join("");
+}
+
+// 高级选项专用渲染：按开仓 / 平仓 / 保护 / 其他语义分组（specs
+// 的 adv_group），与弹窗用的 fieldsHtml（按 group）分开
+function advFieldsHtml(fields){
+const order=["开仓","平仓","保护","其他"];
+const groups={};
+fields.forEach(f=>{const g=f.adv_group||"其他";(groups[g]=groups[g]||[]).push(f)});
+return order.filter(g=>groups[g]&&groups[g].length).map(g=>
+"<fieldset><legend>"+esc(g)+"</legend>"+
+groups[g].map(f=>renderField(f,f.default,false)).join("")+"</fieldset>").join("");
 }
 
 function buildForm(st, values){
@@ -629,13 +644,15 @@ root.innerHTML=
 '<div class="symWrap"><label>币种 <select class="symSel" data-f="symbol"></select></label></div>'+
 '<div class="pairPrices muted"></div>'+
 '<p class="bad listNote"></p><div class="gridSug"></div></div>'+
-'<div class="block"><h3>配置</h3><div class="presetRow"><span class="muted">预设：</span>'+
-presetBtns+
-'<span class="muted">先在「金额」区填好金额，再点预设：只套结构参数（杠杆/门槛/格数等），金额不改（中性 = 原仓对齐默认值）；改动任何字段自动切到「自定义」。</span></div>'+
+'<div class="block"><h3>配置</h3>'+
+'<p class="muted">先在「金额」区填好金额，再点预设：只套结构参数（杠杆/门槛/格数等），金额不改（中性 = 原仓对齐默认值）；改动任何字段自动切到「自定义」。</p>'+
+'<div class="presetRow"><span class="muted">预设：</span>'+
+presetBtns+"</div>"+
 (primaryRest.length?'<div class="pform">'+primaryRest.map(f=>renderField(f,f.default,false)).join("")+"</div>":"")+
 (pg.note?'<p class="muted">'+esc(pg.note)+"</p>":"")+"</div>"+
 '<details class="block"><summary>高级选项（其余参数，改动随运行一并提交）</summary>'+
-'<div class="aform">'+fieldsHtml(advanced,null,false)+"</div></details>"+
+'<p class="muted">以下参数控制机器人自动开仓、平仓的行为细节，保持默认也能正常运行。</p>'+
+'<div class="aform">'+advFieldsHtml(advanced)+"</div></details>"+
 '<div class="block"><span class="upd prevUpd"></span><h3>交易预览</h3><div class="preview"><p class="muted">加载中…</p></div></div>'+
 '<div class="block"><p class="bad runErr"></p>'+
 '<button class="runBtn">▶ 运行</button> <span class="ok runOk"></span>'+
@@ -718,26 +735,26 @@ const S=SPAGES[st]; if(!S) return;
 const rows=S.pairsRows, kind=S.spec.page.opportunity, meta=S.pairsMeta||{};
 const cur=S.pendingSymbol||pageSymbol(S);
 S.symSel.innerHTML=rows.map(r=>{
-let metric="";
+// 下拉只留两段：币种 · 关键指标（价格只在下方价格行显示）
+let metric="—";
 if(kind==="funding")
-metric=" · 年化 "+(r.apr_pct==null?"-":(r.apr_pct>=0?"+":"")+fmt(r.apr_pct,1)+"%")+" · 费差 "+fmt(r.edge_bps_h,2)+" bps/小时";
+metric=r.apr_pct==null?"—":((r.apr_pct>=0?"+":"")+fmt(r.apr_pct,1)+"%");
 else if(kind==="spread")
-metric=" · 价差 "+(r.signed_spread_bps==null?"-":(r.signed_spread_bps>=0?"+":"")+fmt(r.signed_spread_bps,1))+" bps";
+metric=r.signed_spread_bps==null?"—":((r.signed_spread_bps>=0?"+":"")+fmt(r.signed_spread_bps,1)+" bps");
 else
-metric=" · 日波动 "+(r.volatility_pct==null?"无数据":fmt(r.volatility_pct,2)+"%")+" · 现价 "+(r.price_a==null?"-":fmt(r.price_a, r.price_a<10?4:2));
-if(r.mixed) metric+=" · 混口径";
-if(r.suspect) metric+=" · 疑似同名不同资产";
-return '<option value="'+esc(r.symbol)+'">'+esc(r.symbol)+esc(metric)+"</option>";
+metric=r.volatility_pct==null?"—":(fmt(r.volatility_pct,2)+"%");
+return '<option value="'+esc(r.symbol)+'">'+esc(r.symbol)+" · "+esc(metric)+"</option>";
 }).join("");
 let target="";
 if(cur&&rows.some(r=>r.symbol===cur)) target=cur;
 else if(rows.length) target=rows[0].symbol;
 if(target){S.symSel.value=target; S.selSymbol=target}
 S.pendingSymbol="";
-// 统计行（定版格式）：共同 N · A所上市 X · B所上市 Y
+// 统计行（定版格式）：共同 N · A所上市 X · B所上市 Y；共同数
+// 是原始交集，策略口径过滤后可交易数不同时才短注「可交易 M」
 S.pairsStats.textContent="共同 "+(meta.common??"-")+" · "+S.vA.value+" 上市 "+
 (meta.listed_a??"-")+" · "+S.vB.value+" 上市 "+(meta.listed_b??"-")+
-"（按策略排序后可交易 "+rows.length+" 个）";
+(rows.length!==(meta.common??rows.length)?" · 可交易 "+rows.length+" 个":"");
 setUpd(S.pairsUpd, meta.updated_at, S.pairsStale);
 renderPairPrices(st);
 const errs=meta.errors||{};
@@ -754,10 +771,13 @@ const S=SPAGES[st]; if(!S||!S.pairPrices) return;
 const row=pairRow(st), kinds=(S.pairsMeta&&S.pairsMeta.price_kinds)||{};
 const va=S.vA.value, vb=S.vB.value;
 const px=x=>x==null?"—":fmt(x, x<10?4:2);
-S.pairPrices.textContent=row
-? "价格："+va+" "+px(row.price_a)+"（"+(kinds[va]||"价格")+"） · "+
-  vb+" "+px(row.price_b)+"（"+(kinds[vb]||"价格")+"）"
-: "价格：暂无所选标的的价格";
+if(!row){S.pairPrices.textContent="价格：暂无所选标的的价格"; return}
+let html="价格："+esc(va)+" "+px(row.price_a)+"（"+esc(kinds[va]||"价格")+"） · "+
+esc(vb)+" "+px(row.price_b)+"（"+esc(kinds[vb]||"价格")+"）";
+// 混口径/疑似同名标注从下拉移出，只在价格行末尾小字出现
+if(row.mixed) html+=' <span class="tag">混口径，仅供参考</span>';
+if(row.suspect) html+=' <span class="tag">疑似同名不同资产</span>';
+S.pairPrices.innerHTML=html;
 }
 
 // 腿的杠杆行文案：最高杠杆 + 保证金模式（数据来自 pairs 行，

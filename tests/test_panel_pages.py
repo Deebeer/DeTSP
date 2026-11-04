@@ -106,8 +106,10 @@ def test_field_labels_have_short_explanations():
                 f"{spec['strategy']}.{f['name']} label 不应再带括号：{label}"
             assert desc, \
                 f"{spec['strategy']}.{f['name']} 缺 desc 说明"
-            assert len(label) + len(desc) <= 40, \
-                f"{spec['strategy']}.{f['name']} 名+说明太长：{label}（{desc}）"
+            # 第七轮：高级字段 desc 改「机器人会怎么做」的动作
+            # 语言，长度上限放宽为 desc ≤ 60 字（仍须简短）
+            assert len(desc) <= 60, \
+                f"{spec['strategy']}.{f['name']} 说明太长：{desc}"
     # 用户点名的例子
     by = {s["strategy"]: {f["name"]: f for f in s["fields"]}
           for s in strategy_specs()}
@@ -377,3 +379,68 @@ def test_index_page_serves_sidebar_layout(panel_base):
     assert 'id="sidebar"' in body
     assert 'data-page="strat-funding_carry"' in body
     assert "资金费套利" in body and "资金费 carry" not in body
+
+
+# ── 第七轮：总览顺序 / 去拥挤 / 配置说明 / 高级大白话 ──────
+
+def test_overview_block_order():
+    # 总览主体顺序定版：今日统计 → 累计统计 → 盈亏口径小字 →
+    # 场所表 → 最佳机会表 → 安全警告 / 停机 / 系统事件
+    ov = PAGE_HTML[PAGE_HTML.index('id="page-overview"'):
+                   PAGE_HTML.index('id="page-records"')]
+    flow = ["今日成交量", "累计成交量", 'id="pnlNote"', 'id="venues"',
+            "最佳机会", 'id="bestTbl"', 'class="warn"',
+            'id="killbox"', 'id="events"']
+    pos = [ov.index(t) for t in flow]
+    assert pos == sorted(pos), "总览区块顺序必须是第七轮定版"
+    # 场所表列定版：场所/模式/权益/可用/持仓/挂单数
+    venues = ov[ov.index('id="venues"'):ov.index("最佳机会")]
+    for col in ("场所", "模式", "权益", "可用", "持仓", "挂单数"):
+        assert f"<th>{col}</th>" in venues
+
+
+def test_config_note_and_advanced_plain_language():
+    # 配置区说明行：用户定版原文，位于「配置」标题正下方、预设
+    # 按钮行之上
+    note = "先在「金额」区填好金额，再点预设：只套结构参数" \
+           "（杠杆/门槛/格数等），金额不改（中性 = 原仓对齐" \
+           "默认值）；改动任何字段自动切到「自定义」。"
+    assert note in PAGE_HTML
+    renderer = PAGE_HTML[PAGE_HTML.index("function buildStrategyPage"):]
+    assert renderer.index("<h3>配置</h3>") < renderer.index(note) \
+        < renderer.index("presetRow")
+    # 高级选项总说明 + 按开仓/平仓/保护/其他语义分组渲染
+    assert "以下参数控制机器人自动开仓、平仓的行为细节，" \
+           "保持默认也能正常运行。" in PAGE_HTML
+    assert "advFieldsHtml" in PAGE_HTML
+    # 四策略全部高级字段（非 primary、非两腿）都有语义分组
+    for spec in strategy_specs():
+        vf = set(spec["page"]["venue_fields"])
+        groups = set()
+        for f in spec["fields"]:
+            if f["primary"] or f["name"] in vf:
+                continue
+            assert f["adv_group"] in ("开仓", "平仓", "保护", "其他"), \
+                f"{spec['strategy']}.{f['name']} 缺高级分组"
+            groups.add(f["adv_group"])
+        # 每策略至少有开仓/保护两组；溢价套利的平仓由主配置区
+        # 的入场带决定、高级区无平仓组，其余三策略三组齐全
+        assert {"开仓", "保护"} <= groups, \
+            f"{spec['strategy']} 高级分组应至少覆盖开仓/保护"
+        if spec["strategy"] != "premium_arb":
+            assert "平仓" in groups, \
+                f"{spec['strategy']} 高级分组应有平仓组"
+
+
+def test_symbol_dropdown_two_segments_and_stats_line():
+    # 选市场去拥挤：下拉选项只剩「币种 · 关键指标」两段，现价
+    # 与混口径都不进下拉（混口径移到价格行末尾小字）
+    seg = PAGE_HTML[PAGE_HTML.index("function fillPairSymbols"):
+                    PAGE_HTML.index("function renderPairPrices")]
+    assert "现价" not in seg and "混口径" not in seg
+    assert "疑似同名不同资产" not in seg
+    assert "混口径，仅供参考" in PAGE_HTML
+    # 统计行精简：删括号长尾，过滤后数量不同才短注「可交易 M」
+    assert "（按策略排序后可交易" not in PAGE_HTML
+    assert '" · 可交易 "' in PAGE_HTML
+    assert '"共同 "' in PAGE_HTML and '" 上市 "' in PAGE_HTML
