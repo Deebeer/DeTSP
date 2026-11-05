@@ -29,8 +29,8 @@ from detsp.web.page import PAGE_HTML
 from detsp.web.server import (PanelState, _normalize_run_mode,
                               _validate_params_for_mode, serve)
 
-ROT_PARAMS = {"symbol": "BTC", "venue_a": "arcus", "venue_b": "lighter",
-              "notional_usd": 100.0, "leverage_a": 1, "leverage_b": 1}
+CARRY_PARAMS = {"symbol": "BTC", "venue_a": "arcus", "venue_b": "lighter",
+                "notional_usd": 100.0, "leverage": 1}
 
 GRID_PARAMS_NO_QTY = {"grid_venue": "arcus", "hedge_venue": "lighter",
                       "symbol": "BTC", "lower_price": 55_000,
@@ -232,8 +232,8 @@ def test_create_full_auto_persists_and_tasks_view(panel):
     base, state, store = panel
     status, res = _req(base, "/api/tasks/create", "POST",
                        token=state.api_token,
-                       body={"name": "fa-1", "strategy": "rotation_hedge",
-                             "params": ROT_PARAMS,
+                       body={"name": "fa-1", "strategy": "funding_carry",
+                             "params": CARRY_PARAMS,
                              "run_mode": "full_auto",
                              "run_preset": "aggressive"})
     assert status == 200 and res["ok"] is True, res
@@ -268,8 +268,8 @@ def test_create_auto_normalizes_to_semi_auto(panel):
     base, state, store = panel
     status, res = _req(base, "/api/tasks/create", "POST",
                        token=state.api_token,
-                       body={"name": "sa-1", "strategy": "rotation_hedge",
-                             "params": ROT_PARAMS, "run_mode": "auto"})
+                       body={"name": "sa-1", "strategy": "funding_carry",
+                             "params": CARRY_PARAMS, "run_mode": "auto"})
     assert status == 200 and res["ok"] is True, res
     saved = load_panel_tasks(store)
     assert saved[0]["run_mode"] == "semi_auto"   # 新写入一律新值
@@ -282,15 +282,15 @@ def test_create_bad_run_preset_and_mode_rejected(panel):
     base, state, _ = panel
     status, res = _req(base, "/api/tasks/create", "POST",
                        token=state.api_token,
-                       body={"name": "bad-1", "strategy": "rotation_hedge",
-                             "params": ROT_PARAMS,
+                       body={"name": "bad-1", "strategy": "funding_carry",
+                             "params": CARRY_PARAMS,
                              "run_mode": "full_auto",
                              "run_preset": "turbo"})
     assert status == 400 and "风险档" in res["error"]
     status, res = _req(base, "/api/tasks/create", "POST",
                        token=state.api_token,
-                       body={"name": "bad-2", "strategy": "rotation_hedge",
-                             "params": ROT_PARAMS, "run_mode": "turbo"})
+                       body={"name": "bad-2", "strategy": "funding_carry",
+                             "params": CARRY_PARAMS, "run_mode": "turbo"})
     assert status == 400 and "非法" in res["error"]
 
 
@@ -298,8 +298,8 @@ def test_update_without_mode_fields_preserves_them(panel):
     base, state, store = panel
     status, res = _req(base, "/api/tasks/create", "POST",
                        token=state.api_token,
-                       body={"name": "sf-1", "strategy": "rotation_hedge",
-                             "params": ROT_PARAMS,
+                       body={"name": "sf-1", "strategy": "funding_carry",
+                             "params": CARRY_PARAMS,
                              "run_mode": "semi_fixed",
                              "run_preset": "conservative"})
     assert status == 200 and res["ok"] is True, res
@@ -307,7 +307,7 @@ def test_update_without_mode_fields_preserves_them(panel):
     status, res = _req(base, "/api/tasks/update", "POST",
                        token=state.api_token,
                        body={"name": "sf-1",
-                             "params": {**ROT_PARAMS,
+                             "params": {**CARRY_PARAMS,
                                         "notional_usd": 250.0}})
     assert status == 200 and res["ok"] is True, res
     saved = load_panel_tasks(store)

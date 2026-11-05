@@ -1,19 +1,22 @@
 """左侧边栏 + 每策略一页测试（第六轮：用户定版结构）。
 
-覆盖：边栏入口与四个策略页容器存在且顺序为用户定版（总览 /
-中性网格 / 溢价套利 / 资金费套利 / 轮换对冲刷量 / 策略记录 /
-设置，共 7 项，无账本、无「数据」入口、无通用新建任务按钮）；
-策略页定版流程的区块标记（运作方式 / 订单腿 / 金额（自由输入、
-无 chips）/ 选市场（pairs 下拉 + 标的数据条）/ 配置（预设四态，
-五段字段）/ 交易预览 / 运行中仓位，无热门机会表）；总览两行统计（今日 +
+覆盖：边栏入口与三个策略页容器存在且顺序为用户定版（总览 /
+中性网格 / 溢价套利 / 资金费套利 / 策略记录 /
+设置，共 6 项，无账本、无「数据」入口、无通用新建任务按钮、
+无轮换对冲页）；
+策略页第十一轮定版流程的区块标记（运作方式 / 运行模式 /
+选择两腿 / 仓位设置 / 策略配置 / 更多配置（折叠）/ 交易预览 /
+运行中仓位，无热门机会表）；总览两行统计（今日 +
 累计，含盈亏估算口径）与最佳机会混合列表；策略记录独立页
 两段；字段说明三段式（label 只剩名 + desc 一句话说明，页面
 fname/fdesc 两行呈现）；颜色只用一套变量、
 无杂色残留；极客风主题关键样式；「资金费套利」改名一致性；
 实时性与杠杆维度（20 秒刷新、更新戳与失败保留、选市场统计/
 价格行、订单腿杠杆行、预览超限警告）；specs 的 page 元数据自洽（primary / venue_fields / amount /
-market_value / how_it_works / presets / amount_ratios）；
-/api/strategy-specs 把 page 元数据带给前端。
+market_value / how_it_works / presets / amount_ratios /
+run_modes 与 fields 的 zone 分区）；
+/api/strategy-specs 把 page 元数据带给前端；设置页场所费率表
+与数据服务状态行、溢价中枢接库与资金费库信息行的页面标记。
 """
 
 import json
@@ -35,8 +38,7 @@ from detsp.web.page import PAGE_HTML
 from detsp.web.server import PanelState, serve
 
 SIDEBAR_PAGES = ["overview", "strat-hedged_grid", "strat-premium_arb",
-                 "strat-funding_carry", "strat-rotation_hedge",
-                 "records", "settings"]
+                 "strat-funding_carry", "records", "settings"]
 
 
 # ── 边栏与策略页容器 ────────────────────────────────────────
@@ -47,13 +49,18 @@ def test_sidebar_entries_and_order():
     sidebar = PAGE_HTML[start:end]
     pos = [sidebar.index(f'data-page="{p}"') for p in SIDEBAR_PAGES]
     assert pos == sorted(pos), \
-        "边栏顺序必须是用户定版：总览/网格/套利/资金费/轮换/策略记录/设置"
+        "边栏顺序必须是用户定版：总览/网格/套利/资金费/策略记录/设置"
     for label in ("总览", "中性网格", "溢价套利", "资金费套利",
-                  "轮换对冲刷量", "策略记录", "设置"):
+                  "策略记录", "设置"):
         assert label in sidebar
     # 账本已按定版从边栏移除
     assert "账本" not in sidebar
     assert 'data-page="fills"' not in PAGE_HTML
+    # 第十一轮：轮换对冲已砍，边栏与页面都不得有轮换残留
+    assert "轮换" not in sidebar
+    assert 'data-page="strat-rotation_hedge"' not in PAGE_HTML
+    assert 'id="page-strat-rotation_hedge"' not in PAGE_HTML
+    assert "rotation_hedge" not in PAGE_HTML
 
 
 def test_sidebar_slimmed_no_market_no_newtask():
@@ -117,7 +124,6 @@ def test_field_labels_have_short_explanations():
     assert by["hedged_grid"]["lower_price"]["desc"] == "网格铺单的最低价"
     # 金额区说明按用户例子：名下直接写「自由填写（USD，每边）」
     pages = {s["strategy"]: s["page"] for s in strategy_specs()}
-    assert pages["rotation_hedge"]["amount_desc"] == "自由填写（USD，每边）"
     assert pages["funding_carry"]["amount_desc"] == "自由填写（USD，每边）"
 
 
@@ -156,32 +162,38 @@ def test_leg_rows_show_available_balance():
 def test_strategy_page_containers_exist():
     for p in SIDEBAR_PAGES:
         assert f'id="page-{p}"' in PAGE_HTML
-    # 策略页容器是空壳，由前端通用渲染器按 specs 填充
+    # 策略页容器是空壳，由前端通用渲染器按 specs 填充（三策略）
+    assert set(PARAMS_CLASSES) == {"hedged_grid", "premium_arb",
+                                   "funding_carry"}
     for st in PARAMS_CLASSES:
         assert f'<section class="page" id="page-strat-{st}"></section>' \
             in PAGE_HTML
 
 
 def test_strategy_page_flow_blocks():
-    # 第五轮流程（用户定版，第十轮合并）：页头 → 运行模式 → 订单腿
-    # → 金额 → 选市场 → 配置（预设 + 五段字段）→ 交易预览 → 运行
+    # 第十一轮统一顺序（用户定版）：页头 → 运行模式 → 选择两腿
+    # → 仓位设置 → 策略配置 → 更多配置（折叠）→ 交易预览 → 运行
     # → 运行中仓位；区块标题由渲染器 JS 生成，在渲染器源码范围
     # 内断言顺序
-    renderer = PAGE_HTML[PAGE_HTML.index("function buildStrategyPage"):]
-    flow = ["运作方式</summary>", "<h3>订单腿</h3>", "<h3>金额</h3>",
-            "<h3>选市场</h3>", "<h3>配置</h3>",
+    renderer = PAGE_HTML[PAGE_HTML.index("root.innerHTML="):]
+    flow = ["运作方式</summary>", "<h3>运行模式</h3>", "<h3>选择两腿</h3>",
+            "<h3>仓位设置</h3>", "<h3>策略配置</h3>", "更多配置",
             "<h3>交易预览</h3>", "<h3>运行中仓位</h3>"]
     pos = [renderer.index(t) for t in flow]
-    assert pos == sorted(pos), "策略页区块顺序必须是定版流程"
+    assert pos == sorted(pos), "策略页区块顺序必须是第十一轮定版流程"
     assert "runBtn" in PAGE_HTML and "运行" in PAGE_HTML
-    # 「自动化配置」子区已取消（第十轮）：配置改为五段渲染，
-    # specs 无 section 时才走 legacyConfigHtml 兜底分组
+    # 更多配置是折叠 details；zone 渲染与旧五段/legacy 兜底都在
+    assert "moreBlock" in PAGE_HTML and '<details class="block moreBlock">' \
+        in PAGE_HTML
+    assert "zoneFieldHtml" in PAGE_HTML
     assert "自动化配置" not in PAGE_HTML
     assert "sectionsHtml" in PAGE_HTML and "legacyConfigHtml" in PAGE_HTML
     assert "cfgSec" in PAGE_HTML and "data-section" in PAGE_HTML
     # 旧区块标题不得残留（按完整标题字面断言，避免误伤「所需保证金」等词）
     for gone in ("<h3>交易平台</h3>", "<h3>保证金</h3>",
-                 "<h3>本策略任务</h3>", "<h3>策略机会"):
+                 "<h3>本策略任务</h3>", "<h3>策略机会",
+                 "<h3>订单腿</h3>", "<h3>金额</h3>", "<h3>选市场</h3>",
+                 "<h3>配置</h3>"):
         assert gone not in PAGE_HTML
     # 热门机会表已按定版从策略页移除（移去总览做最佳机会卡片）
     assert "热门机会" not in PAGE_HTML
@@ -275,6 +287,8 @@ def test_page_meta_consistency():
                         "venue_fields": list(PAGE_META[st]["venue_fields"]),
                         "venue_labels": list(PAGE_META[st]["venue_labels"]),
                         "primary": list(PAGE_META[st]["primary"]),
+                        "run_modes": [dict(m) for m in
+                                      PAGE_META[st].get("run_modes", [])],
                         "presets": PRESETS[st],
                         "preset_labels": PRESET_LABELS,
                         "amount_ratios": AMOUNT_RATIOS.get(st, {})}
@@ -325,16 +339,90 @@ def test_page_meta_mob_flow_fields():
 def test_primary_fields_per_strategy():
     by = {s["strategy"]: set(s["page"]["primary"])
           for s in strategy_specs()}
-    assert {"hold_min_seconds", "hold_max_seconds"} <= \
-        by["rotation_hedge"]
-    assert "notional_usd" in by["rotation_hedge"]
     assert "notional_usd" in by["funding_carry"]
-    assert "min_entry_edge_bps_per_hour" in by["funding_carry"]
-    assert "exit_edge_bps_per_hour" in by["funding_carry"]
+    assert "min_edge_bps_per_hour" in by["funding_carry"]
     assert {"execution_mode", "midline_bps", "upper_bps", "lower_bps",
             "max_position_usd"} <= by["premium_arb"]
     assert {"lower_price", "upper_price", "grid_count", "qty_per_grid"} \
         <= by["hedged_grid"]
+
+
+def test_run_modes_and_zone_contract():
+    # 第十一轮契约：page.run_modes 显示名 + fields 的 zone 分区
+    by = {s["strategy"]: s for s in strategy_specs()}
+    # 中性网格只有「自主」一项；溢价/资金费三档显示名定版
+    assert by["hedged_grid"]["page"]["run_modes"] == \
+        [{"value": "manual", "label": "自主"}]
+    for st in ("premium_arb", "funding_carry"):
+        modes = by[st]["page"]["run_modes"]
+        assert [m["value"] for m in modes] == \
+            ["semi_fixed", "semi_auto", "full_auto"]
+        assert [m["label"] for m in modes] == \
+            ["固腿固标", "固腿优标", "优腿优标"]
+    zones = {st: {f["name"]: f.get("zone") for f in s["fields"]}
+             for st, s in by.items()}
+    for st, z in zones.items():
+        assert set(z.values()) <= {"legs", "position", "config",
+                                   "more", "hidden"}
+        # hidden 系统值不出现在 fields 里（specs 输出已剔除）
+        assert "hidden" not in set(z.values()), st
+    grid = zones["hedged_grid"]
+    assert {n for n, z in grid.items() if z == "config"} == \
+        {"lower_price", "upper_price", "grid_count", "qty_per_grid",
+         "mode", "out_of_range_action"}
+    assert {n for n, z in grid.items() if z == "more"} == \
+        {"hedge_deadband_qty", "max_unhedged_seconds",
+         "max_residual_seconds", "takeover_position"}
+    prem = zones["premium_arb"]
+    assert {"execution_mode", "close_band_bps", "midline_bps",
+            "upper_bps", "lower_bps"} <= \
+        {n for n, z in prem.items() if z == "config"}
+    assert {"persist_seconds", "cooldown_seconds",
+            "inventory_scale_bps", "inventory_floor_frac",
+            "min_order_notional_usd", "max_slippage_bps",
+            "settle_grace_seconds", "maker_offset_ticks",
+            "maker_timeout_seconds", "max_order_notional_usd"} <= \
+        {n for n, z in prem.items() if z == "more"}
+    fund = zones["funding_carry"]
+    assert {n for n, z in fund.items() if z == "config"} == \
+        {"max_open_spread_bps", "min_edge_bps_per_hour",
+         "close_corridor_pct", "qty_dev_close_pct", "reopen"}
+    assert {n for n, z in fund.items() if z == "more"} == \
+        {"max_slippage_bps"}
+    # 页面渲染器按 run_modes/zone 走：静态标记齐全
+    for marker in ("run_modes", "applyRunModeButtons", "modeStatic",
+                   "固腿固标", "固腿优标", "优腿优标",
+                   'f.zone==="position"', 'f.zone==="config"',
+                   'f.zone==="more"'):
+        assert marker in PAGE_HTML, marker
+
+
+def test_library_and_fees_page_markers():
+    # 任务 3：溢价中枢接库（只读切换/来源标注/无条目提示/不冲手填）
+    for marker in ("loadPremiumEntry", "applyPremiumEntry",
+                   "data-lib-field", "libNote", "libEdited",
+                   "来源：中枢库", "更新于 ",
+                   "中枢库暂无此组合（需录制满 3 小时）",
+                   "/api/libraries?venue_a="):
+        assert marker in PAGE_HTML, marker
+    # 任务 4：资金费库信息行 + 强行启动警告的页面承接
+    for marker in ("fundingLibInfo", "loadFundingInfo",
+                   "/api/libraries/funding?", "中位持续 ",
+                   "7 天平均费差 ", "预计回本 ", "样本 ",
+                   "TASK_WARNINGS", "r.warnings"):
+        assert marker in PAGE_HTML, marker
+    # 任务 5：设置页场所费率表 + 数据服务状态行
+    settings = PAGE_HTML[PAGE_HTML.index('id="page-settings"'):]
+    for marker in ("场所费率表", 'id="feeTable"', 'id="feeSave"',
+                   "数据服务", 'id="libStatus"'):
+        assert marker in settings, marker
+    for marker in ("loadFees", "/api/settings/fees", "feeEntryVal",
+                   "FEE_VENUES", "renderLibStatus", "loadLibraryStatus",
+                   "中枢库条目数 ", "最近录制 ", "最近重算 "):
+        assert marker in PAGE_HTML, marker
+    # 7 所费率行名单与 VENUE_IDS 一致
+    assert '"arcus","lighter","lighter_rh","hyperliquid","entropy",' \
+           '"tradexyz","aster"' in PAGE_HTML
 
 
 # ── 接口把 page 元数据带给前端 ──────────────────────────────
@@ -416,14 +504,14 @@ def test_overview_block_order():
 
 
 def test_config_note_and_advanced_plain_language():
-    # 配置区说明行：用户定版原文，位于「配置」标题正下方、预设
-    # 按钮行之上
-    note = "先在「金额」区填好金额，再点预设：只套结构参数" \
+    # 配置区说明行：用户定版原文，位于「策略配置」标题正下方、
+    # 预设按钮行之上（第十一轮金额区并入仓位设置，措辞同步）
+    note = "先在「仓位设置」区填好金额，再点预设：只套结构参数" \
            "（杠杆/门槛/格数等），金额不改（中性 = 原仓对齐" \
            "默认值）；改动任何字段自动切到「自定义」。"
     assert note in PAGE_HTML
     renderer = PAGE_HTML[PAGE_HTML.index("function buildStrategyPage"):]
-    assert renderer.index("<h3>配置</h3>") < renderer.index(note) \
+    assert renderer.index("<h3>策略配置</h3>") < renderer.index(note) \
         < renderer.index("presetRow")
     # 第十轮五段：段序常量、总结句容器与模板替换函数都在
     assert 'SECTION_ORDER=["交易对象","开仓条件","平仓条件","平仓后怎么办","保护"]' \

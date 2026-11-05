@@ -34,9 +34,8 @@ _YAML_CAPS_KEYS = {"global_usd", "venues", "strategies"}
 _TASK_KEYS = {"name", "strategy", "venue", "symbol", "venue_a", "venue_b",
               "base_venue", "hedge_venue", "grid_venue", "params", "run_mode",
               "run_preset", "amount_usd"}
-_TASK_STRATEGIES = ("hedged_grid", "rotation_hedge", "premium_arb",
-                    "funding_carry")
-_TASK_REMOVED = ("grid", "volume_loop")   # 已移除的旧策略名，单独报错
+_TASK_STRATEGIES = ("hedged_grid", "premium_arb", "funding_carry")
+_TASK_REMOVED = ("grid", "volume_loop", "rotation_hedge")   # 已移除的旧策略名，单独报错
 
 
 class ConfigError(ValueError):
@@ -243,7 +242,7 @@ def build_config(env: dict[str, str] | None = None, yaml_data: dict | None = Non
             if strat == "hedged_grid":
                 used.add((_tf("grid_venue"), sym))
                 used.add((_tf("hedge_venue"), sym))
-            elif strat in ("rotation_hedge", "funding_carry"):
+            elif strat == "funding_carry":
                 used.add((_tf("venue_a"), sym))
                 used.add((_tf("venue_b"), sym))
             elif strat == "premium_arb":

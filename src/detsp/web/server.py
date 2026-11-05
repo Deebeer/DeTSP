@@ -33,6 +33,7 @@ except ImportError:  # 后端归一函数未就绪时的兜底（语义与契约
             return "semi_auto"
         return v
 
+from ..core.config import VENUE_IDS
 from ..core.ledger import Ledger
 from ..core.panel_tasks import save_panel_tasks
 from ..core.secret_fields import save_secrets, secrets_status
@@ -110,7 +111,6 @@ def _validate_params_for_mode(strategy, params, run_mode):
         supplied.update({
             "hedged_grid": {"grid_venue": "arcus",
                             "hedge_venue": "lighter"},
-            "rotation_hedge": {"venue_a": "arcus", "venue_b": "lighter"},
             "funding_carry": {"venue_a": "arcus", "venue_b": "lighter"},
             "premium_arb": {"base_venue": "arcus",
                             "hedge_venue": "lighter"},
@@ -159,6 +159,66 @@ class PanelState:
     env_path: object = None
     # 数据页：公开行情扫描器（测试可注入假对象）
     market_scanner: object = None
+    # 第十一轮接线：__main__ 把共享 scanner 与 state_dir 传进来
+    # （scanner 是 market_scanner 的别名参数，两者同步）；缺省
+    # None 时维持现行懒构造 scanner 的行为，库服务不启用。
+    scanner: object = None
+    state_dir: object = None
+    # 场所费率表与中枢/费差库服务（stats_library 工作流提供）；
+    # 模块缺失或构造失败时保持 None，面板相关功能降级隐藏。
+    fee_table: object = None
+    library_service: object = None
+
+    def __post_init__(self):
+        if self.scanner is not None and self.market_scanner is None:
+            self.market_scanner = self.scanner
+        elif self.market_scanner is not None and self.scanner is None:
+            self.scanner = self.market_scanner
+        self._init_library_services()
+
+    def _init_library_services(self) -> None:
+        """按 state_dir 初始化费率表与库服务（容错降级）。
+
+        只在给了 state_dir 时尝试：fee_table = FeeTable(
+        state_dir/"fees.json")；library_service = LibraryService(
+        scanner, state_dir, fee_table)。任一模块 ImportError 或
+        构造异常都只让对应对象保持 None，面板其余功能不受影响。
+        已注入的对象（测试/外部）不覆盖；库服务自带的 fee_table
+        反过来补给 self.fee_table。
+        """
+        from pathlib import Path
+
+        svc = self.library_service
+        if svc is not None and self.fee_table is None:
+            self.fee_table = getattr(svc, "fee_table", None)
+        if self.state_dir is None:
+            return
+        if self.fee_table is None:
+            try:
+                from ..core.fee_table import FeeTable
+
+                self.fee_table = FeeTable(Path(self.state_dir) / "fees.json")
+            except Exception:  # noqa: BLE001 — 缺模块/坏文件降级
+                self.fee_table = None
+        if self.library_service is None:
+            try:
+                from ..core.stats_library import LibraryService
+
+                self.library_service = LibraryService(
+                    self._scanner(), self.state_dir, self.fee_table)
+            except Exception:  # noqa: BLE001 — 缺模块降级
+                self.library_service = None
+            if self.library_service is not None and self.fee_table is None:
+                self.fee_table = getattr(
+                    self.library_service, "fee_table", None)
+
+    def _fee_table(self):
+        """有效费率表：自身优先，其次库服务自带的。"""
+        if self.fee_table is not None:
+            return self.fee_table
+        if self.library_service is not None:
+            return getattr(self.library_service, "fee_table", None)
+        return None
 
     def _scanner(self):
         """惰性创建扫描器：观察列表取 config 的 watchlist。"""
@@ -167,6 +227,7 @@ class PanelState:
 
             wl = getattr(self.app_config, "watchlist", None) or None
             self.market_scanner = MarketScanner(watchlist=wl)
+            self.scanner = self.market_scanner
         return self.market_scanner
 
     # ----- 数据页（公开行情，只读）-----
@@ -182,7 +243,7 @@ class PanelState:
 
     def best_view(self, strategy: str) -> dict:
         """strategy 给了合法策略名 → 该策略最佳（策略卡时代的
-        接口，保留兼容）；没给/不合法 → 四策略合并排序
+        接口，保留兼容）；没给/不合法 → 三策略合并排序
         （总览「最佳机会」单列表用）。"""
         from ..strategies.specs import PARAMS_CLASSES
 
@@ -359,6 +420,268 @@ class PanelState:
                         f"（需重启程序生效）")
         return {"ok": True, "changed": changed,
                 "note": "已保存到 .env，需重启程序生效"}
+
+    # ----- 设置页（场所费率表：core.fee_table，单位 bps）-----
+    def fees_view(self) -> dict:
+        ft = self._fee_table()
+        if ft is None:
+            return {"ok": False, "fees": {},
+                    "error": "费率表不可用（费率表服务未就绪）"}
+        try:
+            return {"ok": True, "fees": ft.as_dict()}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "fees": {}, "error": str(e)}
+
+    def save_fees_view(self, body) -> dict:
+        """POST /api/settings/fees {venue_id, taker_bps, maker_bps}。"""
+        ft = self._fee_table()
+        if ft is None:
+            return {"ok": False, "error": "费率表不可用（费率表服务未就绪）"}
+        if not isinstance(body, dict):
+            return {"ok": False, "error": "请求体必须是 JSON 对象"}
+        venue_id = body.get("venue_id") or body.get("venue")
+        if venue_id not in VENUE_IDS:
+            return {"ok": False,
+                    "error": f"未知场所：{venue_id}，合法值：{VENUE_IDS}"}
+        try:
+            taker = float(body.get("taker_bps"))
+            maker = float(body.get("maker_bps"))
+        except (TypeError, ValueError):
+            return {"ok": False,
+                    "error": "taker_bps / maker_bps 必须是数字（单位 bps）"}
+        try:
+            ft.set(venue_id, taker, maker)
+        except (ValueError, TypeError) as e:
+            return {"ok": False, "error": str(e)}
+        self._event(f"设置页保存场所费率：{venue_id} "
+                    f"taker {taker} bps / maker {maker} bps")
+        return {"ok": True, "fees": ft.as_dict()}
+
+    # ----- 中枢库 / 费差库（core.stats_library，缺失时降级）-----
+    def _library(self):
+        svc = self.library_service
+        return getattr(svc, "library", None) if svc is not None else None
+
+    def _library_status(self):
+        svc = self.library_service
+        if svc is None:
+            return None
+        try:
+            st = svc.status()
+            return st if isinstance(st, dict) else {"raw": st}
+        except Exception as e:  # noqa: BLE001 — 状态查询不崩面板
+            return {"running": False, "last_error": str(e)}
+
+    @staticmethod
+    def _entry_dict(entry) -> dict:
+        if isinstance(entry, dict):
+            return dict(entry)
+        if hasattr(entry, "__dict__"):
+            return {k: v for k, v in vars(entry).items()
+                    if not k.startswith("_")}
+        return {"value": entry}
+
+    def libraries_view(self, venue_a=None, venue_b=None,
+                       symbol=None) -> dict:
+        """GET /api/libraries：{service: status|null, premium: {...}}。
+
+        premium 的键为 "base__hedge__symbol"（与 StatsLibrary.
+        premium_entries 的键一致）。带 venue_a/venue_b/symbol 查询
+        参数时按三元组精确取一条并入（枚举不可用时也能取到）。
+        库服务不存在时 service=None、premium={}（面板降级隐藏）。
+        """
+        premium: dict = {}
+        lib = self._library()
+        if lib is not None:
+            entries = getattr(lib, "premium_entries", None)
+            if callable(entries):
+                try:
+                    all_entries = entries()
+                    if isinstance(all_entries, dict):
+                        for k, v in all_entries.items():
+                            premium[str(k)] = self._entry_dict(v)
+                except Exception:  # noqa: BLE001 — 枚举失败不拖垮接口
+                    pass
+            if venue_a and venue_b and symbol:
+                fn = getattr(lib, "premium_entry", None)
+                if callable(fn):
+                    try:
+                        entry = fn(venue_a, venue_b, symbol)
+                    except Exception:  # noqa: BLE001
+                        entry = None
+                    if entry is not None:
+                        premium[f"{venue_a}__{venue_b}__{symbol}"] = \
+                            self._entry_dict(entry)
+        return {"service": self._library_status(), "premium": premium}
+
+    def _taker_bps(self, venue_id) -> float:
+        """某所 taker 费率（bps）；费率表不可用/场所非法时 0。"""
+        ft = self._fee_table()
+        if ft is None or venue_id not in VENUE_IDS:
+            return 0.0
+        try:
+            taker, _maker = ft.get(venue_id)
+            return float(taker)
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    def _funding_cost_bps(self, va, vb, params: dict) -> float:
+        """开平总成本（bps）= (两所 taker 之和) × 2 + 最大开仓价差。
+
+        最大开仓价差取任务/表单的 max_open_spread_bps（资金费五项
+        配置之一），缺失时按其默认值 300 bps。
+        """
+        mos = params.get("max_open_spread_bps")
+        try:
+            mos = float(mos) if mos is not None else 300.0
+        except (TypeError, ValueError):
+            mos = 300.0
+        return (self._taker_bps(va) + self._taker_bps(vb)) * 2 + mos
+
+    def libraries_funding_view(self, va=None, vb=None, symbol=None,
+                               line=None, max_open_spread=None,
+                               current_net=None) -> dict:
+        """GET /api/libraries/funding：单组合费差库信息 + 预计回本。
+
+        回本 = 开平总成本 ÷ 当前净费差；当前净费差由页面传当前
+        pairs 行的费差（current_net），没传时用 7 天平均净费差。
+        """
+        import time as _time
+
+        out = {"service": self._library_status(), "funding": None}
+        lib = self._library()
+        if lib is None or not va or not vb or not symbol:
+            return out
+        try:
+            min_line = float(line) if line is not None else 0.0
+        except (TypeError, ValueError):
+            min_line = 0.0
+        fn = getattr(lib, "funding_stats", None)
+        if not callable(fn):
+            return out
+        try:
+            stats = fn(va, vb, symbol, min_line, _time.time())
+        except Exception as e:  # noqa: BLE001
+            out["error"] = str(e)
+            return out
+        if not isinstance(stats, dict):
+            return out
+        stats = dict(stats)
+        params = {}
+        if max_open_spread is not None:
+            params["max_open_spread_bps"] = max_open_spread
+        cost = self._funding_cost_bps(va, vb, params)
+        net = current_net
+        if net is None:
+            net = stats.get("avg_net_bps_per_hour")
+        be = None
+        be_fn = getattr(lib, "breakeven_hours", None)
+        if callable(be_fn):
+            try:
+                be = be_fn(cost, net)
+            except Exception:  # noqa: BLE001
+                be = None
+        if be is None and net:
+            try:
+                be = cost / float(net) if float(net) > 0 else None
+            except (TypeError, ValueError, ZeroDivisionError):
+                be = None
+        stats["roundtrip_cost_bps"] = cost
+        stats["breakeven_hours"] = be
+        stats["breakeven_h"] = be
+        out["funding"] = stats
+        return out
+
+    # ----- 资金费启动警告（固腿固标/自主可强行）-----
+    def _funding_gate_warnings(self, cfg: dict) -> list[str]:
+        """资金费任务启动前的持续性警告（不拦启动，只提醒）。
+
+        只对 funding_carry 且 run_mode ∈ manual/semi_fixed 的任务：
+        查费差库 funding_gate，不达标把原因（中文）收进 warnings；
+        样本不足 24 小时时 warnings 必含「样本不足」。库服务不
+        存在时返回空列表（降级：不警告、不拦截）。semi_auto /
+        full_auto 不走这里（自动选标在监督器内硬过滤）。
+        """
+        if not isinstance(cfg, dict) or \
+                cfg.get("strategy") != "funding_carry":
+            return []
+        mode = _normalize_run_mode_or(cfg.get("run_mode") or "manual")
+        if mode not in ("manual", "semi_fixed"):
+            return []
+        lib = self._library()
+        if lib is None:
+            return []
+        import time as _time
+
+        params = cfg.get("params") or {}
+        if not isinstance(params, dict):
+            params = {}
+        va = params.get("venue_a") or cfg.get("venue_a")
+        vb = params.get("venue_b") or cfg.get("venue_b")
+        symbol = params.get("symbol") or cfg.get("symbol")
+        if not va or not vb or not symbol:
+            return []
+        # 最低资金费率差（进出共用线）：现行字段名优先，旧名兼容，
+        # 再兜底找 min_*费差类字段，避免 specs 改名后静默失效
+        min_line = None
+        for key in ("min_edge_bps_per_hour",
+                    "min_entry_edge_bps_per_hour",
+                    "min_funding_diff_bps_per_hour",
+                    "min_net_bps_per_hour", "min_line_bps"):
+            if params.get(key) is not None:
+                min_line = params[key]
+                break
+        if min_line is None:
+            for k, v in params.items():
+                if k.startswith("min") and isinstance(v, (int, float)):
+                    min_line = v
+                    break
+        try:
+            min_line = float(min_line) if min_line is not None else 0.0
+        except (TypeError, ValueError):
+            min_line = 0.0
+        now = _time.time()
+        warnings: list[str] = []
+        stats = None
+        stats_fn = getattr(lib, "funding_stats", None)
+        if callable(stats_fn):
+            try:
+                stats = stats_fn(va, vb, symbol, min_line, now)
+            except Exception:  # noqa: BLE001
+                stats = None
+        if isinstance(stats, dict):
+            sample = stats.get("sample_hours")
+            if sample is not None and float(sample) < 24:
+                warnings.append(
+                    f"样本不足：费差库样本仅 {sample} 小时，不足 24 小时")
+        elif stats is None:
+            warnings.append("样本不足：费差库暂无此组合数据")
+        # 当前净费差：优先扫描器 pairs 的实时费差，其次 7 天平均
+        current_net = None
+        if self.market_scanner is not None:
+            try:
+                pairs = self._scanner().pairs(va, vb, "funding_carry")
+                for row in (pairs or {}).get("rows") or []:
+                    if row.get("symbol") == symbol:
+                        current_net = row.get("edge_bps_h")
+                        break
+            except Exception:  # noqa: BLE001 — 取不到就用平均值兜底
+                current_net = None
+        if current_net is None and isinstance(stats, dict):
+            current_net = stats.get("avg_net_bps_per_hour")
+        gate_fn = getattr(lib, "funding_gate", None)
+        if callable(gate_fn):
+            cost = self._funding_cost_bps(va, vb, params)
+            try:
+                gate = gate_fn(va, vb, symbol, min_line, cost,
+                               current_net, now)
+            except Exception:  # noqa: BLE001 — gate 异常不拦启动
+                gate = None
+            if isinstance(gate, dict) and not gate.get("ok", True):
+                reason = str(gate.get("reason") or "费差持续性未达标")
+                if not any(reason in w or w in reason for w in warnings):
+                    warnings.append(reason)
+        return warnings
 
     # ----- 来源与持久化 -----
     def _source(self, name: str) -> str:
@@ -546,7 +869,12 @@ class PanelState:
             self.engine.tasks.append(new_task)
         self.stopped_by_user.discard(name)
         self.engine.errors.pop(name, None)
-        return {"ok": True, "task": name}
+        res = {"ok": True, "task": name}
+        # 资金费固腿固标/自主：持续性不达标只警告、照常启动（强行）
+        warnings = self._funding_gate_warnings(cfg)
+        if warnings:
+            res["warnings"] = warnings
+        return res
 
     # ----- 面板任务增删改（经命令队列串行执行，与启停同口径）-----
     def _run(self, fn) -> dict:
@@ -598,7 +926,12 @@ class PanelState:
         self.task_cfgs[name] = cfg
         self._persist_panel()
         self._event(f"创建任务「{name}」（{strategy}）")
-        return {"ok": True, "task": name}
+        res = {"ok": True, "task": name}
+        # 一键运行即启动：资金费警告口径与 _do_start_task 一致
+        warnings = self._funding_gate_warnings(cfg)
+        if warnings:
+            res["warnings"] = warnings
+        return res
 
     def update_task(self, name, params, run_mode=None, run_preset=None,
                     amount_usd=None) -> dict:
@@ -940,6 +1273,31 @@ def make_handler(state: PanelState):
             elif u.path == "/api/settings/secrets":
                 # 只返回已填/未填，绝不返回任何密钥值
                 self._json(state.secrets_view())
+            elif u.path == "/api/settings/fees":
+                self._json(state.fees_view())
+            elif u.path == "/api/libraries":
+                q = parse_qs(u.query)
+                self._json(state.libraries_view(
+                    q.get("venue_a", q.get("va", q.get("base", [""])))[0]
+                    or None,
+                    q.get("venue_b", q.get("vb", q.get("hedge", [""])))[0]
+                    or None,
+                    q.get("symbol", [""])[0] or None))
+            elif u.path == "/api/libraries/funding":
+                q = parse_qs(u.query)
+
+                def _fnum(key):
+                    try:
+                        return float(q.get(key, [""])[0])
+                    except (TypeError, ValueError):
+                        return None
+
+                self._json(state.libraries_funding_view(
+                    q.get("va", q.get("venue_a", [""]))[0] or None,
+                    q.get("vb", q.get("venue_b", [""]))[0] or None,
+                    q.get("symbol", [""])[0] or None,
+                    line=_fnum("line"), max_open_spread=_fnum("max_open_spread"),
+                    current_net=_fnum("current_net")))
             else:
                 self._json({"error": "not found"}, 404)
 
@@ -1018,10 +1376,23 @@ def make_handler(state: PanelState):
                     return
                 res = state.save_secrets_view(body)
                 self._json(res, 200 if res.get("ok") else 400)
+            elif parts == ["api", "settings", "fees"]:
+                body = self._json_body()
+                if body is None:
+                    return
+                res = state.save_fees_view(body)
+                self._json(res, 200 if res.get("ok") else 400)
             else:
                 self._json({"error": "not found"}, 404)
 
     return Handler
+
+
+def _stop_library_service(svc) -> None:
+    try:
+        svc.stop()
+    except Exception:  # noqa: BLE001 — 退出路径尽力而为
+        pass
 
 
 def serve(state: PanelState, host: str = DEFAULT_HOST,
@@ -1036,6 +1407,18 @@ def serve(state: PanelState, host: str = DEFAULT_HOST,
         raise ValueError(f"面板只绑回环且 POST 需 token，禁止绑非回环地址：{host}")
     if not state.api_token:
         state.api_token = _secrets.token_urlsafe(24)
+    # 中枢/费差库录制服务随面板启动（只读公开行情，paper/live
+    # 都跑）；进程退出时经 atexit 停（其线程本身也是 daemon）。
+    svc = getattr(state, "library_service", None)
+    if svc is not None and not getattr(svc, "_detsp_started", False):
+        try:
+            svc.start()
+            svc._detsp_started = True
+            import atexit
+
+            atexit.register(_stop_library_service, svc)
+        except Exception:  # noqa: BLE001 — 库服务起不来不拖垮面板
+            pass
     server = ThreadingHTTPServer((host, port), make_handler(state))
     th = threading.Thread(target=server.serve_forever, daemon=True,
                           name="detsp-web")

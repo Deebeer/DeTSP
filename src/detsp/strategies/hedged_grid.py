@@ -413,8 +413,10 @@ class HedgedGridStrategy:
             corridor = self.executor.estimate_open_corridor(
                 p.leverage_grid,
                 self.executor.market_mmr(p.grid_venue, p.symbol))
+            # 网格腿开仓单打标（执行层开仓频率上限口径）
             res = self.executor.place(self.owner, p.grid_venue, req,
-                                      intent="open", corridor_pct=corridor)
+                                      intent="open", corridor_pct=corridor,
+                                      leg_role="base", opening=True)
         if res.order is None:
             if res.status == "unknown":
                 # 下单结果未知（自查 M1）：订单可能已挂上。用合成
@@ -621,7 +623,8 @@ class HedgedGridStrategy:
                 self.owner, p.hedge_venue,
                 OrderRequest(symbol=p.symbol, side=side, qty=abs(delta),
                              price=None),
-                intent="open", corridor_pct=corridor)
+                intent="open", corridor_pct=corridor,
+                leg_role="hedge", opening=False)
         else:
             # 向目标收敛（减仓）：安全动作，reduce-only
             res = self.executor.place(

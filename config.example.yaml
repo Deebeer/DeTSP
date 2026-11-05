@@ -38,9 +38,9 @@ venues:
   tradexyz:    { mode: paper }
   aster:       { mode: paper }
 
-# 任务列表：引擎按此组装策略（strategy 四选一：hedged_grid /
-# premium_arb / rotation_hedge / funding_carry；旧名 grid 与
-# volume_loop 已移除，写了会在加载时报错并提示可用策略）。
+# 任务列表：引擎按此组装策略（strategy 三选一：hedged_grid /
+# premium_arb / funding_carry；旧名 grid、volume_loop 与
+# rotation_hedge 已移除，写了会在加载时报错并提示可用策略）。
 # 任务名（name）必填且唯一，它是归属与账本的标识。
 # 同一 (场所, 币种) 只能被一个任务占用（双腿策略占两个场所），
 # 重复配置在加载时直接报错。
@@ -112,30 +112,6 @@ tasks: []
 #      max_slippage_bps: 20       # delta 修正（削腿）的滑点保护上限（bps），超限本轮不削
 #      leverage_base: <杠杆，与账户实际设置一致>
 #      leverage_hedge: <杠杆，与账户实际设置一致>
-#  - name: <任务名，如 hedge-arcus-lighter>
-#    strategy: rotation_hedge     # 轮换对冲刷量：Parallax
-#    run_mode: manual          # 运行模式四值：manual 自主 / semi_fixed 半自动·固定标的 / semi_auto 半自动·自动选标 / full_auto 全自动（旧值 auto 按 semi_auto 处理）
-#    run_preset: neutral       # 仅 full_auto 用：风险档 conservative 保守 / neutral 中性 / aggressive 激进
-#    params:
-#      symbol: <币种>
-#      venue_a: <venue_id>
-#      venue_b: <venue_id>
-#      notional_usd: <单边金额>
-#      hold_seconds: 3600         # 固定持有时长（区间模式关闭时用）
-#      hold_min_seconds: 3600     # 区间持有下限（Parallax 原仓表单默认最短 1 小时）；>0 且上限大于它时每轮随机抽
-#      hold_max_seconds: 7200     # 区间持有上限（Parallax 原仓表单默认最长 2 小时）
-#      notional_min_usd: 0        # 可选：与 notional_max_usd 配合，>0 时每轮在区间内随机抽金额
-#      notional_max_usd: 0
-#      cooldown_seconds: 30       # 平仓后的冷却（Parallax 原仓默认 30）
-#      min_entry_edge_bps_per_hour: 0  # 可选：最小费差门槛（bps/小时），费差达到才开新一轮（DeTSP 新增，原仓无此字段）；0=关
-#      arcus_maker: true          # 可选：任一腿是 Arcus 时该腿走 maker 挂单开仓（Parallax 任务表单默认限价；另一腿 taker 对冲）
-#      maker_wait_seconds: 120    # maker 挂单最长等待（秒），超时撤单按最终量对冲
-#      settle_grace_seconds: 10   # 开仓结算宽限期：宽限内不做单腿定性（防异步结算误平）
-#      max_slippage_bps: 20       # 双腿不平时削腿的滑点保护上限（bps），超限本轮不削
-#      leverage_a: <杠杆，与账户实际设置一致>
-#      leverage_b: <杠杆，与账户实际设置一致>
-#      max_position_qty: 0        # 可选：>0 时逐步建仓到该数量（币）后转平仓循环，0=禁用
-#      accumulate_interval_seconds: 60   # 逐步建仓的加仓间隔
 #  - name: <任务名，如 carry-arcus-lighter>
 #    strategy: funding_carry      # 资金费 carry：Parallax 资金费选向独立成策略
 #    run_mode: manual          # 运行模式四值：manual 自主 / semi_fixed 半自动·固定标的 / semi_auto 半自动·自动选标 / full_auto 全自动（旧值 auto 按 semi_auto 处理）
@@ -146,14 +122,11 @@ tasks: []
 #      venue_b: <venue_id>
 #      notional_usd: <单边金额>
 #      leverage: <杠杆，与账户实际设置一致>
-#      min_entry_edge_bps_per_hour: <入场门槛：组合每小时净收资金费优势（bps）>
-#      exit_edge_bps_per_hour: <退出门槛，必须小于入场门槛（迟滞）>
-#      exit_confirm_checks: 3     # 优势连续低于退出门槛几次才平仓
-#      check_seconds: 30          # 资金费检查周期（Parallax 原仓费率刷新 30 秒口径）
-#      max_hold_seconds: 0        # 最长持有（秒），0=不限
+#      min_edge_bps_per_hour: <最低资金费率差：组合每小时净收资金费优势（bps），进出共用一条线——达到才开仓、跌破并连续确认后平仓>
+#      max_open_spread_bps: 300   # 最大开仓价差（bps）：开仓时两所价差超过此值不开
+#      close_corridor_pct: 1.5    # 强平保护：任一腿距强平近于此百分比双腿平仓
+#      qty_dev_close_pct: 0       # 数量偏差自动平仓阈值（%，按较大腿算），0=关（小偏差先削腿修平）
 #      reopen: true               # 平仓后优势恢复是否自动重开
-#      cooldown_seconds: 300      # 平仓后的重开冷却
-#      settle_grace_seconds: 10   # 开仓结算宽限期：宽限内不做孤腿定性（防异步结算误平）
 #      max_slippage_bps: 20       # 双腿不等量时削腿的滑点保护上限（bps），超限本轮不削
 #      # ⚠ 风险：资金费差会反转——费率符号翻转后组合从净收变净付，
 #      # 退出靠迟滞确认，确认期间仍在付费；两所强平价不对称时

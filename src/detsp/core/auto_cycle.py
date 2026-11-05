@@ -21,6 +21,8 @@ engine.build_runtime / specs.validate_params 同一条路径）运行
 
 from __future__ import annotations
 
+import time
+
 # 全自动系统默认（full_auto 组装内层参数时，用户与预设都没给
 # 溢价带才用）：溢价套利上下入场带各 10 bps
 FULL_AUTO_PREMIUM_UPPER_BPS = 10.0
@@ -34,7 +36,6 @@ class AutoCycleRuntime:
     # 各策略的两腿场所字段（与 engine.task_occupied_keys 同口径）
     _VENUE_FIELDS = {
         "hedged_grid": ("grid_venue", "hedge_venue"),
-        "rotation_hedge": ("venue_a", "venue_b"),
         "funding_carry": ("venue_a", "venue_b"),
         "premium_arb": ("base_venue", "hedge_venue"),
     }
@@ -42,7 +43,7 @@ class AutoCycleRuntime:
     def __init__(self, strategy_type, params: dict, executor,
                  risk_cfg=None, owner: str = "", scanner=None,
                  selection_scope: str = "pair", run_preset: str = "neutral",
-                 amount_usd=None) -> None:
+                 amount_usd=None, library=None, fee_table=None) -> None:
         self.strategy_type = strategy_type
         # 原始（已清洗）参数替身：内层每笔按它组装，供序列化读
         self.params: dict = dict(params)
@@ -55,6 +56,11 @@ class AutoCycleRuntime:
         self.selection_scope = selection_scope
         self.run_preset = run_preset or "neutral"
         self.amount_usd = amount_usd
+        # 统计库与费率表（可选，server 注入；第十一轮接库契约，
+        # 见 core/stats_library.py 与 core/fee_table.py）：None 时
+        # 选标保持现行行为（扫描行口径），测试与旧部署兼容
+        self.library = library
+        self.fee_table = fee_table
         fa, fb = self._VENUE_FIELDS.get(strategy_type, ("venue_a", "venue_b"))
         self.venue_a = self.params.get(fa) or ""
         self.venue_b = self.params.get(fb) or ""
@@ -107,7 +113,7 @@ class AutoCycleRuntime:
 
     @staticmethod
     def _row_venues(strategy_type: str, row: dict) -> tuple[str, str]:
-        """从 best 行取两腿场所。funding/rotation/premium 行含
+        """从 best 行取两腿场所。funding/premium 行含
         venue_a/venue_b；grid 的 best 行形状不同：网格腿在
         venue 字段、对冲腿在 venue_b 字段。"""
         if strategy_type == "hedged_grid":
@@ -131,9 +137,129 @@ class AutoCycleRuntime:
                 return row
         return None
 
-    def _select_row(self) -> dict | None:
+    # ----- 统计库接库选标（第十一轮，library 非 None 时启用） -----
+    def _taker_bps(self, venue_id: str) -> float:
+        """某场所 taker 费率（bps）：费率表未注入/查不到按 0。"""
+        if self.fee_table is None or not venue_id:
+            return 0.0
+        try:
+            taker, _maker = self.fee_table.get(venue_id)
+            return float(taker)
+        except Exception:  # noqa: BLE001 — 费率表异常按 0（不挡选标）
+            return 0.0
+
+    def _funding_min_line(self) -> float:
+        v = self.params.get("min_edge_bps_per_hour")
+        if v is None:
+            v = self.params.get("min_entry_edge_bps_per_hour")
+        return 1.0 if v is None else float(v)
+
+    def _funding_roundtrip_cost(self, va: str, vb: str) -> float:
+        """往返成本口径（选标与内层 entry_gate 复检共用）：
+        两腿 taker 费率之和 ×2（开+平）+ 最大开仓价差。"""
+        spread = self.params.get("max_open_spread_bps")
+        spread = 300.0 if spread is None else float(spread)
+        return (self._taker_bps(va) + self._taker_bps(vb)) * 2 + spread
+
+    def _candidate_rows(self) -> list[dict]:
+        if self.selection_scope == "all_pairs":
+            return self._best_rows()
+        return self._scan_rows()
+
+    def _row_pair_venues(self, row: dict) -> tuple[str, str]:
+        if self.selection_scope == "all_pairs":
+            return self._row_venues(self.strategy_type, row)
+        return self.venue_a, self.venue_b
+
+    def _library_premium_pick(self) -> dict | None:
+        """溢价接库选标：候选行必须在中枢库里有 entry（无则跳过），
+        排名按 min(sell_fires, buy_fires) 从大到小，其后维持扫描
+        原排序（稳定排序）。entry 随行带给 _build_inner 覆盖三带。"""
+        cands: list[tuple[dict, dict]] = []
+        for row in self._candidate_rows():
+            if not isinstance(row, dict) or row.get("suspect"):
+                continue
+            if not row.get("symbol"):
+                continue
+            va, vb = self._row_pair_venues(row)
+            if not va or not vb or va == vb:
+                continue
+            if self.selection_scope != "all_pairs":
+                if "has_price" in row:
+                    if not row.get("has_price"):
+                        continue
+                elif row.get("price_a") is None \
+                        or row.get("price_b") is None:
+                    continue
+            try:
+                entry = self.library.premium_entry(
+                    va, vb, str(row["symbol"]))
+            except Exception:  # noqa: BLE001 — 库异常该行跳过
+                entry = None
+            if not entry:
+                continue
+            cands.append((row, entry))
+        if not cands:
+            return None
+        cands.sort(key=lambda rc: -min(
+            float(rc[1].get("sell_fires") or 0),
+            float(rc[1].get("buy_fires") or 0)))
+        row, entry = cands[0]
+        out = dict(row)
+        out["_premium_entry"] = entry
+        return out
+
+    def _library_funding_pick(self, now: float) -> dict | None:
+        """资金费接库选标：每候选先过持续性硬关（funding_gate），
+        样本不足（stats 缺失或 sample_hours<24）不选；排名
+        score = 7 天平均净费差 × 中位持续时长，从大到小。"""
+        min_line = self._funding_min_line()
+        cands: list[tuple[float, dict]] = []
+        for row in self._candidate_rows():
+            if not isinstance(row, dict) or row.get("suspect"):
+                continue
+            if not row.get("symbol"):
+                continue
+            va, vb = self._row_pair_venues(row)
+            if not va or not vb or va == vb:
+                continue
+            symbol = str(row["symbol"])
+            current_net = row.get("edge_bps_h")
+            if current_net is None:
+                continue
+            try:
+                stats = self.library.funding_stats(
+                    va, vb, symbol, min_line, now)
+            except Exception:  # noqa: BLE001 — 库异常该行跳过
+                stats = None
+            if not stats or float(stats.get("sample_hours") or 0) < 24:
+                continue
+            cost = self._funding_roundtrip_cost(va, vb)
+            try:
+                gate = self.library.funding_gate(
+                    va, vb, symbol, min_line, cost,
+                    float(current_net), now)
+            except Exception:  # noqa: BLE001 — 库异常该行跳过
+                gate = None
+            if not gate or not gate.get("ok"):
+                continue
+            score = float(stats.get("avg_net_bps_per_hour") or 0) * \
+                float(stats.get("median_duration_h") or 0)
+            cands.append((score, row))
+        if not cands:
+            return None
+        cands.sort(key=lambda rc: -rc[0])
+        return cands[0][1]
+
+    def _select_row(self, now: float = 0.0) -> dict | None:
         """按选标范围选一行候选（pair 走 pairs+策略门槛，
-        all_pairs 走 best 第一行）。"""
+        all_pairs 走 best 第一行）。library 非 None 时 premium /
+        funding 走接库选标（硬关+库口径排名）；中性网格不接库。"""
+        if self.library is not None:
+            if self.strategy_type == "premium_arb":
+                return self._library_premium_pick()
+            if self.strategy_type == "funding_carry":
+                return self._library_funding_pick(now)
         if self.selection_scope == "all_pairs":
             return self._pick_best(self._best_rows())
         return self._pick(self._scan_rows())
@@ -143,17 +269,14 @@ class AutoCycleRuntime:
         usable = [r for r in rows
                   if isinstance(r, dict) and not r.get("suspect")]
         if self.strategy_type == "funding_carry":
-            threshold = self.params.get("min_entry_edge_bps_per_hour")
+            threshold = self.params.get("min_edge_bps_per_hour")
+            if threshold is None:
+                threshold = self.params.get(
+                    "min_entry_edge_bps_per_hour")
             threshold = 1.0 if threshold is None else float(threshold)
             for row in usable:
                 edge = row.get("edge_bps_h")
                 if edge is not None and edge >= threshold:
-                    return row
-            return None
-        if self.strategy_type == "rotation_hedge":
-            for row in usable:
-                edge = row.get("edge_bps_h")
-                if edge is not None and edge > 0:
                     return row
             return None
         if self.strategy_type == "premium_arb":
@@ -215,11 +338,17 @@ class AutoCycleRuntime:
             if "midline_bps" not in merged:
                 signed = row.get("signed_spread_bps")
                 if signed is None:
-                    raise ValueError(
-                        "全自动溢价套利选标行缺带符号价差，"
-                        "定不了溢价中枢，稍后自动重试")
-                # 中枢 = 选标快照的带符号价差，取整到 0.1 bps
-                merged["midline_bps"] = round(float(signed), 1)
+                    if self.library is not None:
+                        # 接库时中枢由中枢库 entry 在 _build_inner
+                        # 覆盖，占位随便给（校验需要数值）
+                        merged["midline_bps"] = 0.0
+                    else:
+                        raise ValueError(
+                            "全自动溢价套利选标行缺带符号价差，"
+                            "定不了溢价中枢，稍后自动重试")
+                else:
+                    # 中枢 = 选标快照的带符号价差，取整到 0.1 bps
+                    merged["midline_bps"] = round(float(signed), 1)
             if "upper_bps" not in merged:
                 merged["upper_bps"] = FULL_AUTO_PREMIUM_UPPER_BPS
             if "lower_bps" not in merged:
@@ -277,10 +406,55 @@ class AutoCycleRuntime:
                     return None
                 inner_params["lower_price"], \
                     inner_params["upper_price"] = bounds
+        if self.library is not None and \
+                self.strategy_type == "premium_arb":
+            # 中枢库覆盖三带（替换全自动按快照价差凑中枢的口径）：
+            # entry 优先用选标时随行带回的，缺失时按组装后的
+            # 两腿现查；查不到就不覆盖（选标阶段已保证有 entry，
+            # 这里只是防御）
+            entry = row.get("_premium_entry") if isinstance(row, dict) \
+                else None
+            if entry is None:
+                try:
+                    entry = self.library.premium_entry(
+                        str(inner_params.get("base_venue") or ""),
+                        str(inner_params.get("hedge_venue") or ""),
+                        symbol)
+                except Exception:  # noqa: BLE001
+                    entry = None
+            if entry:
+                inner_params["midline_bps"] = float(entry["midline_bps"])
+                inner_params["upper_bps"] = float(entry["upper_bps"])
+                inner_params["lower_bps"] = float(entry["lower_bps"])
         clean = validate_params(self.strategy_type, inner_params)
         inner = build_runtime(self.strategy_type, clean, self.executor,
                               self.risk_cfg, self.owner)
         inner.single_cycle = True
+        if self.library is not None and \
+                self.strategy_type == "funding_carry":
+            # 开仓复检：内层 flat 入场时按同一组合/同一成本口径
+            # 再过一次 funding_gate（持续性硬关），current 用策略
+            # 实时 edge
+            lib = self.library
+            min_line = self._funding_min_line()
+            va = str(clean.get("venue_a") or self.venue_a)
+            vb = str(clean.get("venue_b") or self.venue_b)
+            cost = self._funding_roundtrip_cost(va, vb)
+
+            def _entry_gate(venue_a, venue_b, sym, edge_bps,
+                            _lib=lib, _min=min_line, _cost=cost):
+                try:
+                    res = _lib.funding_gate(
+                        venue_a, venue_b, sym, _min, _cost,
+                        float(edge_bps), time.time())
+                except Exception as e:  # noqa: BLE001
+                    return False, f"费差库复检异常：{e}"
+                if res and res.get("ok"):
+                    return True, ""
+                return False, str((res or {}).get("reason")
+                                  or "费差持续性不达标")
+
+            inner.entry_gate = _entry_gate
         return inner
 
     # ----- 内层收尾 -----
@@ -372,7 +546,7 @@ class AutoCycleRuntime:
             return
         self.auto_phase = "scanning"
         try:
-            row = self._select_row()
+            row = self._select_row(now)
         except Exception:  # noqa: BLE001 — 扫描异常停在 scanning 下轮重试
             self.last_error = "行情扫描暂时异常，稍后自动重试"
             return

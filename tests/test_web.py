@@ -35,6 +35,74 @@ def _req(base, path, method="GET", token=None):
         return r.status, body
 
 
+def _req_json(base, path, payload, token):
+    import urllib.error
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(base + path, method="POST", data=data)
+    req.add_header("X-API-Token", token)
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode("utf-8"))
+
+
+class _FakeFeeTable:
+    """FeeTable 契约的假实现：get/set/as_dict。"""
+
+    def __init__(self):
+        self.data = {"arcus": {"taker_bps": 5.0, "maker_bps": 2.0}}
+
+    def get(self, venue):
+        e = self.data[venue]
+        return e["taker_bps"], e["maker_bps"]
+
+    def set(self, venue, taker, maker):
+        if venue not in ("arcus", "lighter", "lighter_rh",
+                          "hyperliquid", "entropy", "tradexyz", "aster"):
+            raise ValueError(f"未知场所：{venue}")
+        self.data[venue] = {"taker_bps": float(taker),
+                            "maker_bps": float(maker)}
+
+    def as_dict(self):
+        return {k: dict(v) for k, v in self.data.items()}
+
+
+class _FakeLibrary:
+    """StatsLibrary 契约的假实现（premium_entry/funding_*）。"""
+
+    def premium_entries(self):
+        return {"arcus__lighter__BTC": {
+            "midline_bps": 12.0, "upper_bps": 8.0, "lower_bps": 9.0,
+            "sample_hours": 5.0, "updated_at": 1_700_000_000.0}}
+
+    def premium_entry(self, base, hedge, symbol):
+        return self.premium_entries().get(f"{base}__{hedge}__{symbol}")
+
+    def funding_stats(self, va, vb, symbol, min_line, now):
+        return {"median_duration_h": 1.0, "above_ratio": 0.1,
+                "avg_net_bps_per_hour": 0.5, "sample_hours": 10}
+
+    def breakeven_hours(self, cost, net):
+        return cost / net if net and net > 0 else None
+
+    def funding_gate(self, va, vb, symbol, min_line, cost, net, now):
+        return {"ok": False, "reason": "持续性不足：中位持续 1 小时"}
+
+
+class _FakeLibraryService:
+    def __init__(self):
+        self.library = _FakeLibrary()
+        self.fee_table = None
+
+    def status(self):
+        return {"running": True, "last_record_ts": 1_700_000_000.0,
+                "last_recompute_ts": 1_700_000_000.0,
+                "premium_entries": 1, "last_error": ""}
+
+
 @pytest.fixture()
 def panel():
     cfg = build_config(env={}, yaml_data=GRID_YAML)
@@ -133,3 +201,129 @@ def test_web_settings_rejects_public_bind():
         web_settings({"WEB_HOST": "0.0.0.0"})
     assert web_settings({}) == ("127.0.0.1", 8320)
     assert web_settings({"WEB_PORT": "9001"}) == ("127.0.0.1", 9001)
+
+
+# ── 第十一轮：费率表 / 库接口 / 资金费警告 ──────────────────
+
+def test_libraries_degrades_without_service(panel):
+    base, state, _ = panel
+    assert state.library_service is None
+    _, body = _req(base, "/api/libraries")
+    assert json.loads(body) == {"service": None, "premium": {}}
+    _, body = _req(base, "/api/libraries/funding?va=arcus&vb=lighter"
+                         "&symbol=BTC&line=1")
+    d = json.loads(body)
+    assert d["service"] is None and d["funding"] is None
+
+
+def test_fees_degrades_without_fee_table(panel):
+    base, state, _ = panel
+    if state.fee_table is not None:
+        pytest.skip("本环境费率表已就绪，降级路径不适用")
+    _, body = _req(base, "/api/settings/fees")
+    d = json.loads(body)
+    assert d["ok"] is False and d["fees"] == {}
+
+
+def test_fees_read_write(panel):
+    base, state, _ = panel
+    state.fee_table = _FakeFeeTable()
+    _, body = _req(base, "/api/settings/fees")
+    d = json.loads(body)
+    assert d["ok"] is True
+    assert d["fees"]["arcus"] == {"taker_bps": 5.0, "maker_bps": 2.0}
+    status, res = _req_json(base, "/api/settings/fees",
+                            {"venue_id": "arcus", "taker_bps": 7.5,
+                             "maker_bps": 1.5}, state.api_token)
+    assert status == 200 and res["ok"] is True
+    assert res["fees"]["arcus"] == {"taker_bps": 7.5, "maker_bps": 1.5}
+    # 非法场所按现行 API 错误格式回 400 + error
+    status, res = _req_json(base, "/api/settings/fees",
+                            {"venue_id": "nope", "taker_bps": 1,
+                             "maker_bps": 1}, state.api_token)
+    assert status == 400 and "error" in res and res["ok"] is False
+
+
+def test_libraries_with_fake_service(panel):
+    base, state, _ = panel
+    state.library_service = _FakeLibraryService()
+    _, body = _req(base, "/api/libraries")
+    d = json.loads(body)
+    assert d["service"]["running"] is True
+    assert d["service"]["premium_entries"] == 1
+    entry = d["premium"]["arcus__lighter__BTC"]
+    assert entry["midline_bps"] == 12.0 and entry["upper_bps"] == 8.0
+    # 带三元组查询参数也能精确取到一条
+    _, body = _req(base, "/api/libraries?venue_a=arcus&venue_b=lighter"
+                         "&symbol=BTC")
+    assert "arcus__lighter__BTC" in json.loads(body)["premium"]
+    # 费差库信息：回本 = ((taker 和)×2 + 最大开仓价差) / 当前净费差
+    _, body = _req(base, "/api/libraries/funding?va=arcus&vb=lighter"
+                         "&symbol=BTC&line=1&max_open_spread=300"
+                         "&current_net=2")
+    d = json.loads(body)
+    f = d["funding"]
+    assert f["median_duration_h"] == 1.0 and f["sample_hours"] == 10
+    assert f["roundtrip_cost_bps"] == 300.0   # 无费率表时 taker 按 0
+    assert f["breakeven_hours"] == 150.0
+
+
+def test_funding_start_warnings_force_start(panel):
+    base, state, _ = panel
+    state.library_service = _FakeLibraryService()
+    # 用 ETH 避开 fixture 里网格任务对 arcus/lighter BTC 的占用
+    for vid, rate in (("arcus", 0.0001), ("lighter", 0.0003)):
+        state.venues[vid].set_price("ETH", 3_000.0)
+        state.venues[vid].set_funding("ETH", rate)
+    cfg = {"name": "carry-1", "strategy": "funding_carry",
+           "run_mode": "semi_fixed",
+           "params": {"venue_a": "arcus", "venue_b": "lighter",
+                      "symbol": "ETH", "notional_usd": 100.0,
+                      "leverage": 6.0, "min_edge_bps_per_hour": 1.0,
+                      "max_open_spread_bps": 300}}
+    # 直查：不达标给警告且含「样本不足」；自动选标不走此路径
+    warns = state._funding_gate_warnings(cfg)
+    assert any("样本不足" in w for w in warns), warns
+    assert any("持续性不足" in w for w in warns), warns
+    assert state._funding_gate_warnings(
+        {**cfg, "run_mode": "semi_auto"}) == []
+    assert state._funding_gate_warnings(
+        {**cfg, "strategy": "hedged_grid"}) == []
+    # 启动路径：任务照常启动成功，响应带 warnings（强行口径）
+    state.task_cfgs["carry-1"] = cfg
+    res = state.start_task("carry-1")
+    assert res["ok"] is True, res
+    assert any("样本不足" in w for w in res.get("warnings", [])), res
+
+
+def test_panel_state_state_dir_wires_real_fee_table(tmp_path):
+    pytest.importorskip("detsp.core.fee_table")
+    pytest.importorskip("detsp.core.stats_library")
+    cfg = build_config(env={}, yaml_data={"tasks": []})
+    venues = {"arcus": PaperVenue(venue_id="arcus",
+                                  prices={"BTC": 60_000.0})}
+    ledger = Ledger()
+    engine = Engine.from_config(cfg, venues, ledger=ledger)
+    fake_scanner = object()
+    state = PanelState(engine=engine, venues=venues, ledger=ledger,
+                       app_config=cfg, task_cfgs={},
+                       scanner=fake_scanner, state_dir=tmp_path)
+    # scanner 别名与 market_scanner 同步；费率表按 state_dir 落盘
+    assert state.market_scanner is fake_scanner
+    assert state.fee_table is not None
+    assert state.library_service is not None
+    assert state.library_service.fee_table is state.fee_table
+    res = state.save_fees_view({"venue_id": "arcus", "taker_bps": 3,
+                                "maker_bps": 1})
+    assert res["ok"] is True
+    assert res["fees"]["arcus"] == {"taker_bps": 3.0, "maker_bps": 1.0}
+    assert (tmp_path / "fees.json").exists()
+    assert state.fees_view()["fees"]["arcus"]["taker_bps"] == 3.0
+
+
+def test_main_wires_scanner_and_state_dir():
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parent.parent.joinpath(
+        "src/detsp/__main__.py").read_text(encoding="utf-8")
+    assert "scanner=scanner" in src and "state_dir=state_dir" in src

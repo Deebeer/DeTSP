@@ -20,17 +20,15 @@ def hedged_grid_yaml(action="close"):
                    "out_of_range_action": action}}]}
 
 
-def rotation_yaml(maker=False):
-    # 第十轮夹具调整：轮换/套利的原生往返语义钉 semi_fixed
-    # （缺省 manual 已改为立即开仓、到期不自动平仓）
+def carry_yaml():
+    # 资金费套利：占 arcus/lighter 的 BTC（冲突/停机等引擎级
+    # 用例借它当第二个任务）
     return {"tasks": [{
-        "name": "hedge", "strategy": "rotation_hedge",
+        "name": "hedge", "strategy": "funding_carry",
         "run_mode": "semi_fixed",
-        "params": {"symbol": "BTC", "venue_a": "arcus", "venue_b": "lighter",
-                   "notional_usd": 300, "hold_seconds": 60,
-                   "hold_min_seconds": 0, "hold_max_seconds": 0,
-                   "cooldown_seconds": 60, "leverage_a": 5, "leverage_b": 5,
-                   "arcus_maker": maker}}]}
+        "params": {"symbol": "BTC", "venue_a": "arcus",
+                   "venue_b": "lighter", "notional_usd": 300,
+                   "leverage": 5}}]}
 
 
 def arb_yaml():
@@ -142,77 +140,6 @@ def test_hedged_grid_refill_only_on_manual_request():
     assert len(v.open_orders("BTC")) == 10  # 人工触发后补回
 
 
-# ---------------- 轮换对冲 ----------------
-
-def test_rotation_full_round_trip():
-    venues = two_btc_venues()
-    engine, ledger = build(rotation_yaml(), venues)
-    engine.tick(now=1000)
-    pa = engine.executor.position("arcus", "BTC")
-    pb = engine.executor.position("lighter", "BTC")
-    assert pa.qty == pytest.approx(0.005)    # 低费率所做多
-    assert pb.qty == pytest.approx(-0.005)   # 高费率所做空
-    engine.tick(now=1030)
-    assert engine.executor.position("arcus", "BTC") is not None
-    engine.tick(now=1061)                    # 到期轮换双平
-    assert engine.executor.position("arcus", "BTC") is None
-    assert engine.executor.position("lighter", "BTC") is None
-    assert ledger.count("hedge") == 4
-
-
-def test_rotation_maker_leg_then_hedge():
-    venues = two_btc_venues()
-    venues["arcus"].set_funding("BTC", 0.0005)  # 改成 arcus 高费率 → arcus 做空腿
-    venues["lighter"].set_funding("BTC", 0.0001)
-    engine, _ = build(rotation_yaml(maker=True), venues)
-    engine.tick(now=1000)
-    rt = engine.tasks[0].runtime
-    assert rt.phase == "opening"             # arcus maker 挂单中
-    assert len(venues["arcus"].open_orders("BTC")) == 1
-    venues["arcus"].set_price("BTC", 60_100)  # 涨穿 maker 卖单
-    engine.tick(now=1001)
-    assert rt.phase == "open"
-    assert engine.executor.position("arcus", "BTC").qty == pytest.approx(-0.005)
-    assert engine.executor.position("lighter", "BTC").qty == pytest.approx(0.005)
-
-
-def test_rotation_orphan_leg_closed():
-    venues = two_btc_venues()
-    engine, _ = build(rotation_yaml(), venues)
-    engine.tick(now=1000)
-    # 外部把 lighter 腿平掉（模拟单腿故障）
-    from detsp.core.venue import OrderRequest, Side
-    venues["lighter"].place_order(OrderRequest("BTC", Side.BUY, 0.005))
-    assert engine.executor.position("lighter", "BTC") is None
-    engine.tick(now=1001)
-    # 孤腿（arcus 多头）被无条件平掉
-    assert engine.executor.position("arcus", "BTC") is None
-
-
-def test_rotation_post_open_review_closes_when_actual_leverage_higher():
-    # 参数杠杆 5 → 开仓前估算距离 20% 放行；但场所实际持仓杠杆 100
-    # → 复核距离约 1% < 3%，开仓后应立即双平
-    venues = two_btc_venues(lev=100.0)
-    engine, _ = build(rotation_yaml(), venues)
-    engine.tick(now=1000)
-    assert engine.executor.position("arcus", "BTC") is None
-    assert engine.executor.position("lighter", "BTC") is None
-    assert engine.tasks[0].runtime.phase == "cooldown"
-
-
-def test_rotation_preopen_estimate_blocks_extreme_leverage():
-    # 杠杆 100 → 开仓后强平距离约 1% < 门槛 3%，复核应立即双平
-    venues = two_btc_venues(lev=100.0)
-    y = rotation_yaml()
-    y["tasks"][0]["params"]["leverage_a"] = 100
-    y["tasks"][0]["params"]["leverage_b"] = 100
-    engine, _ = build(y, venues)
-    # 开仓前估算同样会拦下：100/100=1% < 3%，根本不开仓
-    engine.tick(now=1000)
-    assert engine.executor.position("arcus", "BTC") is None
-    assert engine.executor.position("lighter", "BTC") is None
-
-
 # ---------------- 溢价套利（taker 默认模式） ----------------
 
 def arb_venues():
@@ -254,18 +181,18 @@ def test_conflict_task_rejected_at_config_level():
     from detsp.core.config import ConfigError
 
     y = hedged_grid_yaml()
-    y["tasks"].append(rotation_yaml()["tasks"][0])  # 同样占用 arcus BTC
+    y["tasks"].append(carry_yaml()["tasks"][0])  # 同样占用 arcus BTC
     with pytest.raises(ConfigError):
         build_config(env={}, yaml_data=y)
 
 
 def test_removed_strategy_names_rejected_with_guidance():
-    """已移除的旧策略名（grid / volume_loop）：报错必须写明已移除
-    并列出可用策略，config 层与引擎组装层口径一致。"""
+    """已移除的旧策略名（grid / volume_loop / rotation_hedge）：
+    报错必须写明已移除并列出可用策略，config 层与引擎组装层口径一致。"""
     from detsp.core.config import ConfigError
     from detsp.core.engine import build_task
 
-    for old in ("grid", "volume_loop"):
+    for old in ("grid", "volume_loop", "rotation_hedge"):
         y = {"tasks": [{"name": "t", "strategy": old, "params": {}}]}
         with pytest.raises(ConfigError, match="已移除"):
             build_config(env={}, yaml_data=y)
@@ -279,7 +206,7 @@ def test_conflict_task_isolated_at_start():
 
     venues = grid_venues()
     y = hedged_grid_yaml()
-    y["tasks"].append(rotation_yaml()["tasks"][0])  # 同样占用 arcus BTC
+    y["tasks"].append(carry_yaml()["tasks"][0])  # 同样占用 arcus BTC
     cfg = AppConfig(tasks=y["tasks"])
     ledger = Ledger()
     engine = Engine.from_config(cfg, venues, ledger=ledger)
@@ -290,7 +217,7 @@ def test_conflict_task_isolated_at_start():
 
 def test_kill_switch_flattens_everything():
     venues = two_btc_venues()
-    engine, ledger = build(rotation_yaml(), venues)
+    engine, ledger = build(carry_yaml(), venues)
     engine.tick(now=1000)
     assert engine.executor.position("arcus", "BTC") is not None
     engine.kill_switch.halt("测试停机")

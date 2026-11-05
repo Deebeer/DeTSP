@@ -717,7 +717,7 @@ class MarketScanner:
     @staticmethod
     def _sort_strategy(rows: list[dict], strategy: str) -> list[dict]:
         """按策略口径过滤 + 排序（pairs 与 best 共用）。"""
-        if strategy in ("funding_carry", "rotation_hedge"):
+        if strategy == "funding_carry":
             rows = [r for r in rows if r["has_price"] and r["has_funding"]]
             # 疑似坏数据沉底；同口径优先（混口径靠后），组内按费差降序
             rows.sort(key=lambda r: (r["suspect"], r["mixed"],
@@ -790,8 +790,7 @@ class MarketScanner:
                         break
             out["rows"] = rows[:limit]
             return out
-        metric = ("edge_bps_h" if strategy in ("funding_carry",
-                                               "rotation_hedge")
+        metric = ("edge_bps_h" if strategy == "funding_carry"
                   else "spread_bps")
         best_by_sym = {}
         venues = [v for v in VENUE_ORDER if v not in snap["errors"]]
@@ -828,7 +827,7 @@ class MarketScanner:
         """跨策略统一的「机会值」（%）：资金费类 = 预计年化 %，
         溢价套利 = 单次价差 %（spread_bps / 100），中性网格 =
         日波动 %。只用于总览混合列表排序，不同策略口径不同。"""
-        if strategy in ("funding_carry", "rotation_hedge"):
+        if strategy == "funding_carry":
             return row.get("apr_pct")
         if strategy == "premium_arb":
             sp = row.get("spread_bps")
@@ -838,7 +837,7 @@ class MarketScanner:
         return None
 
     def best_all(self, per_strategy: int = 5) -> dict:
-        """四策略各自 Top N 合并成一张表、按机会值降序（总览用）。
+        """三策略各自 Top N 合并成一张表、按机会值降序（总览用）。
 
         每行带 strategy 与 score_pct（机会值 %，口径见
         _best_score）；suspect 已在 best() 里剔除，混口径行保留
@@ -846,8 +845,7 @@ class MarketScanner:
         """
         snap = self.full_snapshot()
         merged: list[dict] = []
-        for st in ("hedged_grid", "premium_arb",
-                   "funding_carry", "rotation_hedge"):
+        for st in ("hedged_grid", "premium_arb", "funding_carry"):
             for row in self.best(st, limit=per_strategy)["rows"]:
                 merged.append({**row, "strategy": st,
                                "score_pct": self._best_score(st, row)})

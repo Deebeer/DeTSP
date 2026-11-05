@@ -103,7 +103,8 @@ def main(argv: list[str] | None = None) -> int:
     state = PanelState(engine=engine, venues=venues, ledger=ledger,
                        app_config=app_config, task_cfgs=task_cfgs,
                        panel_store_path=panel_path, env_path=args.env,
-                       market_scanner=scanner)
+                       market_scanner=scanner, scanner=scanner,
+                       state_dir=state_dir)
     for name, err in state.attach_panel_tasks(panel_cfgs_list).items():
         print(f"[DeTSP] 面板任务 {name} 加载失败（已隔离）：{err}", flush=True)
 
@@ -126,6 +127,13 @@ def main(argv: list[str] | None = None) -> int:
         print("\n[DeTSP] 收到中断，退出（交易所已有挂单/持仓不会自动处理，"
               "请在面板或交易所确认）")
     finally:
+        # 库录制服务停机（serve() 还挂了 atexit 兜底，重复停无害）
+        svc = getattr(state, "library_service", None)
+        if svc is not None:
+            try:
+                svc.stop()
+            except Exception:
+                pass
         if server is not None:
             server.shutdown()
         ledger.close()

@@ -1,12 +1,10 @@
 """原仓配置对齐测试（第三轮）。
 
-四个策略的默认值逐项对齐原仓（Parallax 两包 / WGALL /
+三个策略的默认值逐项对齐原仓（Parallax / WGALL /
 entropy-arb / perp-dex-tools，见仓库根目录《原仓配置对照表.md》）；
 本文件锁住对齐后的默认值与本轮补进的 premium 参数行为
 （执行冷却、单笔名义下限、库存阶梯参数化），防止再漂移。
 """
-
-import random
 
 import pytest
 
@@ -17,33 +15,18 @@ from detsp.strategies.funding_carry import CarryParams
 from detsp.strategies.hedged_grid import HedgedGridParams
 from detsp.strategies.premium_arb import (PremiumParams,
                                           inventory_surcharge_bps)
-from detsp.strategies.rotation_hedge import (RotationParams,
-                                             draw_hold_seconds)
 from detsp.strategies.specs import strategy_specs
 from detsp.venues.paper import PaperVenue
 
 
 # ── 默认值对齐 ──────────────────────────────────────────────
 
-def test_rotation_defaults_match_parallax():
-    p = RotationParams(symbol="BTC", venue_a="arcus", venue_b="lighter",
-                       notional_usd=300)
-    assert p.leverage_a == 6 and p.leverage_b == 6      # 表单默认杠杆
-    assert p.hold_min_seconds == 3600                   # 轮换最短 1h
-    assert p.hold_max_seconds == 7200                   # 轮换最长 2h
-    assert p.cooldown_seconds == 30                     # TaskState 默认
-    assert p.arcus_maker is True                        # 表单默认限价
-    assert p.maker_wait_seconds == 120                  # MAKER_WAIT_SECONDS
-    # 默认即区间随机（原仓语义），抽签落在 [1h, 2h]
-    drawn = draw_hold_seconds(p, random.Random(7))
-    assert 3600 <= drawn <= 7200
-
-
 def test_carry_defaults_match_parallax_funding():
     p = CarryParams(venue_a="arcus", venue_b="lighter", symbol="BTC",
                     notional_usd=300)
     assert p.leverage == 6
     assert p.check_seconds == 30        # FUNDING_REFRESH_SECONDS
+    assert p.min_edge_bps_per_hour == 1.0   # 第十一轮最低费差线默认
 
 
 def test_grid_defaults_match_wgall():
@@ -76,10 +59,9 @@ def test_retained_differences_have_help_notes():
     """保留与原仓差异的字段必须在 specs 里带 help 说明原因。"""
     specs = {s["strategy"]: {f["name"]: f for f in s["fields"]}
              for s in strategy_specs()}
-    for st in ("rotation_hedge", "premium_arb", "funding_carry"):
+    for st in ("premium_arb", "funding_carry"):
         assert "原仓" in specs[st]["max_slippage_bps"]["help"]
     assert "原仓" in specs["premium_arb"]["settle_grace_seconds"]["help"]
-    assert "原仓" in specs["rotation_hedge"]["notional_min_usd"]["help"]
     assert "实测" in specs["premium_arb"]["midline_bps"]["help"]
     # 本轮新补字段都有中文 label
     for name in ("min_order_notional_usd", "cooldown_seconds",

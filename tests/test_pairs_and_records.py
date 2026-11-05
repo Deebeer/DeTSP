@@ -279,11 +279,18 @@ _AMOUNT_FIELDS = {"notional_usd", "max_position_usd",
 
 
 def test_presets_shape_and_neutral_equals_defaults():
+    import dataclasses as _dc
+
+    from detsp.strategies.specs import PARAMS_CLASSES
     for spec in strategy_specs():
         st = spec["strategy"]
         presets = spec["page"]["presets"]
         assert set(presets) == {"conservative", "neutral", "aggressive"}
-        fields = {f["name"]: f for f in spec["fields"]}
+        # 预设字段以 Params dataclass 全集为准：系统值字段
+        # （zone=hidden，如网格 skip_band_frac）不出现在面板
+        # fields 里，但仍是合法的结构参数、可进预设
+        fields = {f.name: f.default
+                  for f in _dc.fields(PARAMS_CLASSES[st])}
         for tier, vals in presets.items():
             assert vals, f"{st}/{tier} 预设不能为空"
             for k, v in vals.items():
@@ -292,10 +299,10 @@ def test_presets_shape_and_neutral_equals_defaults():
                 # 值一致；金额字段不进预设（见下个测试），本来
                 # 就不是原仓默认语义的一部分（原仓金额是表单
                 # 必填项），故这里没有金额可锁
-                if tier == "neutral" and fields[k]["default"] is not None:
-                    assert v == fields[k]["default"], \
+                if tier == "neutral" and fields[k] is not None:
+                    assert v == fields[k], \
                         f"{st} 中性档 {k}={v} 与默认值 " \
-                        f"{fields[k]['default']} 漂移"
+                        f"{fields[k]} 漂移"
 
 
 def test_presets_never_touch_amount_fields():
@@ -329,10 +336,8 @@ def test_presets_tiers_differ_on_key_fields():
         p["funding_carry"]["neutral"]["leverage"] < \
         p["funding_carry"]["aggressive"]["leverage"]
     assert p["funding_carry"]["conservative"][
-        "min_entry_edge_bps_per_hour"] > \
-        p["funding_carry"]["aggressive"]["min_entry_edge_bps_per_hour"]
-    assert p["rotation_hedge"]["conservative"]["leverage_a"] < \
-        p["rotation_hedge"]["aggressive"]["leverage_a"]
+        "min_edge_bps_per_hour"] > \
+        p["funding_carry"]["aggressive"]["min_edge_bps_per_hour"]
     # 溢价套利三档靠杠杆与执行方式差异化（金额不再进预设）
     assert p["premium_arb"]["conservative"]["execution_mode"] == "maker"
     assert p["premium_arb"]["neutral"]["execution_mode"] == "taker"

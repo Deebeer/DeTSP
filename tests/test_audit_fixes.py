@@ -132,7 +132,7 @@ def test_s1_hl_place_translates_requests_timeout():
         v.place_order(OrderRequest("BTC", Side.BUY, 0.1))  # 市价路径同样
 
 
-def test_s1_rotation_first_leg_timeout_no_duplicate():
+def test_s1_carry_first_leg_timeout_no_duplicate():
     class Flaky(PaperVenue):
         def __init__(self, **kw):
             super().__init__(**kw)
@@ -146,13 +146,10 @@ def test_s1_rotation_first_leg_timeout_no_duplicate():
     b = PaperVenue(venue_id="lighter", prices=dict(BTC))
     a.set_funding("BTC", 0.0001)
     b.set_funding("BTC", 0.0005)
-    y = {"tasks": [{"name": "hedge", "strategy": "rotation_hedge",
+    y = {"tasks": [{"name": "hedge", "strategy": "funding_carry",
                     "params": {"symbol": "BTC", "venue_a": "arcus",
                                "venue_b": "lighter", "notional_usd": 300,
-                               "hold_seconds": 60, "hold_min_seconds": 0,
-                               "hold_max_seconds": 0, "arcus_maker": False,
-                               "cooldown_seconds": 60,
-                               "leverage_a": 5, "leverage_b": 5}}]}
+                               "leverage": 5}}]}
     cfg = build_config(env={}, yaml_data=y)
     engine = Engine.from_config(cfg, {"arcus": a, "lighter": b},
                                 ledger=Ledger())
@@ -364,18 +361,15 @@ def test_s3_grid_takeover_position():
     assert len(v.open_orders("BTC")) == 10    # 接管后正常铺单
 
 
-def test_s3_rotation_initializes_from_existing_positions():
+def test_s3_carry_initializes_from_existing_positions():
     a = PaperVenue(venue_id="arcus", prices=dict(BTC), leverage=5)
     b = PaperVenue(venue_id="lighter", prices=dict(BTC), leverage=5)
     a.place_order(OrderRequest("BTC", Side.BUY, 0.005))
     b.place_order(OrderRequest("BTC", Side.SELL, 0.005))
-    y = {"tasks": [{"name": "hedge", "strategy": "rotation_hedge",
+    y = {"tasks": [{"name": "hedge", "strategy": "funding_carry",
                     "params": {"symbol": "BTC", "venue_a": "arcus",
                                "venue_b": "lighter", "notional_usd": 300,
-                               "hold_seconds": 60, "hold_min_seconds": 0,
-                               "hold_max_seconds": 0, "arcus_maker": False,
-                               "cooldown_seconds": 60,
-                               "leverage_a": 5, "leverage_b": 5}}]}
+                               "leverage": 5}}]}
     cfg = build_config(env={}, yaml_data=y)
     engine = Engine.from_config(cfg, {"arcus": a, "lighter": b},
                                 ledger=Ledger())
@@ -423,20 +417,17 @@ def test_h3_funding_hourly_conversion():
     assert f.funding("BTC").interval_seconds == 28800
 
 
-def test_h3_rotation_direction_uses_hourly_rates():
+def test_h3_carry_direction_uses_hourly_rates():
     a = PaperVenue(venue_id="arcus", prices=dict(BTC), leverage=5)
     b = PaperVenue(venue_id="lighter", prices=dict(BTC), leverage=5)
     a.set_funding("BTC", 0.0001)                            # 每小时 0.0001
     b.set_funding("BTC", 0.0005, interval_seconds=28800)    # 每小时 0.0000625
     # 原始 rate 直比会选「空 a 多 b」；换算后 a 的小时费率更高 → 空 a 多 b
     # 恰好相反：应空 arcus、多 lighter
-    y = {"tasks": [{"name": "hedge", "strategy": "rotation_hedge",
+    y = {"tasks": [{"name": "hedge", "strategy": "funding_carry",
                     "params": {"symbol": "BTC", "venue_a": "arcus",
                                "venue_b": "lighter", "notional_usd": 300,
-                               "hold_seconds": 60, "hold_min_seconds": 0,
-                               "hold_max_seconds": 0, "arcus_maker": False,
-                               "cooldown_seconds": 60,
-                               "leverage_a": 5, "leverage_b": 5}}]}
+                               "leverage": 5}}]}
     cfg = build_config(env={}, yaml_data=y)
     engine = Engine.from_config(cfg, {"arcus": a, "lighter": b},
                                 ledger=Ledger())
@@ -575,75 +566,6 @@ def test_h6_factory_injects_price_driver():
     assert arcus._paper is not None and arcus._paper._walk is True
     # arcus 无公开端点（provider 返回 None）→ 走随机游走，未知 symbol 不崩
     assert arcus.book("SNDK").mid > 0
-
-
-# ═══════════ M2：maker 部分成交 ═══════════
-
-def test_m2_maker_partial_fill_hedges_final_qty_only():
-    from detsp.core.venue import Order
-
-    class PartialVenue(PaperVenue):
-        """maker 单先部分成交挂着，released 后变终态（已撤，带部分量）。"""
-
-        def __init__(self, **kw):
-            super().__init__(**kw)
-            self.released = False
-            self._maker_req = None
-            self._partial = 0.0
-
-        def place_order(self, req):
-            if req.post_only and self._maker_req is None:
-                self._maker_req = req
-                self._partial = req.qty * 0.4
-                self._apply_fill(req.symbol, req.side, self._partial,
-                                 req.price)
-                return Order(order_id="mk-1", symbol=req.symbol,
-                             side=req.side, qty=req.qty, price=req.price,
-                             filled_qty=0.0, status="open")
-            return super().place_order(req)
-
-        def poll_order(self, order_id):
-            if order_id == "mk-1":
-                if self.released:
-                    return Order(order_id="mk-1", symbol="BTC",
-                                 side=self._maker_req.side,
-                                 qty=self._maker_req.qty,
-                                 price=self._maker_req.price,
-                                 filled_qty=self._partial, status="canceled")
-                return Order(order_id="mk-1", symbol="BTC",
-                             side=self._maker_req.side,
-                             qty=self._maker_req.qty,
-                             price=self._maker_req.price,
-                             filled_qty=self._partial, status="open")
-            return super().poll_order(order_id)
-
-    a = PartialVenue(venue_id="arcus", prices=dict(BTC), leverage=5)
-    b = PaperVenue(venue_id="lighter", prices=dict(BTC), leverage=5)
-    a.set_funding("BTC", 0.0001)
-    b.set_funding("BTC", 0.0005)
-    y = {"tasks": [{"name": "hedge", "strategy": "rotation_hedge",
-                    "params": {"symbol": "BTC", "venue_a": "arcus",
-                               "venue_b": "lighter", "notional_usd": 300,
-                               "hold_seconds": 60, "cooldown_seconds": 60,
-                               "leverage_a": 5, "leverage_b": 5,
-                               "arcus_maker": True,
-                               "maker_wait_seconds": 120}}]}
-    cfg = build_config(env={}, yaml_data=y)
-    engine = Engine.from_config(cfg, {"arcus": a, "lighter": b},
-                                ledger=Ledger())
-    rt = engine.tasks[0].runtime
-    engine.tick(now=1000)   # 挂 maker（部分成交 40% 在场所侧已发生）
-    assert rt.phase == "opening"
-    engine.tick(now=1010)   # 部分成交中：保留跟踪，不提前对冲
-    assert rt.phase == "opening"
-    assert engine.executor.position("lighter", "BTC") is None
-    a.released = True       # 订单终局（撤单确认，最终量 = 部分量）
-    engine.tick(now=1020)
-    pa = engine.executor.position("arcus", "BTC")
-    pb = engine.executor.position("lighter", "BTC")
-    assert pa is not None and pb is not None
-    assert abs(pa.qty) == pytest.approx(abs(pb.qty))   # 按最终量对冲
-    assert abs(pa.qty) == pytest.approx(0.4 * 300 / 60_000, rel=0.05)
 
 
 # ═══════════ M3：停机落盘与预检门 ═══════════

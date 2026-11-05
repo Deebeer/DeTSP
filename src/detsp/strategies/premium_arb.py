@@ -399,9 +399,14 @@ class PremiumArbStrategy:
                 p.leverage_hedge, ex.market_mmr(p.hedge_venue, p.symbol)),
         )
 
-    def _fire_taker(self, signal: str, qty: float, now: float) -> None:
+    def _fire_taker(self, signal: str, qty: float, now: float,
+                    opening: bool = True) -> None:
         """双腿 taker 开平（taker 模式的开仓，以及任何模式的减仓/
         反向平仓——退出必须确定成交，不用 maker）。
+
+        下单打标（执行层开仓频率上限口径）：开仓时基准腿是
+        leg_role="base"/opening=True、对冲腿跟单 opening=False；
+        反向减仓/平仓（opening=False）不打标。
 
         下出后设结算宽限期：双腿成交量可能暂时不等（异步结算），
         不立即对账削腿，宽限期满后的定期对账再修正净 delta（G1）。
@@ -415,10 +420,12 @@ class PremiumArbStrategy:
             base_req = OrderRequest(p.symbol, Side.BUY, qty, price=None)
             hedge_req = OrderRequest(p.symbol, Side.SELL, qty, price=None)
         corr_base, corr_hedge = self._corridors()
+        base_kw = {"leg_role": "base", "opening": True} if opening else {}
+        hedge_kw = {"leg_role": "hedge", "opening": False} if opening else {}
         ex.place(self.owner, p.base_venue, base_req, intent="open",
-                 corridor_pct=corr_base)
+                 corridor_pct=corr_base, **base_kw)
         ex.place(self.owner, p.hedge_venue, hedge_req, intent="open",
-                 corridor_pct=corr_hedge)
+                 corridor_pct=corr_hedge, **hedge_kw)
         self._settle_until = now + p.settle_grace_seconds
         self._last_reconcile = -1e18  # 宽限期满后下一 tick 先对账确认
         self._last_fire = now
@@ -443,7 +450,7 @@ class PremiumArbStrategy:
         if p.execution_mode == "maker" and not closing:
             self._place_maker_open(signal, qty, now)
         else:
-            self._fire_taker(signal, qty, now)
+            self._fire_taker(signal, qty, now, opening=not closing)
 
     # ----- maker 主腿开仓 -----
     def _base_tick(self) -> float:
@@ -465,7 +472,8 @@ class PremiumArbStrategy:
         req = OrderRequest(symbol=p.symbol, side=side, qty=qty,
                            price=price, post_only=True)
         res = ex.place(self.owner, p.base_venue, req, intent="open",
-                       corridor_pct=corr_base)
+                       corridor_pct=corr_base,
+                       leg_role="base", opening=True)
         if res.status == "filled":
             filled = res.filled_qty if res.filled_qty > 0 else qty
             self._last_fire = now
@@ -505,7 +513,8 @@ class PremiumArbStrategy:
         self.executor.place(
             self.owner, p.hedge_venue,
             OrderRequest(p.symbol, hedge_side, filled_qty, price=None),
-            intent="open", corridor_pct=corr_hedge)
+            intent="open", corridor_pct=corr_hedge,
+            leg_role="hedge", opening=False)
         self._settle_until = now + p.settle_grace_seconds
         self._last_reconcile = -1e18
         self._note_cycle_positions()

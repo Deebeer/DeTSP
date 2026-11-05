@@ -34,10 +34,6 @@ from detsp.strategies.hedged_grid import (
     plan_initial_orders,
 )
 from detsp.strategies.premium_arb import PremiumParams
-from detsp.strategies.rotation_hedge import (
-    RotationHedgeStrategy,
-    RotationParams,
-)
 from detsp.tools.analyze import analyze_rows
 from detsp.venues import _arcus_sign as ax
 from detsp.venues.arcus import ArcusVenue
@@ -97,8 +93,7 @@ def _carry_venues(fa=0.0001, fb=0.0005, kind_b="predicted"):
 def _carry(venues, **kw):
     base = dict(venue_a="arcus", venue_b="lighter", symbol="BTC",
                 notional_usd=300, leverage=5.0,
-                min_entry_edge_bps_per_hour=2.0,
-                exit_edge_bps_per_hour=1.0, check_seconds=10)
+                min_edge_bps_per_hour=2.0, check_seconds=10)
     base.update(kw)
     ex = _executor(venues)
     s = FundingCarryStrategy(CarryParams(**base), executor=ex, owner="carry")
@@ -116,20 +111,6 @@ def test_carry_gate_blocks_suspect_and_mismatched():
     s2.tick(now=1000)
     assert s2.phase == "flat" and "口径不一致" in s2.last_error
     assert ex2.position("arcus", "BTC") is None
-
-
-def test_rotation_gate_blocks_suspect():
-    venues = _carry_venues(fb=0.06)
-    ex = _executor(venues)
-    p = RotationParams(symbol="BTC", venue_a="arcus", venue_b="lighter",
-                       notional_usd=300, leverage_a=5, leverage_b=5,
-                       arcus_maker=False, hold_min_seconds=0,
-                       hold_max_seconds=0)
-    s = RotationHedgeStrategy(p, executor=ex, owner="rot")
-    s.start(now=0)
-    s.tick(now=0)
-    assert s.phase == "idle" and "费率" in s.last_error
-    assert ex.position("arcus", "BTC") is None
 
 
 # ═══════════ caps 策略层双腿合计（M5） ═══════════
@@ -275,28 +256,6 @@ class _DelayedVenue(PaperVenue):
         return [] if self.hide_positions else super().positions()
 
 
-def test_rotation_grace_waits_for_async_leg():
-    a = PaperVenue(venue_id="arcus", prices=dict(BTC), leverage=5.0)
-    b = _DelayedVenue(venue_id="lighter", prices=dict(BTC), leverage=5.0)
-    a.set_funding("BTC", 0.0001)
-    b.set_funding("BTC", 0.0005)
-    ex = _executor({"arcus": a, "lighter": b})
-    p = RotationParams(symbol="BTC", venue_a="arcus", venue_b="lighter",
-                       notional_usd=300, leverage_a=5, leverage_b=5,
-                       arcus_maker=False, hold_min_seconds=0,
-                       hold_max_seconds=0)
-    s = RotationHedgeStrategy(p, executor=ex, owner="rot")
-    s.start(now=0)
-    s.tick(now=0)
-    # lighter 腿已成交但持仓不可见：宽限期内不按孤腿平掉 arcus 腿
-    assert s.phase == "opening"
-    assert ex.position("arcus", "BTC") is not None
-    b.hide_positions = False
-    s.tick(now=5)                        # 宽限内补齐 → 定案 open
-    assert s.phase == "open"
-    assert ex.position("lighter", "BTC") is not None
-
-
 def test_carry_grace_waits_for_async_leg():
     venues = _carry_venues()
     venues["lighter"] = _DelayedVenue(venue_id="lighter", prices=dict(BTC),
@@ -309,23 +268,6 @@ def test_carry_grace_waits_for_async_leg():
     venues["lighter"].hide_positions = False
     s.tick(now=1001)
     assert s.phase == "open"
-
-
-def test_rotation_adopts_position_found_in_idle():
-    venues = _carry_venues()
-    ex = _executor(venues)
-    p = RotationParams(symbol="BTC", venue_a="arcus", venue_b="lighter",
-                       notional_usd=300, leverage_a=5, leverage_b=5,
-                       arcus_maker=False, hold_min_seconds=0,
-                       hold_max_seconds=0)
-    s = RotationHedgeStrategy(p, executor=ex, owner="rot")
-    s.start(now=0)
-    # 外部在两腿各开一份对冲仓（idle 阶段出现仓位）
-    venues["arcus"].place_order(OrderRequest("BTC", Side.BUY, 0.005))
-    venues["lighter"].place_order(OrderRequest("BTC", Side.SELL, 0.005))
-    s.tick(now=50)
-    assert s.phase == "open" and s.opened_at == 50
-    assert any("接管" in n for n in s.recovery_notes)
 
 
 # ═══════════ PremiumParams 校验（M4） ═══════════

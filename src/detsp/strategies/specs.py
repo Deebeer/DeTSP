@@ -1,6 +1,6 @@
 """策略参数规格（单一事实源）。
 
-四个策略的 Params dataclass 是字段与默认值的唯一定义；本模块在其
+三个策略的 Params dataclass 是字段与默认值的唯一定义；本模块在其
 之上叠加展示/校验元数据（中文说明、分组、枚举选项），生成：
 
 - 面板动态表单（GET /api/strategy-specs 直接返回本模块的产物）；
@@ -21,25 +21,21 @@ from ..core.config import VENUE_IDS
 from .funding_carry import CarryParams
 from .hedged_grid import HedgedGridParams
 from .premium_arb import PremiumParams
-from .rotation_hedge import RotationParams
 
 PARAMS_CLASSES = {
     "hedged_grid": HedgedGridParams,
-    "rotation_hedge": RotationParams,
     "premium_arb": PremiumParams,
     "funding_carry": CarryParams,
 }
 
 STRATEGY_TITLES = {
     "hedged_grid": "中性网格",
-    "rotation_hedge": "轮换对冲刷量",
     "premium_arb": "溢价套利",
     "funding_carry": "资金费套利",
 }
 
 STRATEGY_BLURBS = {
     "hedged_grid": "网格腿铺单吃震荡，对冲腿在另一所把净仓位调平，不赌方向。",
-    "rotation_hedge": "两所一多一空对锁，按资金费选向、持有到期轮换，刷量兼吃费差。",
     "premium_arb": "盯两所价差，偏离中枢开仓、回归平仓，赚价差回归的钱。",
     "funding_carry": "两所一多一空长期持有，专门收两所资金费率的差额。",
 }
@@ -98,56 +94,6 @@ _FIELD_META: dict[str, dict[str, dict]] = {
                              "group": "对冲与风控"},
         "takeover_position": {"label": "接管已有持仓（启动时把网格腿已有的仓位接过来继续管，默认关）",
                               "group": "对冲与风控"},
-    },
-    "rotation_hedge": {
-        "symbol": {"label": "币种（要交易的标的）", "group": "场所与标的"},
-        "venue_a": {"label": "场所 A（A 腿用的交易所）",
-                    "group": "场所与标的", **_VENUE},
-        "venue_b": {"label": "场所 B（B 腿用的交易所）",
-                    "group": "场所与标的", **_VENUE},
-        "notional_usd": {"label": "单边开仓金额（一边开多少美元）",
-                         "group": "场所与标的"},
-        "hold_seconds": {"label": "固定持有时长（关掉随机时长时，每轮开仓后持有这么多秒就自动平仓）",
-                         "group": "轮换节奏"},
-        "hold_min_seconds": {"label": "持有时长下限（每轮随机时长的最短，单位秒）",
-                             "group": "轮换节奏"},
-        "hold_max_seconds": {"label": "持有时长上限（每轮随机时长的最长，单位秒）",
-                             "group": "轮换节奏"},
-        "cooldown_seconds": {"label": "冷却（一轮平仓后，等这么多秒才开下一轮）",
-                             "group": "轮换节奏"},
-        "notional_min_usd": {"label": "随机金额下限（金额随机模式开时，每轮金额的下限，与上限都填才生效）",
-                             "group": "轮换节奏",
-                             "help": "与原仓差异：Parallax 默认金额留空="
-                                     "按两所可用容量开满（安全系数 0.95）；"
-                                     "DeTSP 任务必须给固定 notional_usd，"
-                                     "不做按容量开满（安全差异）。"},
-        "notional_max_usd": {"label": "随机金额上限（金额随机模式开时，每轮金额的上限）",
-                             "group": "轮换节奏"},
-        "min_entry_edge_bps_per_hour": {
-            "label": "最小费差门槛（两所费差达到这个数才开新一轮，单位 bps/小时，0=不设门槛）",
-            "group": "轮换节奏",
-            "help": "DeTSP 新增字段（非原仓），默认 0=关：费差不足时"
-                    "机器人留在原地等下一轮检查，不报错、不开仓。"},
-        "max_position_qty": {"label": "逐步建仓上限（分批建仓时最多加到这么多币，0=一次开满不分批）",
-                             "group": "轮换节奏"},
-        "accumulate_interval_seconds": {"label": "加仓间隔（分批建仓时，每加一批仓位等这么多秒）",
-                                        "group": "轮换节奏"},
-        "arcus_maker": {"label": "Arcus 挂单开仓（Arcus 腿用挂单等成交开仓，手续费低；关则市价吃单）",
-                        "group": "执行与风控"},
-        "maker_wait_seconds": {"label": "挂单等待（Arcus 挂单等这么多秒还没成交，机器人就撤掉这张单）",
-                               "group": "执行与风控"},
-        "leverage_a": {"label": "A 腿杠杆（填账户里实际设的杠杆，只对账校验，程序不自动改）",
-                       "group": "执行与风控"},
-        "leverage_b": {"label": "B 腿杠杆（填账户里实际设的杠杆，只对账校验，程序不自动改）",
-                       "group": "执行与风控"},
-        "settle_grace_seconds": {"label": "结算宽限（开仓后的这段秒数内先不修仓，等交易所把成交结算完，防误判）",
-                                 "group": "执行与风控"},
-        "max_slippage_bps": {"label": "削腿滑点上限（两腿数量对不平时修仓，限价最多偏离现价这么多 bps，超了不下单）",
-                             "group": "执行与风控",
-                             "help": "与原仓差异：Parallax 下单滑点上限"
-                                     " ORDER_SLIPPAGE_BPS=10；本字段只管"
-                                     "双腿不平时的削腿修正单，保留 20 "
-                                     "给薄盘口成交余量（安全差异）。"},
     },
     "premium_arb": {
         "base_venue": {"label": "基准腿场所（盯价差定方向的一所）",
@@ -225,20 +171,22 @@ _FIELD_META: dict[str, dict[str, dict]] = {
                          "group": "场所与标的"},
         "leverage": {"label": "两腿杠杆（填账户里实际设的杠杆，只对账校验，程序不自动改）",
                      "group": "场所与标的"},
-        "min_entry_edge_bps_per_hour": {"label": "入场门槛（费差达到这个数才开仓，单位 bps/小时）",
-                                        "group": "入场与退出"},
-        "exit_edge_bps_per_hour": {"label": "退出门槛（费差跌破这个数并多次确认后平仓，单位 bps/小时）",
-                                   "group": "入场与退出"},
-        "exit_confirm_checks": {"label": "退出确认次数（费差连续这么多次检查都低于退出门槛，机器人才平仓）",
-                                "group": "入场与退出"},
-        "check_seconds": {"label": "检查周期（每隔这么多秒查一次两所资金费，判断该开仓还是平仓）",
-                          "group": "入场与退出"},
-        "max_hold_seconds": {"label": "最长持有（持仓超过这么多秒就强制平仓，0=不限）",
-                             "group": "入场与退出"},
+        "max_open_spread_bps": {"label": "最大开仓价差（开仓时两所价差超过这个 bps 就不开，防同名不同标的）",
+                                "group": "开仓条件"},
+        "min_edge_bps_per_hour": {"label": "最低资金费率差（净费差达到这个数才开仓、跌破并连续确认后平仓，进出共用一条线，单位 bps/小时）",
+                                  "group": "开仓条件"},
+        "close_corridor_pct": {"label": "强平保护（任一腿距强平价近于这个百分比就双腿平仓）",
+                               "group": "平仓条件"},
+        "qty_dev_close_pct": {"label": "数量偏差自动平仓（两腿数量差超过这个百分比、按较大腿算，就双腿平仓；小偏差先削腿修平，0=关）",
+                              "group": "平仓条件"},
         "reopen": {"label": "自动重开（平仓后费差又达标时，机器人自动重新开仓）",
-                   "group": "入场与退出"},
-        "cooldown_seconds": {"label": "重开冷却（平仓后等这么多秒，才允许重新开仓）",
-                             "group": "入场与退出"},
+                   "group": "平仓后怎么办"},
+        "exit_confirm_checks": {"label": "退出确认次数（系统值，面板不露）",
+                                "group": "系统值"},
+        "check_seconds": {"label": "检查周期（系统值，面板不露）",
+                          "group": "系统值"},
+        "cooldown_seconds": {"label": "重开冷却（系统值，面板不露）",
+                             "group": "系统值"},
         "settle_grace_seconds": {"label": "结算宽限（开仓后的这段秒数内先不修仓，等交易所把成交结算完，防误判）",
                                  "group": "执行与风控"},
         "max_slippage_bps": {"label": "削腿滑点上限（两腿数量对不平时修仓，限价最多偏离现价这么多 bps，超了不下单）",
@@ -250,7 +198,7 @@ _FIELD_META: dict[str, dict[str, dict]] = {
 }
 
 # 自动化配置分组（面板「配置」区内「自动化配置」子区的小分组
-# 标题）：四策略都是全自动运行，这些字段是机器人自动开/平仓
+# 标题）：策略都是自动运行，这些字段是机器人自动开/平仓
 # 行为的旋钮，按语义分 开仓 / 平仓 / 保护 / 其他 四组。只有非
 # primary、非两腿场所字段（即进自动化配置的那些）需要登记；
 # 未登记者归「其他」。
@@ -262,15 +210,6 @@ ADV_GROUPS: dict[str, dict[str, str]] = {
         "max_residual_seconds": "保护", "fee_bps_per_side": "保护",
         "takeover_position": "其他",
     },
-    "rotation_hedge": {
-        "min_entry_edge_bps_per_hour": "开仓",
-        "cooldown_seconds": "开仓", "notional_min_usd": "开仓",
-        "notional_max_usd": "开仓", "max_position_qty": "开仓",
-        "accumulate_interval_seconds": "开仓", "arcus_maker": "开仓",
-        "maker_wait_seconds": "开仓",
-        "hold_seconds": "平仓",
-        "settle_grace_seconds": "保护", "max_slippage_bps": "保护",
-    },
     "premium_arb": {
         "persist_seconds": "开仓", "cooldown_seconds": "开仓",
         "max_order_notional_usd": "开仓",
@@ -279,15 +218,12 @@ ADV_GROUPS: dict[str, dict[str, str]] = {
         "take_fraction": "开仓", "maker_offset_ticks": "开仓",
         "maker_timeout_seconds": "开仓",
         "close_band_bps": "平仓",
-        "reconcile_seconds": "保护", "settle_grace_seconds": "保护",
+        "settle_grace_seconds": "保护",
         "max_slippage_bps": "保护",
-        "base_taker_fee_bps": "其他", "hedge_taker_fee_bps": "其他",
     },
     "funding_carry": {
-        "reopen": "开仓", "cooldown_seconds": "开仓",
-        "exit_confirm_checks": "平仓", "max_hold_seconds": "平仓",
-        "settle_grace_seconds": "保护", "max_slippage_bps": "保护",
-        "check_seconds": "其他",
+        "reopen": "开仓",
+        "max_slippage_bps": "保护",
     },
 }
 
@@ -304,27 +240,17 @@ SECTION_MAP: dict[str, dict[str, str]] = {
         "venue_a": "交易对象", "venue_b": "交易对象",
         "symbol": "交易对象", "notional_usd": "交易对象",
         "leverage": "交易对象",
-        "min_entry_edge_bps_per_hour": "开仓条件",
-        "check_seconds": "开仓条件",
-        "exit_edge_bps_per_hour": "平仓条件",
+        "max_open_spread_bps": "开仓条件",
+        "min_edge_bps_per_hour": "开仓条件",
+        "close_corridor_pct": "平仓条件",
+        "qty_dev_close_pct": "平仓条件",
+        "reopen": "平仓后怎么办",
+        "max_slippage_bps": "保护",
+        # 系统值（hidden，不在面板输出）：仅为完整性登记
         "exit_confirm_checks": "平仓条件",
-        "max_hold_seconds": "平仓条件",
-        "reopen": "平仓后怎么办", "cooldown_seconds": "平仓后怎么办",
-        "settle_grace_seconds": "保护", "max_slippage_bps": "保护",
-    },
-    "rotation_hedge": {
-        "symbol": "交易对象", "venue_a": "交易对象",
-        "venue_b": "交易对象", "notional_usd": "交易对象",
-        "leverage_a": "交易对象", "leverage_b": "交易对象",
-        "min_entry_edge_bps_per_hour": "开仓条件",
-        "notional_min_usd": "开仓条件", "notional_max_usd": "开仓条件",
-        "max_position_qty": "开仓条件",
-        "accumulate_interval_seconds": "开仓条件",
-        "arcus_maker": "开仓条件", "maker_wait_seconds": "开仓条件",
-        "hold_seconds": "平仓条件", "hold_min_seconds": "平仓条件",
-        "hold_max_seconds": "平仓条件",
+        "check_seconds": "开仓条件",
         "cooldown_seconds": "平仓后怎么办",
-        "settle_grace_seconds": "保护", "max_slippage_bps": "保护",
+        "settle_grace_seconds": "保护",
     },
     "premium_arb": {
         "base_venue": "交易对象", "hedge_venue": "交易对象",
@@ -339,11 +265,9 @@ SECTION_MAP: dict[str, dict[str, str]] = {
         "max_order_notional_usd": "开仓条件",
         "min_order_notional_usd": "开仓条件",
         "take_fraction": "开仓条件",
-        "base_taker_fee_bps": "开仓条件",
-        "hedge_taker_fee_bps": "开仓条件",
         "close_band_bps": "平仓条件",
         "cooldown_seconds": "平仓后怎么办",
-        "reconcile_seconds": "保护", "settle_grace_seconds": "保护",
+        "settle_grace_seconds": "保护",
         "max_slippage_bps": "保护",
     },
     "hedged_grid": {
@@ -358,6 +282,61 @@ SECTION_MAP: dict[str, dict[str, str]] = {
         "max_residual_seconds": "保护", "fee_bps_per_side": "保护",
         "takeover_position": "保护",
     },
+}
+
+# 字段分区（第十一轮定版，与 SECTION_MAP 并列的单一事实源）：
+# 面板按 zone 组织字段——legs=选择两腿、position=仓位设置、
+# config=策略配置（正面）、more=更多配置（折叠）、hidden=系统值
+# （不进面板输出）。zone=hidden 的字段即 SYSTEM_KEYS：validate_params
+# 容忍并直接丢弃（系统值/旧任务文件兼容），不报「未知参数」。
+ZONE_MAP: dict[str, dict[str, str]] = {
+    "hedged_grid": {
+        "grid_venue": "legs", "hedge_venue": "legs",
+        "symbol": "position", "leverage_grid": "position",
+        "leverage_hedge": "position",
+        "lower_price": "config", "upper_price": "config",
+        "grid_count": "config", "qty_per_grid": "config",
+        "mode": "config", "out_of_range_action": "config",
+        "hedge_deadband_qty": "more", "max_unhedged_seconds": "more",
+        "max_residual_seconds": "more", "takeover_position": "more",
+        "skip_band_frac": "hidden", "fee_bps_per_side": "hidden",
+    },
+    "premium_arb": {
+        "base_venue": "legs", "hedge_venue": "legs",
+        "symbol": "position", "max_position_usd": "position",
+        "leverage_base": "position", "leverage_hedge": "position",
+        "execution_mode": "config", "close_band_bps": "config",
+        "midline_bps": "config", "upper_bps": "config",
+        "lower_bps": "config",
+        "persist_seconds": "more", "cooldown_seconds": "more",
+        "inventory_scale_bps": "more", "inventory_floor_frac": "more",
+        "min_order_notional_usd": "more",
+        "settle_grace_seconds": "more", "max_slippage_bps": "more",
+        "maker_offset_ticks": "more", "maker_timeout_seconds": "more",
+        "max_order_notional_usd": "more",
+        "take_fraction": "more",
+        "reconcile_seconds": "hidden", "base_taker_fee_bps": "hidden",
+        "hedge_taker_fee_bps": "hidden",
+    },
+    "funding_carry": {
+        "venue_a": "legs", "venue_b": "legs",
+        "symbol": "position", "notional_usd": "position",
+        "leverage": "position",
+        "max_open_spread_bps": "config",
+        "min_edge_bps_per_hour": "config",
+        "close_corridor_pct": "config", "qty_dev_close_pct": "config",
+        "reopen": "config",
+        "max_slippage_bps": "more",
+        "exit_confirm_checks": "hidden", "check_seconds": "hidden",
+        "cooldown_seconds": "hidden", "settle_grace_seconds": "hidden",
+    },
+}
+
+# 系统值键（= 各策略 zone=hidden 的字段）：校验时容忍并丢弃
+SYSTEM_KEYS: dict[str, frozenset] = {
+    stype: frozenset(name for name, zone in zones.items()
+                     if zone == "hidden")
+    for stype, zones in ZONE_MAP.items()
 }
 
 
@@ -385,20 +364,6 @@ PRESETS: dict[str, dict[str, dict]] = {
                        "leverage_grid": 5.0, "leverage_hedge": 5.0,
                        "skip_band_frac": 0.15},
     },
-    "rotation_hedge": {
-        "conservative": {"leverage_a": 3.0,
-                         "leverage_b": 3.0, "hold_min_seconds": 3600.0,
-                         "hold_max_seconds": 5400.0,
-                         "cooldown_seconds": 60.0, "arcus_maker": True},
-        "neutral": {"leverage_a": 6.0,
-                    "leverage_b": 6.0, "hold_min_seconds": 3600.0,
-                    "hold_max_seconds": 7200.0,
-                    "cooldown_seconds": 30.0, "arcus_maker": True},
-        "aggressive": {"leverage_a": 10.0,
-                       "leverage_b": 10.0, "hold_min_seconds": 1800.0,
-                       "hold_max_seconds": 3600.0,
-                       "cooldown_seconds": 15.0, "arcus_maker": False},
-    },
     "premium_arb": {
         "conservative": {"leverage_base": 1.0, "leverage_hedge": 1.0,
                          "execution_mode": "maker"},
@@ -409,17 +374,11 @@ PRESETS: dict[str, dict[str, dict]] = {
     },
     "funding_carry": {
         "conservative": {"leverage": 3.0,
-                         "min_entry_edge_bps_per_hour": 2.0,
-                         "exit_edge_bps_per_hour": 0.5,
-                         "check_seconds": 30.0},
+                         "min_edge_bps_per_hour": 2.0},
         "neutral": {"leverage": 6.0,
-                    "min_entry_edge_bps_per_hour": 1.0,
-                    "exit_edge_bps_per_hour": 0.0,
-                    "check_seconds": 30.0},
+                    "min_edge_bps_per_hour": 1.0},
         "aggressive": {"leverage": 10.0,
-                       "min_entry_edge_bps_per_hour": 0.5,
-                       "exit_edge_bps_per_hour": 0.0,
-                       "check_seconds": 15.0},
+                       "min_edge_bps_per_hour": 0.5},
     },
 }
 
@@ -458,6 +417,7 @@ PAGE_META: dict[str, dict] = {
         "amount_desc": None,
         "market_value": "price",
         "name_prefix": "grid",
+        "run_modes": [{"value": "manual", "label": "自主"}],
         "how_it_works": [
             "网格腿在区间内按等距格子铺单，成交后在相邻格补反向单，吃震荡价差。",
             "网格腿每成交一格，对冲腿就在另一所下反向单，把两腿净仓位拉平。",
@@ -467,41 +427,13 @@ PAGE_META: dict[str, dict] = {
         "primary": ("symbol", "lower_price", "upper_price", "grid_count",
                     "qty_per_grid", "leverage_grid", "leverage_hedge"),
         "section_summaries": {
-            "开仓条件": "价格在区间内就铺格开仓；离现价太近的格子按 {skip_band_frac} 的比例跳过，先不挂单防噪声磨损。",
+            "开仓条件": "价格在区间内就按 {grid_count} 格铺格开仓；离现价太近的格子按系统设定的跳档比例跳过，先不挂单防噪声磨损。",
             "平仓条件": "价格冲出网格区间时按 {out_of_range_action} 处置：平掉双腿停机，或只减仓回收。",
-            "保护": "两腿仓位差小于 {hedge_deadband_qty} 时先不补对冲；裸露超过 {max_unhedged_seconds} 秒、残差超过 {max_residual_seconds} 秒会强制对冲；每格先按单边 {fee_bps_per_side} bps 手续费算账，接管已有持仓的开关是 {takeover_position}。",
+            "保护": "两腿仓位差小于 {hedge_deadband_qty} 时先不补对冲；裸露超过 {max_unhedged_seconds} 秒、残差超过 {max_residual_seconds} 秒会强制对冲；启动时按系统费率估算校验每格利润，接管已有持仓的开关是 {takeover_position}。",
         },
         "note": "区间上下限可在「选市场」下方用建议区间（近 24 小时"
                 "高低各扩 2%）一键填入；杠杆只用于校验与显示，须与"
                 "账户里实际设置的一致（程序不自动改杠杆）。",
-    },
-    "rotation_hedge": {
-        "venue_fields": ("venue_a", "venue_b"),
-        "venue_labels": ("A腿", "B腿"),
-        "opportunity": "funding",
-        "amount": "notional_usd",
-        "amount_desc": "自由填写（USD，每边）",
-        "market_value": "funding_apr",
-        "name_prefix": "rotation",
-        "how_it_works": [
-            "两所一多一空等额对锁，方向按当下资金费选：多费率低的一所、空费率高的一所。",
-            "持有一段时长（默认每轮在 1~2 小时之间随机）刷成交量，顺带吃两所费差。",
-            "到期双腿平仓，冷却后按最新资金费重新选向，再开下一轮。",
-            "Arcus 腿可走 maker 挂单开仓，降低手续费（自动化配置里开关）。",
-        ],
-        "primary": ("symbol", "notional_usd", "leverage_a", "leverage_b",
-                    "hold_min_seconds", "hold_max_seconds"),
-        "section_summaries": {
-            "开仓条件": "费差达到 {min_entry_edge_bps_per_hour} bps/小时才开新一轮（0=不设门槛）；逐步建仓最多加到 {max_position_qty} 个币、每 {accumulate_interval_seconds} 秒加一档，Arcus 挂单开仓是 {arcus_maker}、挂单等 {maker_wait_seconds} 秒未成交就撤掉。",
-            "平仓条件": "每轮持有到期就平仓：固定时长 {hold_seconds} 秒，随机时长开启时每轮在 {hold_min_seconds} 到 {hold_max_seconds} 秒之间抽取。",
-            "平仓后怎么办": "平仓后先冷却 {cooldown_seconds} 秒，再按最新资金费选向开下一轮。",
-            "保护": "开仓后 {settle_grace_seconds} 秒内先等结算不误判仓位；两腿不平时削腿最多偏离现价 {max_slippage_bps} bps，超了不下单。",
-        },
-        "note": "方向由策略按资金费自动选（多费率低的一所、空费率"
-                "高的一所）；持有时长默认按 Parallax 原仓表单在最短"
-                " 1 小时 ~ 最长 2 小时之间每轮随机抽取，到点自动平仓"
-                "轮换（最长 ≤ 最短或最短填 0 时关闭随机，改用自动化"
-                "配置里的固定 hold_seconds）。",
     },
     "premium_arb": {
         "venue_fields": ("base_venue", "hedge_venue"),
@@ -511,6 +443,9 @@ PAGE_META: dict[str, dict] = {
         "amount_desc": "自由填写（USD）",
         "market_value": "spread_bps",
         "name_prefix": "arb",
+        "run_modes": [{"value": "semi_fixed", "label": "固腿固标"},
+                      {"value": "semi_auto", "label": "固腿优标"},
+                      {"value": "full_auto", "label": "优腿优标"}],
         "how_it_works": [
             "持续比较基准腿与对冲腿的价格，价差换算成相对中枢的溢价（bps）。",
             "溢价偏离中枢超过入场带、并持续确认一段时间后，便宜的一腿买、贵的一腿卖，等量对锁。",
@@ -524,11 +459,12 @@ PAGE_META: dict[str, dict] = {
             "开仓条件": "价差偏离中枢 {midline_bps} 超过上方 {upper_bps} 或下方 {lower_bps} bps、并持续 {persist_seconds} 秒才开仓；执行方式是 {execution_mode}，挂单偏移 {maker_offset_ticks} 个跳动、最多等 {maker_timeout_seconds} 秒。",
             "平仓条件": "价差回归到中枢上下 {close_band_bps} bps 内就双腿全平（0=关闭回归平仓，靠反向越带信号平仓）。",
             "平仓后怎么办": "平仓后先冷却 {cooldown_seconds} 秒，才允许再开下一笔。",
-            "保护": "每 {reconcile_seconds} 秒对账一次两腿仓位；开仓后 {settle_grace_seconds} 秒内先等结算不削腿，削腿最多偏离现价 {max_slippage_bps} bps。",
+            "保护": "对账发现两腿不平时自动削腿修平；开仓后 {settle_grace_seconds} 秒内先等结算不削腿，削腿最多偏离现价 {max_slippage_bps} bps。",
         },
-        "note": "顶部金额是最大持仓名义（不是单笔）；单笔上限在自动化"
+        "note": "顶部金额是最大持仓名义（不是单笔）；单笔上限在更多"
                 "配置里，点预设时按最大持仓的比例换算（保守 25% / "
                 "中性 50% / 激进 100%），改金额不会被预设覆盖。"
+                "两腿费率不在本页填，在设置页场所费率表维护。"
                 "溢价带（中枢/上带/下带）必须先实测再填：用录制器"
                 "采集盘口后跑 analyze 得建议值（见使用说明第 6 节），"
                 "不要凭感觉填。执行模式 maker = 主腿先挂单、成交后"
@@ -542,24 +478,26 @@ PAGE_META: dict[str, dict] = {
         "amount_desc": "自由填写（USD，每边）",
         "market_value": "funding_apr",
         "name_prefix": "carry",
+        "run_modes": [{"value": "semi_fixed", "label": "固腿固标"},
+                      {"value": "semi_auto", "label": "固腿优标"},
+                      {"value": "full_auto", "label": "优腿优标"}],
         "how_it_works": [
             "比较两所同一币的资金费率，方向自动定：多费率低的一所、空费率高的一所。",
-            "净费差（空腿费率减多腿费率）达到入场门槛，才双腿等额开仓。",
-            "持有期间按检查周期复核费差，跌破退出门槛并连续确认多次后平仓。",
-            "开启自动重开时，平仓后费差恢复到门槛之上会自动再开仓。",
+            "净费差（空腿费率减多腿费率）达到最低资金费率差、且开仓时两所价差不超过最大开仓价差，才双腿等额开仓。",
+            "持有期间复核费差，跌破最低资金费率差（与入场同一条线）并连续确认多次后平仓；任一腿距强平过近或两腿数量偏差过大也双腿平仓。",
+            "开启自动重开时，平仓后费差恢复到最低资金费率差之上会自动再开仓。",
         ],
         "primary": ("symbol", "notional_usd", "leverage",
-                    "min_entry_edge_bps_per_hour",
-                    "exit_edge_bps_per_hour"),
+                    "min_edge_bps_per_hour"),
         "section_summaries": {
-            "开仓条件": "费差达到 {min_entry_edge_bps_per_hour} bps/小时就开仓，方向自动：多费率低的一所、空费率高的。每 {check_seconds} 秒检查一次。",
-            "平仓条件": "费差跌破 {exit_edge_bps_per_hour} bps/小时并连续确认 {exit_confirm_checks} 次就平仓；持仓超过 {max_hold_seconds} 秒也平仓（0=不限）。",
-            "平仓后怎么办": "平仓后先等 {cooldown_seconds} 秒冷却；自动重开是 {reopen} 时，费差再达标会自动再开一笔。",
-            "保护": "开仓后 {settle_grace_seconds} 秒内先等结算不误判仓位；两腿不平时削腿最多偏离现价 {max_slippage_bps} bps，超了不下单。",
+            "开仓条件": "两所价差不超过 {max_open_spread_bps} bps、且费差达到 {min_edge_bps_per_hour} bps/小时就开仓，方向自动：多费率低的一所、空费率高的。",
+            "平仓条件": "费差跌破 {min_edge_bps_per_hour} bps/小时（与入场同一条线）并连续确认后平仓；任一腿距强平近于 {close_corridor_pct}% 或两腿数量偏差超过 {qty_dev_close_pct}%（按较大腿算，0=关）也双腿平仓。",
+            "平仓后怎么办": "自动重开是 {reopen} 时，费差再达标会自动再开一笔。",
+            "保护": "两腿数量不平时先削腿修平，削腿最多偏离现价 {max_slippage_bps} bps，超了不下单。",
         },
         "note": "方向由策略按资金费自动选（多费率低的一所、空费率"
-                "高的一所）；净费差达到入场门槛才开仓，跌破退出"
-                "门槛并连续确认后平仓。",
+                "高的一所）；最低资金费率差是进出共用的一条线："
+                "达到才开仓，跌破并连续确认后平仓。",
     },
 }
 
@@ -578,7 +516,10 @@ def _infer_type(f: "dataclasses.Field", meta: dict) -> str:
 
 
 def strategy_specs() -> list[dict]:
-    """四策略的参数规格（JSON 可序列化）：面板表单与校验的共同来源。"""
+    """三策略的参数规格（JSON 可序列化）：面板表单与校验的共同来源。
+
+    zone=hidden 的系统值字段不出现在 fields 输出里（见 ZONE_MAP）。
+    """
     out = []
     for stype, cls in PARAMS_CLASSES.items():
         meta_all = _FIELD_META.get(stype, {})
@@ -586,6 +527,9 @@ def strategy_specs() -> list[dict]:
         primary = set(page["primary"])
         fields = []
         for f in dataclasses.fields(cls):
+            zone = ZONE_MAP.get(stype, {}).get(f.name)
+            if zone == "hidden":
+                continue   # 系统值：不进面板字段输出
             meta = meta_all.get(f.name, {})
             required = f.default is dataclasses.MISSING and \
                 f.default_factory is dataclasses.MISSING
@@ -599,6 +543,7 @@ def strategy_specs() -> list[dict]:
                 "default": None if required else f.default,
                 "group": meta.get("group", "参数"),
                 "section": SECTION_MAP.get(stype, {}).get(f.name),
+                "zone": zone,
                 "primary": f.name in primary,
                 # 自动化配置子区内的语义分组（开仓/平仓/保护/
                 # 其他）；primary 与两腿字段不进该子区，为 None
@@ -624,6 +569,7 @@ def strategy_specs() -> list[dict]:
                 "amount_desc": page.get("amount_desc"),
                 "market_value": page["market_value"],
                 "name_prefix": page["name_prefix"],
+                "run_modes": [dict(m) for m in page.get("run_modes", [])],
                 "how_it_works": list(page["how_it_works"]),
                 "primary": list(page["primary"]),
                 "note": page["note"],
@@ -650,12 +596,16 @@ def validate_params(strategy: str, raw: dict) -> dict:
 
     - 未知字段、缺必填、类型不符、枚举/场所非法 → ValueError，
       消息逐项说清是哪个字段、什么问题；
+    - 系统值键（SYSTEM_KEYS，zone=hidden）容忍并直接丢弃：它们是
+      程序内定值或旧任务文件遗留键，不进归一化结果、不报错；
     - 数值字符串不接受（前端表单发 JSON 数字），bool 不当 int 用；
     - 返回只含已提供字段的归一化 dict（缺省字段由 Params 默认值补）。
     """
     spec = spec_for(strategy)
     if not isinstance(raw, dict):
         raise ValueError("params 必须是对象（字段名 → 值）")
+    raw = {k: v for k, v in raw.items()
+           if k not in SYSTEM_KEYS.get(strategy, frozenset())}
     by_name = {f["name"]: f for f in spec["fields"]}
     unknown = set(raw) - set(by_name)
     if unknown:

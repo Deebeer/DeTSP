@@ -21,6 +21,7 @@ Executor 再兜底：place 过程中任何未被明确分类的异常先对账�
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import time
 from dataclasses import dataclass, field
@@ -144,6 +145,9 @@ class _PendingFill:
 
 
 class Executor:
+    # 开仓频率闸门滑动窗口（秒）
+    RATE_LIMIT_WINDOW_SECONDS = 60.0
+
     def __init__(
         self,
         venues: dict[str, VenueAdapter],
@@ -152,6 +156,8 @@ class Executor:
         kill_switch: KillSwitch | None = None,
         caps: Caps | None = None,
         min_corridor_pct: float = 3.0,
+        rate_limits: dict | None = None,
+        clock=None,
     ) -> None:
         self.venues = dict(venues)
         self.registry = registry or OwnershipRegistry()
@@ -160,6 +166,39 @@ class Executor:
         self.caps = caps or Caps()
         self.min_corridor_pct = min_corridor_pct
         self._pending_fills: dict[str, _PendingFill] = {}
+        # 开仓频率预算：{leg_role: 60 秒内最多笔数}；缺省基准腿
+        # 120、对冲腿 30。不在表中的 leg_role 不限、不计数。
+        self.rate_limits: dict[str, int] = (
+            {"base": 120, "hedge": 30} if rate_limits is None
+            else dict(rate_limits))
+        self._rate_windows: dict[str, collections.deque] = {
+            role: collections.deque() for role in self.rate_limits}
+        # 频率超限事件（供面板/测试读）：每条含 ts/strategy/
+        # venue_id/symbol/leg_role
+        self.rate_limit_events: list[dict] = []
+        # 时钟注入：缺省动态调用 time.time()（可 monkeypatch
+        # detsp.core.execution.time.time）；测试也可传 clock 可调用对象
+        self._clock = clock if clock is not None else (lambda: time.time())
+
+    def _rate_gate(self, strategy: str, venue_id: str, symbol: str,
+                   leg_role: str) -> tuple[ExecResult | None, float | None]:
+        """开仓频率闸门检查：超限返回 (rejected 结果, None)，放行
+        返回 (None, 本次时间戳)——时间戳由调用方在真正下单前计入
+        窗口，被闸门拒的单不计入，被其他风控拒/抛错的单也不计入。"""
+        limit = self.rate_limits[leg_role]
+        now = float(self._clock())
+        dq = self._rate_windows.setdefault(leg_role, collections.deque())
+        cutoff = now - self.RATE_LIMIT_WINDOW_SECONDS
+        while dq and dq[0] <= cutoff:
+            dq.popleft()
+        if len(dq) >= limit:
+            self.rate_limit_events.append({
+                "ts": now, "strategy": strategy, "venue_id": venue_id,
+                "symbol": symbol, "leg_role": leg_role})
+            return ExecResult(status="rejected", detail=(
+                f"下单频率超限：{leg_role} 腿 60 秒内最多 {limit} 笔"
+                f"开仓单，已达上限，本单未下")), None
+        return None, now
 
     # ----- 基础查询 -----
     def venue(self, venue_id: str) -> VenueAdapter:
@@ -363,13 +402,29 @@ class Executor:
     # ----- 下单 -----
     def place(self, strategy: str, venue_id: str, req: OrderRequest, *,
               intent: str = "open",
-              corridor_pct: float | None = None) -> ExecResult:
+              corridor_pct: float | None = None,
+              leg_role: str = "base",
+              opening: bool = True) -> ExecResult:
         """统一下单入口。
 
         intent: open=开/加仓（过全部风控）；close=平/减仓（安全动作，
         停机时也允许，不查上限与强平距离）。
         corridor_pct: 调用方估算的开仓后强平距离，低于门槛直接拒。
+        leg_role: 腿角色，base=基准腿 / hedge=对冲腿，仅用于开仓
+        频率预算区分；不在 rate_limits 表中的值不限、不计数。
+        opening: 是否为真正开仓。频率闸门只挂 intent="open" 且
+        opening=True 的路径：对冲跟单以 opening=False 进入、
+        trim_excess / close_position 以 intent="close" 进入，
+        三者都不受频率限制。
         """
+        # 频率闸门：开仓路径最前面，在归属/盘口/其他风控/适配器
+        # 之前快速返回，被拒不消耗任何其他状态、不计入窗口
+        _rate_ts: float | None = None
+        if intent == "open" and opening and leg_role in self.rate_limits:
+            rejected, _rate_ts = self._rate_gate(
+                strategy, venue_id, req.symbol, leg_role)
+            if rejected is not None:
+                return rejected
         adapter = self.venues[venue_id]
         key = self.key(venue_id, req.symbol)
         # 归属校验：被其他策略占用直接抛 ConflictError
@@ -416,6 +471,10 @@ class Executor:
                         return ExecResult(status="rejected",
                                           detail="超过全局仓位上限")
 
+        if _rate_ts is not None:
+            # 只有通过闸门且通过其余开仓风控、真正要下到适配器的
+            # 开仓单才计入窗口
+            self._rate_windows[leg_role].append(_rate_ts)
         try:
             order = adapter.place_order(req)
         except UnknownOutcomeError as e:

@@ -16,7 +16,7 @@
 双腿反向但不等量时用 reduce-only 削掉多余的一截、只有单腿时
 平掉孤腿——修正到等量双腿（或空仓）后接管：方向按真实持仓
 推定，之后只继续监控（优势方向与当前方向不一致也不强制平仓，
-退出仍只看本组合的净收优势与迟滞规则）。
+退出仍只看本组合的净收优势与连续确认规则）。
 
 执行约束与其他双腿策略一致：全部下单走 Executor，归属 =
 任务名；孤腿立即平；强平距离任一腿告警走全局风控口径双平；
@@ -28,7 +28,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..core.risk import (
-    basis_ok,
     detect_single_leg,
     evaluate_funding_pair,
     funding_hourly_rate,
@@ -46,17 +45,23 @@ class CarryParams:
     notional_usd: float                 # 单边开仓金额
     leverage: float = 6.0               # 两腿杠杆（与账户实际一致；
     # 默认 6 对齐 Parallax 资金费选向的表单默认杠杆）
-    min_entry_edge_bps_per_hour: float = 1.0   # 入场门槛：组合净收
-    # 资金费优势 ≥ 此值（bps/小时）才开仓
-    exit_edge_bps_per_hour: float = 0.0        # 退出门槛（< 入场
-    # 门槛，构成迟滞，防止在门槛附近反复开平）
-    exit_confirm_checks: int = 3        # 优势连续低于退出门槛的
+    min_edge_bps_per_hour: float = 1.0  # 最低资金费率差（bps/小时）：
+    # 组合净收优势 ≥ 此值才开仓，持有中跌破此值并连续确认后平仓
+    # ——进出共用一条线（第十一轮定案，取代原入场/退出双门槛迟滞）
+    max_open_spread_bps: int = 300      # 最大开仓价差（bps）：开仓时
+    # 两腿 mid 价差超过此值不开（默认 300 对齐现行 basis 闸门 3%）
+    close_corridor_pct: float = 1.5     # 强平保护平仓线（%）：任一腿
+    # 距强平近于此值双腿平仓（默认对齐 RiskConfig.close_corridor_pct）
+    qty_dev_close_pct: float = 0.0      # 数量偏差平仓阈值（%，按较大
+    # 腿算）：两腿数量偏差超过此值直接双平；0=关（只走削腿修平）
+    reopen: bool = True                 # 平仓后优势恢复是否自动重开
+    # ── 系统值（保留字段，不进面板）──
+    exit_confirm_checks: int = 3        # 优势连续低于最低费差线的
     # 检查次数达到此值才平仓（防单次抖动误平）
     check_seconds: float = 30.0         # 资金费检查周期（对齐
     # Parallax 费率快照刷新 FUNDING_REFRESH_SECONDS=30）
-    max_hold_seconds: float = 0.0       # 最长持有（秒），0=不限
-    reopen: bool = True                 # 平仓后优势恢复是否自动重开
-    cooldown_seconds: float = 300.0     # 平仓后的重开冷却
+    cooldown_seconds: float = 60.0      # 平仓后的重开冷却（第十一轮
+    # 定案由 300 改 60）
     settle_grace_seconds: float = 10.0  # 开仓结算宽限期（秒）：市价
     # 单异步结算的场所（Lighter）成交要数秒后才反映在持仓上，宽限
     # 期内不对刚开的仓做单腿定性，期满复核再定性（审查 G1）
@@ -70,16 +75,20 @@ class CarryParams:
             raise ValueError("venue_a / venue_b 必填")
         if self.notional_usd <= 0:
             raise ValueError("notional_usd 必须大于 0")
-        if self.min_entry_edge_bps_per_hour <= 0:
-            raise ValueError("min_entry_edge_bps_per_hour 必须大于 0")
-        if self.exit_edge_bps_per_hour >= self.min_entry_edge_bps_per_hour:
-            raise ValueError("exit_edge_bps_per_hour 必须小于入场门槛（迟滞）")
+        if self.min_edge_bps_per_hour <= 0:
+            raise ValueError("min_edge_bps_per_hour 必须大于 0")
+        if self.max_open_spread_bps <= 0:
+            raise ValueError("max_open_spread_bps 必须大于 0")
+        if self.close_corridor_pct <= 0:
+            raise ValueError("close_corridor_pct 必须大于 0")
+        if self.qty_dev_close_pct < 0:
+            raise ValueError("qty_dev_close_pct 不能为负")
         if self.exit_confirm_checks < 1:
             raise ValueError("exit_confirm_checks 至少为 1")
         if self.check_seconds <= 0:
             raise ValueError("check_seconds 必须大于 0")
-        if self.max_hold_seconds < 0 or self.cooldown_seconds < 0:
-            raise ValueError("max_hold_seconds / cooldown_seconds 不能为负")
+        if self.cooldown_seconds < 0:
+            raise ValueError("cooldown_seconds 不能为负")
         if self.settle_grace_seconds < 0:
             raise ValueError("settle_grace_seconds 不能为负")
         if self.max_slippage_bps < 0:
@@ -133,8 +142,8 @@ class FundingCarryStrategy:
       未确认（异步结算/结果未知）进入结算宽限期，宽限内不做
       单腿定性，期满按真实持仓定案——成形则接管、残腿则平掉
       （审查 G1；同步结算的场所走快速路径，行为不变）
-    - 退出：优势连续 exit_confirm_checks 次低于退出门槛才双平；
-      max_hold_seconds 到期也双平；平仓后进冷却
+    - 退出：优势连续 exit_confirm_checks 次低于最低资金费率差
+      （与入场共用一条线）才双平；平仓后进冷却
     """
 
     name = "funding_carry"
@@ -147,8 +156,8 @@ class FundingCarryStrategy:
         # 归属 owner = 任务名（config 的 name）；未给时退回类型名
         self.owner = owner or self.name
         self.min_corridor_pct = getattr(risk_cfg, "min_corridor_pct", 3.0)
-        self.close_corridor_pct = getattr(risk_cfg, "close_corridor_pct", 1.5)
-        self.max_basis_pct = 3.0
+        # 强平保护平仓线取策略参数（第十一轮定案，不再取 risk_cfg）
+        self.close_corridor_pct = params.close_corridor_pct
         self.phase = "flat"          # flat / open / cooldown
         self.long_leg: str = ""      # 当前持仓的多腿："a" / "b"
         self.opened_at = 0.0
@@ -167,6 +176,11 @@ class FundingCarryStrategy:
         # 退出/最长持有都不触发），等人工 stop 全平；直接构造
         # 默认 False
         self.manual_immediate = False
+        # 费差库入场复检钩子（可选，监督器接库时注入）：flat 阶段
+        # 正常入场路径在开仓前调用，签名
+        # (venue_a, venue_b, symbol, edge_bps) -> (bool, 原因)；
+        # None = 不复检（现行行为）
+        self.entry_gate = None
         self.last_error: str = ""
         self.recovery_notes: list[str] = []  # 启动对账事件
 
@@ -277,7 +291,7 @@ class FundingCarryStrategy:
             if best_leg != self.long_leg:
                 note += (f"；注意当前最优方向为多 {best_leg} 腿"
                          f"（{best_edge:.2f} bps/小时），与持仓方向相反，"
-                         f"按退出迟滞规则处理，不强制平仓")
+                         f"按退出确认规则处理，不强制平仓")
             self.recovery_notes.append(note)
 
     def stop(self) -> None:
@@ -310,6 +324,20 @@ class FundingCarryStrategy:
                 self.cooldown_until = now + self.params.cooldown_seconds
                 self.long_leg = ""
             return False
+        if qa != 0 and qb != 0 and qa * qb < 0:
+            # 数量偏差两段式（第十一轮定案）：偏差按较大腿百分比
+            # 算，超过 qty_dev_close_pct（>0 才启用）直接双平进
+            # 冷却；未超过（或阈值关）走下面 detect_single_leg 的
+            # 削腿修平路径
+            dev_pct = abs(abs(qa) - abs(qb)) / max(abs(qa), abs(qb)) * 100
+            if self.params.qty_dev_close_pct > 0 and \
+                    dev_pct > self.params.qty_dev_close_pct:
+                self._close_both()
+                self._enter_cooldown(now)
+                self.last_error = (
+                    f"两腿数量偏差 {dev_pct:.2f}% 超过平仓阈值 "
+                    f"{self.params.qty_dev_close_pct}%，双腿平仓")
+                return True
         if detect_single_leg(legs):
             if qa != 0 and qb != 0 and qa * qb < 0:
                 big = "a" if abs(qa) > abs(qb) else "b"
@@ -332,9 +360,9 @@ class FundingCarryStrategy:
                 self.last_error = (f"{vid} 强平距离不可评估"
                                    f"（无强平价且杠杆未知），本 tick 不动作")
                 return True
-            if corr < self.close_corridor_pct:
+            if corr < self.params.close_corridor_pct:
                 self.last_error = (f"{vid} 强平距离 {corr:.2f}% 跌破平仓线 "
-                                   f"{self.close_corridor_pct}%，双腿平仓")
+                                   f"{self.params.close_corridor_pct}%，双腿平仓")
                 self._close_both()
                 self._enter_cooldown(now)
                 return True
@@ -352,8 +380,11 @@ class FundingCarryStrategy:
         short_leg = "b" if long_leg == "a" else "a"
         book_a = ex.venue(p.venue_a).book(p.symbol)
         book_b = ex.venue(p.venue_b).book(p.symbol)
-        if not basis_ok(book_a.mid, book_b.mid, self.max_basis_pct):
-            return  # 价差闸门：两所价格差过大不开（防同名不同标的）
+        if book_a.mid <= 0 or book_b.mid <= 0 or \
+                abs(book_a.mid / book_b.mid - 1) * 10_000 > \
+                p.max_open_spread_bps:
+            return  # 开仓价差闸门：两所价差（bps）超过最大开仓
+            # 价差不开（防同名不同标的），替代原 3% 粗闸门
         worst_est = min(self._est_corridor("a"), self._est_corridor("b"))
         if worst_est < self.min_corridor_pct:
             return  # 杠杆太高，估算强平距离不足
@@ -361,14 +392,19 @@ class FundingCarryStrategy:
         qty = p.notional_usd / long_mid
         if qty <= 0:
             return
-        # 双 taker 等量：先下一腿，失败/未知立即停手，按真实持仓收尾
+        # 双 taker 等量：先下一腿，失败/未知立即停手，按真实持仓收尾。
+        # 下单打标（执行层开仓频率上限口径）：第一腿（long_leg）
+        # 是基准开仓单 leg_role="base"/opening=True，第二腿是对冲
+        # 跟单 opening=False
         results = {}
-        for leg in (long_leg, short_leg):
+        for i, leg in enumerate((long_leg, short_leg)):
             side = Side.BUY if leg == long_leg else Side.SELL
             req = OrderRequest(symbol=p.symbol, side=side, qty=qty,
                                price=None)
             res = ex.place(self.owner, self._venue_id(leg), req,
-                           intent="open", corridor_pct=worst_est)
+                           intent="open", corridor_pct=worst_est,
+                           leg_role="base" if i == 0 else "hedge",
+                           opening=(i == 0))
             results[leg] = res
             if res.status in ("rejected", "unknown"):
                 break
@@ -462,14 +498,9 @@ class FundingCarryStrategy:
 
         if self.phase == "open":
             if self.manual_immediate:
-                # 自主模式：退出检查（费差跌破退出门槛、最长
-                # 持有）都不触发自动平仓，等人工 stop；安全
-                # 检查（孤腿/强平距离）在上面 _safety 照常保留
-                return
-            if p.max_hold_seconds > 0 and \
-                    now - self.opened_at >= p.max_hold_seconds:
-                self._close_both()
-                self._enter_cooldown(now)
+                # 自主模式：退出检查（费差跌破最低费差线）不触发
+                # 自动平仓，等人工 stop；安全检查（孤腿/强平距离）
+                # 在上面 _safety 照常保留
                 return
             if now - self._last_check < p.check_seconds:
                 return
@@ -480,7 +511,7 @@ class FundingCarryStrategy:
                 self.last_error = reason
                 return
             edge = current_edge_bps_per_hour(self.long_leg, ha, hb)
-            if edge < p.exit_edge_bps_per_hour:
+            if edge < p.min_edge_bps_per_hour:
                 self._below_exit_count += 1
             else:
                 self._below_exit_count = 0
@@ -521,5 +552,13 @@ class FundingCarryStrategy:
             self.last_error = reason
             return
         long_leg, edge = best_carry_direction(ha, hb)
-        if edge >= p.min_entry_edge_bps_per_hour:
+        if edge >= p.min_edge_bps_per_hour:
+            if self.entry_gate is not None:
+                # 费差库持续性复检（监督器接库时注入）：不过则
+                # 记原因跳过本轮，不开仓
+                gate_ok, gate_reason = self.entry_gate(
+                    p.venue_a, p.venue_b, p.symbol, edge)
+                if not gate_ok:
+                    self.last_error = gate_reason
+                    return
             self._open_pair(long_leg, now)

@@ -1,7 +1,7 @@
 """策略调度引擎（执行模式）。
 
 Engine.from_config(...) 按 config.yaml 的 tasks 组装 Executor 与
-四策略运行时，tick(now) 逐任务调度：先串行执行面板命令队列，
+三策略运行时，tick(now) 逐任务调度：先串行执行面板命令队列，
 再推进市价单成交发现，最后逐任务 tick。
 
 执行模式规则：
@@ -74,8 +74,8 @@ class Task:
 
     name: str
     strategy_type: str
-    runtime: object  # HedgedGridStrategy / RotationHedgeStrategy /
-    # PremiumArbStrategy / FundingCarryStrategy / AutoCycleRuntime
+    runtime: object  # HedgedGridStrategy / PremiumArbStrategy /
+    # FundingCarryStrategy / AutoCycleRuntime
     # 运行模式（归一后）：manual=自主 / semi_fixed=半自动·固定标的
     # / semi_auto=半自动·自动选标 / full_auto=全自动
     run_mode: str = "manual"
@@ -111,13 +111,36 @@ def task_occupied_keys(task_cfg: dict) -> set[tuple[str, str]]:
     if strat == "hedged_grid":
         used.add((_tf("grid_venue"), sym))
         used.add((_tf("hedge_venue"), sym))
-    elif strat in ("rotation_hedge", "funding_carry"):
+    elif strat == "funding_carry":
         used.add((_tf("venue_a"), sym))
         used.add((_tf("venue_b"), sym))
     elif strat == "premium_arb":
         used.add((_tf("base_venue"), sym))
         used.add((_tf("hedge_venue"), sym))
     return used
+
+
+def _premium_params_with_fee_table(clean_params: dict) -> dict:
+    """溢价套利两腿 taker 费率覆盖（第十一轮）：core/fee_table.py
+    的 FeeTable（设置页场所费率表）存在时，用 data/fees.json 里
+    两腿场所的 taker 费率覆盖任务参数。文件不存在或任何异常都
+    静默回落原参数（缺省即 dataclass 默认 0），不炸启动。"""
+    try:
+        import importlib
+
+        mod = importlib.import_module(f"{__package__}.fee_table")
+        table_cls = getattr(mod, "FeeTable", None)
+        if table_cls is None:
+            return clean_params
+        table = table_cls(Path("data/fees.json"))
+        out = dict(clean_params)
+        base_taker, _ = table.get(out.get("base_venue") or "")
+        hedge_taker, _ = table.get(out.get("hedge_venue") or "")
+        out["base_taker_fee_bps"] = float(base_taker)
+        out["hedge_taker_fee_bps"] = float(hedge_taker)
+        return out
+    except Exception:  # noqa: BLE001 — 费率表缺失/损坏不挡启动
+        return clean_params
 
 
 def build_runtime(strategy: str, clean_params: dict, executor: Executor,
@@ -130,20 +153,15 @@ def build_runtime(strategy: str, clean_params: dict, executor: Executor,
     from ..strategies.funding_carry import CarryParams, FundingCarryStrategy
     from ..strategies.hedged_grid import HedgedGridParams, HedgedGridStrategy
     from ..strategies.premium_arb import PremiumArbStrategy, PremiumParams
-    from ..strategies.rotation_hedge import RotationHedgeStrategy, RotationParams
 
-    available = "hedged_grid / premium_arb / rotation_hedge / funding_carry"
+    available = "hedged_grid / premium_arb / funding_carry"
     if strategy == "hedged_grid":
         runtime = HedgedGridStrategy(
             HedgedGridParams(**clean_params),
             executor=executor, owner=owner)
-    elif strategy == "rotation_hedge":
-        runtime = RotationHedgeStrategy(
-            RotationParams(**clean_params),
-            executor=executor, risk_cfg=risk_cfg, owner=owner)
     elif strategy == "premium_arb":
         runtime = PremiumArbStrategy(
-            PremiumParams(**clean_params),
+            PremiumParams(**_premium_params_with_fee_table(clean_params)),
             executor=executor, owner=owner)
     elif strategy == "funding_carry":
         runtime = FundingCarryStrategy(
@@ -160,8 +178,8 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg,
                scanner=None) -> Task:
     """由 config 的一条 task dict 组装策略运行时。
 
-    只认四个现行策略：hedged_grid / premium_arb / rotation_hedge /
-    funding_carry。已移除的旧策略名（grid / volume_loop）与未知
+    只认三个现行策略：hedged_grid / premium_arb / funding_carry。
+    已移除的旧策略名（grid / volume_loop / rotation_hedge）与未知
     名字一样报错，并明确列出可用策略，避免用户对着旧配置猜。
 
     运行模式（task 顶层 run_mode，不进 params，归一见
@@ -178,7 +196,7 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg,
     """
     from ..strategies.specs import validate_params
 
-    available = "hedged_grid / premium_arb / rotation_hedge / funding_carry"
+    available = "hedged_grid / premium_arb / funding_carry"
     name = str(task_cfg.get("name") or task_cfg.get("strategy") or "task")
     stype = task_cfg.get("strategy")
     try:
@@ -206,7 +224,7 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg,
         if k in task_cfg:
             params_raw.setdefault(k, task_cfg[k])
 
-    if stype in ("grid", "volume_loop"):
+    if stype in ("grid", "volume_loop", "rotation_hedge"):
         raise ValueError(
             f"策略 {stype} 已移除，可用策略：{available}")
     # 选标类任务不写 symbol（监督器逐轮选标）、中性网格不写区间
@@ -224,8 +242,6 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg,
             _venue_ph = {
                 "hedged_grid": {"grid_venue": "arcus",
                                 "hedge_venue": "lighter"},
-                "rotation_hedge": {"venue_a": "arcus",
-                                   "venue_b": "lighter"},
                 "funding_carry": {"venue_a": "arcus",
                                   "venue_b": "lighter"},
                 "premium_arb": {"base_venue": "arcus",
@@ -241,11 +257,24 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg,
             if k not in params_raw:
                 params_raw[k] = v
                 auto_supplied.add(k)
+    # 老任务迁移（第十一轮，validate 前）：funding_carry 旧字段
+    # min_entry_edge_bps_per_hour → min_edge_bps_per_hour（新字段
+    # 已存在时以新字段为准）；已删除的 exit_edge_bps_per_hour /
+    # max_hold_seconds 静默丢弃。premium 的系统值键由 validate 的
+    # hidden 容忍处理，不在此处动
+    if stype == "funding_carry":
+        if "min_edge_bps_per_hour" not in params_raw and \
+                "min_entry_edge_bps_per_hour" in params_raw:
+            params_raw["min_edge_bps_per_hour"] = \
+                params_raw.pop("min_entry_edge_bps_per_hour")
+        else:
+            params_raw.pop("min_entry_edge_bps_per_hour", None)
+        params_raw.pop("exit_edge_bps_per_hour", None)
+        params_raw.pop("max_hold_seconds", None)
     # 参数校验走 strategies.specs 的单一事实源（与面板表单同一份
     # 规格）：未知字段/缺必填/类型不符都在这里逐项报错
     clean = validate_params(str(stype), params_raw) \
-        if stype in ("hedged_grid", "premium_arb", "rotation_hedge",
-                     "funding_carry") else None
+        if stype in ("hedged_grid", "premium_arb", "funding_carry") else None
     if clean is None:
         raise ValueError(
             f"未知策略类型：{stype}，可用策略：{available}")
@@ -274,7 +303,7 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg,
                     "自主模式：立即开一笔，本笔平仓后任务结束，"
                     "不按 reopen 参数自动重开")
         # semi_fixed：什么都不设——策略原生循环，carry 的
-        # reopen 用用户原值，rotation/premium/grid 原生节奏
+        # reopen 用用户原值，premium/grid 原生节奏
     return Task(name=name, strategy_type=str(stype), runtime=runtime,
                 run_mode=run_mode, run_preset=run_preset,
                 amount_usd=amount_usd)
@@ -288,8 +317,8 @@ class Engine:
     executor: Executor | None = None
     tasks: list[Task] = field(default_factory=list)
     max_consecutive_errors: int = 3
-    # 组装动态任务时用的风控配置（from_config 时存入；rotation /
-    # carry 的运行时需要它，面板新建任务也走同一份）
+    # 组装动态任务时用的风控配置（from_config 时存入；carry 的
+    # 运行时需要它，面板新建任务也走同一份）
     risk_cfg: object = None
     # 行情扫描器（from_config 时存入）：全自动任务的监督器选标用，
     # 组装任务时透传给 build_task
@@ -450,7 +479,7 @@ class Engine:
         """从调度列表移除任务（调用方须先停止并确认无持仓）。
 
         同步清掉错误记录、面板任务登记与该任务的全部归属 claim
-        （停止动作未必释放 claim，如 rotation 保留 claim 以便重启
+        （停止动作未必释放 claim，如有的策略保留 claim 以便重启
         续管；任务既已删除，claim 必须释放，否则该 (venue,symbol)
         会被一个不存在的任务永久占用）。返回是否曾在列表中。
         """
