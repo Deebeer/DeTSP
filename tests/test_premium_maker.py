@@ -30,10 +30,18 @@ def _build(venues, **params):
             "reconcile_seconds": 15, "execution_mode": "maker",
             "maker_timeout_seconds": 10}
     base.update(params)
+    # 第十三轮夹具调整：保证金 amount_usd 是任务顶层字段（不是
+    # params），仓位上限由引擎按 保证金 × 基准腿杠杆 派生注入；
+    # 借道 _build 传入时从 params 摘出放任务顶层，与面板/配置
+    # 文件的真实通道一致
+    amount_usd = base.pop("amount_usd", None)
+    task = {"name": "arb", "strategy": "premium_arb",
+            "run_mode": "semi_fixed", "params": base}
+    if amount_usd is not None:
+        task["amount_usd"] = amount_usd
     # 第十轮夹具调整：maker 执行语义是原生信号驱动，钉
     # semi_fixed（缺省 manual 已改为首 tick taker 打一笔）
-    y = {"tasks": [{"name": "arb", "strategy": "premium_arb",
-                    "run_mode": "semi_fixed", "params": base}]}
+    y = {"tasks": [task]}
     cfg = build_config(env={}, yaml_data=y)
     engine = Engine.from_config(cfg, venues, ledger=Ledger())
     assert "arb" not in engine.errors, engine.errors
@@ -111,9 +119,11 @@ def test_maker_partial_fill_hedges_final_qty_on_timeout():
     base = _PartialBaseVenue(venue_id="entropy", prices={"SNDK": 100.0})
     hedge = PaperVenue(venue_id="lighter_rh", prices={"SNDK": 99.0})
     venues = {"entropy": base, "lighter_rh": hedge}
-    # 仓位上限压到 600：部分对冲后（已用 200）第二轮切片（500）
-    # 会超限不开新轮，方便断言本轮已收尾
-    engine = _build(venues, max_position_usd=600)
+    # 仓位上限压到 600（第十三轮口径：max_position_usd 已非
+    # 用户字段、显式写死会被忽略）：改用保证金 600 × 基准腿
+    # 杠杆 1（缺省）派生出 600 上限——部分对冲后（已用 200）
+    # 第二轮切片（500）会超限不开新轮，方便断言本轮已收尾
+    engine = _build(venues, amount_usd=600)
     rt = engine.tasks[0].runtime
     engine.tick(now=0)    # 挂 maker（场所侧已部分成交 40%）
     assert rt._maker is not None

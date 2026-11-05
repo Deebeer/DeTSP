@@ -114,29 +114,37 @@ def _premium_params_derived(clean_params: dict,
 
     - 两腿 taker 费率：一律覆盖为内置通用默认（core.fee_table
       常量，全所 taker 5 bps；第十二轮起不再读任何费率文件）；
-    - 保证金仓位（amount_usd 给定时）：仓位名义 = 保证金 ×
-      基准腿杠杆，实际最大持仓取 min(用户最大持仓, 该名义)；
-    - 单笔上限：参数带 order_cap_pct 时按「生效最大持仓 ×
+    - 仓位派生：仓位 = 保证金 × 基准腿杠杆，派生值注入引擎
+      内部与策略运行时仍用的 max_position_usd 字段；参数里的
+      max_position_usd 一律忽略（进入即丢弃，无论来源）——
+      第十三轮起它不再是用户可填字段，保证金 × 杠杆就决定
+      仓位；amount_usd 为 None（无保证金）时回落 PremiumParams
+      的默认仓位作为派生基准；
+    - 单笔上限：参数带 order_cap_pct 时按「派生仓位 ×
       order_cap_pct / 100」派生，覆盖 max_order_notional_usd；
       没带 order_cap_pct 时显式 max_order_notional_usd 原样保留。
     任何异常静默回落原参数，不炸启动。
     """
     try:
+        from ..strategies.premium_arb import PremiumParams
         from .fee_table import get_fees
 
         out = dict(clean_params)
+        out.pop("max_position_usd", None)
         base_taker, _ = get_fees(out.get("base_venue") or "")
         hedge_taker, _ = get_fees(out.get("hedge_venue") or "")
         out["base_taker_fee_bps"] = float(base_taker)
         out["hedge_taker_fee_bps"] = float(hedge_taker)
-        max_pos = float(out.get("max_position_usd", 1000.0))
         if amount_usd is not None:
             lev = float(out.get("leverage_base", 1.0))
-            max_pos = min(max_pos, float(amount_usd) * lev)
-            out["max_position_usd"] = max_pos
+            position = float(amount_usd) * lev
+        else:
+            position = float(PremiumParams.__dataclass_fields__[
+                "max_position_usd"].default)
+        out["max_position_usd"] = position
         if out.get("order_cap_pct") is not None:
             out["max_order_notional_usd"] = \
-                max_pos * float(out["order_cap_pct"]) / 100.0
+                position * float(out["order_cap_pct"]) / 100.0
         return out
     except Exception:  # noqa: BLE001 — 派生失败不挡启动
         return clean_params

@@ -123,16 +123,16 @@ _FIELD_META: dict[str, dict[str, dict]] = {
         "max_order_notional_usd": {"label": "单笔上限（一笔订单最多下这么多美元，更大的量会拆成多笔下）",
                                    "group": "风控",
                                    "help": "第十二轮起面板不填此值：单笔上限"
-                                           "由「单笔上限占最大持仓 %」在组装时"
-                                           "派生；手写配置里显式填了本字段且没填"
-                                           "百分比时，仍以本字段为准。"},
-        "order_cap_pct": {"label": "单笔上限占最大持仓 %（单笔上限 = 最大持仓 × 这个百分比，组装时自动换算）",
+                                           "由「单笔上限占仓位 %」按派生仓位在"
+                                           "组装时派生；手写配置里显式填了本"
+                                           "字段且没填百分比时，仍以本字段为准。"},
+        "order_cap_pct": {"label": "单笔上限占仓位 %（单笔上限 = 仓位 × 这个百分比；仓位 = 保证金 × 基准腿杠杆，组装时自动换算）",
                           "group": "风控"},
         "min_order_notional_usd": {"label": "单笔下限（算出的下单金额低于这个数就不下，跳过这次机会）",
                                    "group": "风控"},
         "inventory_scale_bps": {"label": "库存阶梯（持仓越接近上限，开仓门槛额外抬高，最多加这么多 bps）",
                                 "group": "风控"},
-        "inventory_floor_frac": {"label": "库存阶梯起点（持仓达到最大持仓的这个比例后，才开始抬门槛）",
+        "inventory_floor_frac": {"label": "库存阶梯起点（持仓达到派生仓位的这个比例后，才开始抬门槛）",
                                  "group": "风控"},
         "take_fraction": {"label": "吃单深度比例（每笔单最多吃掉对手盘挂单量的这个比例）",
                           "group": "风控"},
@@ -309,7 +309,7 @@ ZONE_MAP: dict[str, dict[str, str]] = {
     },
     "premium_arb": {
         "base_venue": "legs", "hedge_venue": "legs",
-        "symbol": "position", "max_position_usd": "position",
+        "symbol": "position", "max_position_usd": "hidden",
         "leverage_base": "position", "leverage_hedge": "position",
         "execution_mode": "config", "close_band_bps": "config",
         "midline_bps": "config", "upper_bps": "config",
@@ -420,7 +420,7 @@ PAGE_META: dict[str, dict] = {
             "溢价回归中枢附近即双腿平仓，赚价差回归；平仓恒走 taker 立即成交。",
             "主腿可选 maker 先挂单（成交后对冲腿跟上）或 taker 双腿立即吃单。",
         ],
-        "primary": ("symbol", "max_position_usd", "execution_mode",
+        "primary": ("symbol", "execution_mode",
                     "midline_bps", "upper_bps", "lower_bps",
                     "leverage_base", "leverage_hedge"),
         "section_summaries": {
@@ -430,10 +430,10 @@ PAGE_META: dict[str, dict] = {
             "保护": "对账发现两腿不平时自动削腿修平；开仓后 {settle_grace_seconds} 秒内先等结算不削腿，削腿最多偏离现价 {max_slippage_bps} bps。",
         },
         "note": "仓位设置里的金额是保证金：仓位名义 = 保证金 × "
-                "基准腿杠杆，对冲腿开相同名义；实际仓位以最大持仓"
-                "为上限（名义超过最大持仓时预览会警告）。单笔上限"
-                "不用填，在「更多配置」里按最大持仓的百分比定"
-                "（单笔上限占最大持仓 %，组装时自动换算）。两腿"
+                "基准腿杠杆，对冲腿开相同名义；仓位由保证金 × "
+                "基准腿杠杆决定，没有单独的最大持仓字段。单笔上限"
+                "不用填，在「更多配置」里按仓位的百分比定"
+                "（单笔上限占仓位 %，组装时自动换算）。两腿"
                 "费率不用填：全所统一内置默认（taker 5 / maker 2 "
                 "bps）。溢价带（中枢/上带/下带）必须先实测再填："
                 "用录制器采集盘口后跑 analyze 得建议值（见使用说明"

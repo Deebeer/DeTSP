@@ -37,9 +37,9 @@ class PremiumParams:
     hedge_taker_fee_bps: float = 0.0
     max_position_usd: float = 1000.0
     max_order_notional_usd: float = 500.0
-    # 单笔上限占最大持仓的百分比（第十二轮新增）：任务组装时
+    # 单笔上限占仓位（派生）的百分比（第十二轮新增）：任务组装时
     # （core.engine.build_runtime）若参数里带了本字段，单笔上限
-    # 按「最大持仓 × 本值 / 100」派生、覆盖 max_order_notional_usd；
+    # 按「派生仓位 × 本值 / 100」派生、覆盖 max_order_notional_usd；
     # 直接构造 PremiumParams（纯函数/回测）时不自动派生，
     # max_order_notional_usd 仍以显式值为准
     order_cap_pct: float = 50.0
@@ -251,6 +251,7 @@ class PremiumArbStrategy:
     - taker 模式：双腿 taker 先后紧贴发出；maker 模式：开仓走
       maker 主腿（见模块头注），减仓/平仓仍双腿 taker
     - 仓位：单笔切片 max_order_notional_usd，总仓 max_position_usd
+      是仓位上限（由引擎按保证金 × 基准腿杠杆派生注入）
     - 对账：每 reconcile_seconds 与场所真实持仓核对；净 delta 不平
       以带滑点上限的 reduce-only 限价单修正（只减多出的那条腿）；
       taker 双腿刚下出后的结算宽限期内不对账削腿（异步结算的腿

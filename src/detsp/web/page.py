@@ -39,12 +39,15 @@ full_auto；旧值 auto 按 semi_auto 处理；semi_auto 时仓位设置
 模式徽标、自动选标类任务显示当前标的与已循环轮数）。
 第十二轮定版：预设已全砍（优腿优标没填的参数按内置中性档
 补，specs.NEUTRAL_DEFAULTS）。
-选择两腿（第十二轮瘦身）：只剩两个场所下拉（其余统计/价格/
-杠杆信息全挪进仓位设置）。仓位设置从上到下：配对统计行
-「共同 N · A所上市 X · B所上市 Y」→ 币种下拉 + 保证金输入框
-→ 两腿杠杆（每腿输入框上方一行「场所名 · 最高杠杆 · 保证金
-模式」，如 entropy · 15x · 逐仓 only）→ 数据块两行（两腿价 +
-价差 / 两腿资金费）。金额语义（第十二轮）：仓位设置填的是
+选择两腿（第十三轮恢复）：场所下拉 + 方向徽标 + 每腿金额/
+数量 + 每腿可用余额（权益）恢复到腿行（第十二轮曾被一并砍
+掉）；统计/价格/标的数据/杠杆四样仍在仓位设置，不搬回。
+仓位设置横排两列（第十三轮）：配对统计行整行在顶（「共同
+N · A所上市 X · B所上市 Y」）→ 第一行 币种 | 保证金 → 空
+一行 → 第二行 杠杆 | 杠杆（每腿输入框上方一行「场所名 ·
+最高杠杆 · 保证金模式」，如 entropy · 15x · 逐仓 only，
+资金费单杠杆占左列）→ 数据块两行整行在底（两腿价 + 价差 /
+两腿资金费）。金额语义（第十二轮）：仓位设置填的是
 保证金（USD），仓位名义 = 保证金 × 基准腿杠杆（网格为网格
 腿杠杆），对冲腿开相同名义、其实际占用保证金 = 名义 ÷ 对冲
 腿杠杆，在预览与保证金行旁列清；网格按总名义反推每格量。
@@ -63,8 +66,8 @@ full_auto；旧值 auto 按 semi_auto 处理；semi_auto 时仓位设置
 记录随 5 秒 overview 节奏。各数据区块右上角有「更新
 HH:MM:SS」小字（时间取自接口 updated_at）；刷新失败保留旧
 数据并把时间戳标黄注明。各所各标的的最高杠杆不同、有的标
-的仅逐仓：选择两腿逐行显示该标的在该所的最高杠杆与保证金
-模式（数据来自各所公开接口，拿不到显示未知），预览里所填
+的仅逐仓：仓位设置的杠杆行逐腿显示该标的在该所的最高杠杆
+与保证金模式（数据来自各所公开接口，拿不到显示未知），预览里所填
 杠杆超上限会警告——本面板只展示与警告，程序不自动改杠杆
 （既有口径）。
 
@@ -183,6 +186,10 @@ details div{font-size:12px;padding:6px 4px;line-height:1.8}
 .pairPrices{margin-top:8px}
 .gridSug{margin-top:10px}
 .levInfo{font-size:12px;color:var(--mut);margin:10px 0 0}
+.posGrid{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}
+.posGrid .symWrap select{min-width:0;width:100%}
+.posCell{min-width:0}
+.levGrid{margin-top:14px}
 .posData{margin-top:12px}
 .symData{margin-top:8px;font-size:12px;line-height:1.7}
 .symData .sdT{color:var(--bright)}
@@ -486,7 +493,7 @@ function buildForm(st, values){
 const spec=specOf(st); if(!spec){$("#mForm").innerHTML="";return}
 $("#mBlurb").textContent=spec.blurb||"";
 // 组装派生字段（如溢价单笔上限）不渲染输入框：它由「单笔上
-// 限占最大持仓 %」在组装时算出，弹窗里改它会被覆盖
+// 限占仓位 %」在组装时算出，弹窗里改它会被覆盖
 const derived=(spec.page&&spec.page.derived_fields)||[];
 $("#mForm").innerHTML=fieldsHtml(
 spec.fields.filter(f=>derived.indexOf(f.name)<0), values, false);
@@ -872,34 +879,43 @@ funding_carry:"USD，仓位名义 = 保证金 × 杠杆"}[st]||"USD（保证金�
 const marginHtml='<div class="amtRow"><div class="amtMain"><label class="fld">'+
 '<span class="fname">保证金</span><span class="fdesc">'+esc(marginDesc)+"</span>"+
 '<input type="number" step="any" min="0" class="marginInp" placeholder="如 100"></label></div>'+
-'<span class="muted marginInfo"></span></div>'+
-(st==="hedged_grid"
+'<span class="muted marginInfo"></span></div>';
+// 网格的保证金说明整行排在第一行（币种|保证金）之后、杠杆行之前
+const gridMarginNoteHtml=st==="hedged_grid"
 ? '<p class="muted">网格总名义 = 保证金 × 网格腿杠杆，用作网格资金上限：改保证金会按网格腿现价反推每格量（在下方配置区）；反过来改每格量/格数，这里显示约合保证金。</p>'
-: "");
-// 两腿杠杆区：每腿杠杆输入框上方一行 levInfo（「场所名 ·
-// 最高杠杆 · 保证金模式」，renderLegs 随数据刷新填）；资金费
-// 是单杠杆字段，两腿共用，两行 levInfo 一起标
+: "";
+// 两腿杠杆区（第十三轮横排第二行）：每腿一个 posCell，杠杆
+// 输入框上方一行 levInfo（「场所名 · 最高杠杆 · 保证金模式」，
+// renderLegs 随数据刷新填）；资金费是单杠杆字段，两腿共用，
+// 两行 levInfo 一起标、只占左列，右列留空
 let levAreaHtml="";
 if(levFields.length){
-levAreaHtml='<div class="positionFields">';
+levAreaHtml='<div class="posGrid levGrid">';
 if(levFields.length===1){
-levAreaHtml+='<div class="levInfo" data-levinfo-leg="0"></div>'+
+levAreaHtml+='<div class="posCell"><div class="levInfo" data-levinfo-leg="0"></div>'+
 '<div class="levInfo" data-levinfo-leg="1"></div>'+
-renderField(levFields[0], levFields[0].default, false);
+renderField(levFields[0], levFields[0].default, false)+'</div>'+
+'<div class="posCell"></div>';
 }else{
 levFields.forEach((f,i)=>{levAreaHtml+=
-'<div class="levInfo" data-levinfo-leg="'+i+'"></div>'+
-renderField(f, f.default, false)});
+'<div class="posCell"><div class="levInfo" data-levinfo-leg="'+i+'"></div>'+
+renderField(f, f.default, false)+"</div>"});
 }
 levAreaHtml+="</div>";
 }
 const posPlainHtml=posPlainFields.length
 ? '<div class="pform positionFields">'+posPlainFields.map(f=>renderField(f,f.default,false)).join("")+"</div>"
 : "";
-// 选择两腿（第十二轮瘦身）：只剩两个场所下拉
+// 选择两腿（第十三轮恢复第十一轮腿行）：场所下拉 + 方向
+// 徽标 + 金额（只读）/数量 + 每腿可用余额；杠杆行不搬回
+// （已定版在仓位设置，见 levInfo）
 const legRow=idx=>
 '<div class="legRow"><span class="legLab">'+esc(pg.venue_labels[idx])+'</span>'+
-'<select class="vSel" data-leg="'+idx+'"></select></div>';
+'<select class="vSel" data-leg="'+idx+'"></select>'+
+'<span class="dirB" data-dir="'+idx+'"></span>'+
+'金额 $<input class="legAmt" data-legamt="'+idx+'" readonly>'+
+'数量 <span data-legqty="'+idx+'">-</span>'+
+'<span class="legBal" data-legbal="'+idx+'">可用 —</span></div>';
 root.innerHTML=
 "<h2>"+esc(spec.title)+'</h2><p class="muted">'+esc(spec.blurb)+"</p>"+
 '<details class="block howBox"><summary>运作方式</summary><ol>'+steps+"</ol></details>"+
@@ -909,15 +925,16 @@ root.innerHTML=
 '<p class="muted modeDesc"></p></div>'+
 '<div class="block fullAutoNote" style="display:none"><p class="muted">全自动：两腿和标的都由系统选，你只选策略、在下面填保证金。</p></div>'+
 '<div class="block legsBlock"><span class="upd pairsUpd"></span><h3>选择两腿</h3><div class="legs">'+legRow(0)+legRow(1)+"</div>"+
-'<p class="muted">先选两所：系统会列出这两所共同上市的全部标的并按策略排序（统计与数据在下面「仓位设置」里）。方向由所选标的的机会自动定。</p>'+
-'<p class="bad listNote"></p></div>'+
+'<p class="muted">先选两所：这两所共同上市的标的在下面「仓位设置」里按策略排序。方向由所选标的的机会自动定（见每腿的方向徽标）；金额 = 仓位名义（保证金 × 基准腿杠杆、两腿相同、只读），数量按现价实时换算；每条腿下方显示该所可用余额（权益），随数据刷新更新；该标的在各所的最高杠杆/保证金模式见「仓位设置」的杠杆行。</p>'+
+'<p class="bad listNote"></p><div class="gridSug"></div></div>'+
 '<div class="block positionBlock"><h3>仓位设置</h3>'+
 '<div class="pairsStats muted"></div>'+
 '<p class="muted autoPickNote" style="display:none">半自动·自动选标：标的由系统自动选——每轮开仓都按当前策略口径重新选排第一的共同标的，下方下拉不用选。</p>'+
-'<div class="symWrap"><label>币种 <select class="symSel" data-f="symbol"></select></label></div>'+
-marginHtml+levAreaHtml+posPlainHtml+
+'<div class="posGrid"><div class="posCell"><div class="symWrap"><label>币种 <select class="symSel" data-f="symbol"></select></label></div></div>'+
+'<div class="posCell">'+marginHtml+"</div></div>"+
+gridMarginNoteHtml+levAreaHtml+posPlainHtml+
 '<div class="symData posData"></div>'+
-'<div class="fundingLibInfo muted"></div><div class="gridSug"></div></div>'+
+'<div class="fundingLibInfo muted"></div></div>'+
 '<div class="block configBlock"><h3>策略配置</h3>'+
 '<div class="configFields">'+
 '<p class="muted">正面只放核心字段，其余在下方「更多配置」里。'+(hasZone?"":"配置按五段排：交易对象 / 开仓条件 / 平仓条件 / 平仓后怎么办 / 保护，每段标题下有一句随你填写实时变化的总结。")+'</p>'+
@@ -1372,12 +1389,13 @@ updateGridSug(st);
 renderSymData(st);
 }
 
-// ---------- 仓位设置联动（杠杆信息行 + 保证金派生旁注） ----------
+// ---------- 选择两腿 / 仓位设置联动（腿行 + 杠杆行 + 保证金旁注） ----------
 // renderLegs 保持函数名（刷新/切标的/输入的公共调用点不变）：
-// 第十二轮起它负责仓位设置里的两处联动——每腿杠杆输入框上方
-// 的 levInfo 行（「场所名 · 最高杠杆 · 保证金模式」，随 pairs
-// 数据刷新）和保证金行旁的 marginInfo（派生名义与两腿占用
-// 保证金，预览里还有分列明细）
+// 第十三轮在第十二轮的两处联动（仓位设置每腿杠杆输入框上方
+// 的 levInfo 行、保证金行旁的 marginInfo，两者原样保留）之上
+// 恢复第十一轮腿行填充——每腿方向徽标、金额/数量、可用余额
+//（权益）；grid 的约合总名义仍走 marginInfo，不另加回旧的
+// gridAmtInfo。
 function renderLegs(st){
 const S=SPAGES[st]; if(!S) return;
 const row=pairRow(st);
@@ -1388,6 +1406,56 @@ const vid=i===0?S.vA.value:S.vB.value;
 const ml=row?(i===0?row.max_leverage_a:row.max_leverage_b):null;
 const mm=row?(i===0?row.margin_mode_a:row.margin_mode_b):"unknown";
 el.textContent=vid+" · "+legLevText(ml, mm);
+});
+const pr=pairRates(st), kind=S.spec.page.opportunity, sym=pageSymbol(S);
+const legLevNames=st==="hedged_grid"?["leverage_grid","leverage_hedge"]
+:st==="premium_arb"?["leverage_base","leverage_hedge"]
+:["leverage","leverage"];
+const legLevBase=numField(S, legLevNames[0])||1, legMargin=marginOf(S);
+[0,1].forEach(i=>{
+const vid=i===0?S.vA.value:S.vB.value;
+const price=row?(i===0?row.price_a:row.price_b):null;
+const balEl=S.root.querySelector('[data-legbal="'+i+'"]');
+if(balEl){
+const v=LAST_OV?LAST_OV.venues.find(x=>x.venue_id===vid):null;
+balEl.textContent=(!v||v.available==null)?"可用 —"
+:("可用 $"+fmt(v.available)+"（权益 $"+fmt(v.equity)+"）"+
+(v.mode==="paper"?" 模拟余额":""));
+}
+const dirEl=S.root.querySelector('[data-dir="'+i+'"]');
+if(dirEl){
+let txt="—", cls="";
+if(kind==="grid"){txt=i===0?"网格双向":"反向对冲"}
+else if(kind==="funding"){
+if(pr&&pr.longV){
+const isLong=pr.longV===vid;
+txt=isLong?"做多":"做空"; cls=isLong?"long":"short";
+}
+}else if(kind==="spread"){
+if(pr){
+const isShort=(pr.signedBps>=0)===(i===0);
+txt=isShort?"做空":"做多"; cls=isShort?"short":"long";
+}
+}
+dirEl.textContent=txt;
+dirEl.className="dirB"+(cls?" "+cls:"");
+}
+const amtEl=S.root.querySelector('[data-legamt="'+i+'"]');
+const qtyEl=S.root.querySelector('[data-legqty="'+i+'"]');
+if(amtEl&&qtyEl){
+let legAmt=null, qty=null;
+if(kind==="grid"){
+const q=numField(S,"qty_per_grid"), cnt=numField(S,"grid_count");
+if(q&&cnt&&price){qty=q*cnt; legAmt=qty*price}
+}else if(legMargin>0&&price){
+legAmt=legMargin*legLevBase; qty=legAmt/price;
+}
+if(legAmt==null||qty==null){amtEl.value=""; qtyEl.textContent="-"}
+else{
+amtEl.value=fmt(legAmt);
+qtyEl.textContent=fmt(qty, qty<1?6:4)+(sym?" "+sym:"");
+}
+}
 });
 const mi=S.root.querySelector(".marginInfo");
 if(mi){
@@ -1497,23 +1565,16 @@ const modeTxt=S.runMode==="full_auto"
 :S.runMode==="semi_fixed"
 ?"运行模式：固腿固标（半自动·固定标的）——在你选的标的上按条件开仓、平仓、再开仓，循环到你点停止。"
 :"运行模式：自主——点「开仓」立即开仓，平仓你手动点，平完这一笔任务结束。";
-// 溢价：派生名义超过最大持仓（名义上限）时黄字警告（预览区
-// 现行预警机制）
-let capWarn="";
-if(st==="premium_arb"){
-const maxPos=numField(S,"max_position_usd");
-const n0=legs[0].notional;
-if(maxPos!=null&&n0!=null&&n0>maxPos)
-capWarn='<p style="color:var(--yel)">⚠ 仓位名义 $'+fmt(n0)+
-" 超过最大持仓 $"+fmt(maxPos)+"（名义上限）：实际开仓会被策略的持仓上限截断，请调大最大持仓或减小保证金/杠杆。</p>";
-}
+// 溢价仓位上限（第十三轮）：仓位 = 保证金 × 基准腿杠杆派生，
+// 本身就是上限——第十二轮的「名义超最大持仓」预览警告构造上
+// 不再可能，已删除，不再有单独的最大持仓概念
 S.previewEl.innerHTML="<table><thead><tr><th>腿</th><th>平台</th><th>标记价</th><th>预估执行价</th><th>名义</th><th>占用保证金</th></tr></thead><tbody>"+
 rowsHtml+"</tbody></table>"+
 '<p>总名义：<b>'+(totN!=null?"$"+fmt(totN):"-")+'</b>　总占用保证金：<b>'+(totM!=null?"$"+fmt(totM):"-")+"</b></p>"+
 "<p>"+avail+"</p>"+
 '<p class="muted">名义 = 保证金 × 基准腿杠杆（网格按每格量 × 格数 × 现价）；占用保证金 = 名义 ÷ 该腿杠杆。程序不自动改杠杆，各所实际上限见仓位设置的杠杆行。</p>'+
 '<p class="muted">'+modeTxt+"</p>"+
-levWarns+levModes+capWarn+ind;
+levWarns+levModes+ind;
 }
 
 // 运行中仓位表（本策略任务：状态/持仓/今日成交/操作）

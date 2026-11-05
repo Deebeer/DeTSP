@@ -1,11 +1,13 @@
-"""第十二轮：保证金语义 + 预设移除后的组装口径。
+"""第十二轮：保证金语义 + 预设移除后的组装口径（第十三轮更新）。
 
 覆盖：amount_usd 一律按保证金解释（仓位名义 = 保证金 ×
-基准腿杠杆）——资金费换算 notional、溢价用保证金封顶最大
-持仓、溢价单笔上限由显式字段 order_cap_pct 派生（默认
-50%）；老任务无任何新语义标记也直接按保证金加载（用户定
-版：不加提示事件/标记）；full_auto 组装顺序 = 用户实填 >
-内置中性档（NEUTRAL_DEFAULTS）> dataclass 默认。
+基准腿杠杆）——资金费换算 notional、溢价仓位由保证金 ×
+基准腿杠杆派生、单笔上限按仓位百分比派生（order_cap_pct，
+默认 50%）；溢价不再有可填的最大持仓字段，参数里的
+max_position_usd 一律忽略；老任务无任何新语义标记也直接按
+保证金加载（用户定版：不加提示事件/标记）；full_auto 组装
+顺序 = 用户实填 > 内置中性档（NEUTRAL_DEFAULTS）> dataclass
+默认。
 """
 
 import pytest
@@ -15,6 +17,7 @@ from detsp.core.config import build_config
 from detsp.core.engine import Engine, build_task
 from detsp.core.ledger import Ledger
 from detsp.strategies.premium_arb import PremiumParams
+from detsp.strategies.specs import strategy_specs, validate_params
 from detsp.venues.paper import PaperVenue
 
 PRICES = {"BTC": 60_000.0, "ETH": 3_000.0}
@@ -70,23 +73,23 @@ def test_old_task_without_marker_loads_as_margin():
     assert not hasattr(task, "run_preset")
 
 
-# ── 溢价：保证金封顶最大持仓 + 单笔上限百分比派生 ─────────
+# ── 溢价：仓位由保证金 × 基准腿杠杆派生 + 单笔上限百分比派生 ──
 
 _PREMIUM_BASE = {"base_venue": "arcus", "hedge_venue": "lighter",
                  "symbol": "BTC", "midline_bps": 0,
                  "upper_bps": 10, "lower_bps": 10}
 
 
-def test_premium_margin_caps_position_and_derives_order_cap():
+def test_premium_margin_derives_position_and_order_cap():
     engine = _engine({
         "name": "p-margin", "strategy": "premium_arb",
         "amount_usd": 100,
         "params": {**_PREMIUM_BASE, "leverage_base": 1.0,
                    "order_cap_pct": 50}})
     p = engine.tasks[0].runtime.params
-    # 最大持仓被保证金名义（100 × 1）封顶到 100（默认 1000）
+    # 派生仓位 = 保证金 × 基准腿杠杆（100 × 1）= 100
     assert p.max_position_usd == 100.0
-    # 单笔上限 = 生效最大持仓 × 50%
+    # 单笔上限 = 派生仓位 × 50%
     assert p.max_order_notional_usd == 50.0
     # 费率改内置常量：两腿 taker 都是 5 bps
     assert p.base_taker_fee_bps == 5.0
@@ -94,17 +97,48 @@ def test_premium_margin_caps_position_and_derives_order_cap():
 
 
 def test_premium_order_cap_pct_quarter():
+    """无保证金时回落默认仓位派生：参数里写了 max_position_usd
+    =400 也被忽略，单笔上限仍按 PremiumParams 默认仓位
+    1000 × 25% = 250。"""
     engine = _engine({
         "name": "p-pct25", "strategy": "premium_arb",
-        "params": {**_PREMIUM_BASE, "max_position_usd": 1000,
+        "params": {**_PREMIUM_BASE, "max_position_usd": 400,
                    "order_cap_pct": 25}})
     p = engine.tasks[0].runtime.params
+    assert p.max_position_usd == 1000.0
     assert p.max_order_notional_usd == 250.0
+
+
+def test_premium_max_position_param_ignored_not_truncating():
+    """带保证金时参数里的 max_position_usd（10，小于派生仓位）
+    不截断：派生仓位仍 = 保证金 × 杠杆 = 100。"""
+    engine = _engine({
+        "name": "p-ignore-maxpos", "strategy": "premium_arb",
+        "amount_usd": 100,
+        "params": {**_PREMIUM_BASE, "leverage_base": 1.0,
+                   "max_position_usd": 10}})
+    p = engine.tasks[0].runtime.params
+    assert p.max_position_usd == 100.0
+
+
+def test_premium_max_position_hidden_and_tolerated():
+    """max_position_usd 已 hidden：validate_params 容忍并丢弃
+    （老任务带它不报错、结果不含该键）；strategy_specs 的
+    premium 字段里不再有它，order_cap_pct 的 label 改为占仓位口径。"""
+    cleaned = validate_params(
+        "premium_arb", {**_PREMIUM_BASE, "max_position_usd": 5})
+    assert "max_position_usd" not in cleaned
+    spec = next(s for s in strategy_specs()
+                if s["strategy"] == "premium_arb")
+    fields = {f["name"]: f for f in spec["fields"]}
+    assert "max_position_usd" not in fields
+    assert "占仓位" in fields["order_cap_pct"]["label"]
 
 
 def test_premium_legacy_explicit_order_cap_preserved():
     """老配置显式写了单笔上限、没写百分比：不派生、原值保留
-    （百分比只在任务参数里带了 order_cap_pct 时才生效）。"""
+    （百分比只在任务参数里带了 order_cap_pct 时才生效）。
+    其 params 里的 max_position_usd 现在会被忽略，不影响本断言。"""
     engine = _engine({
         "name": "p-legacy", "strategy": "premium_arb",
         "params": {**_PREMIUM_BASE, "max_position_usd": 1000,

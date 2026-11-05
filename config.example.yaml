@@ -54,7 +54,7 @@ venues:
 # 币种」占位，与同场所的其他任务都算冲突。
 # amount_usd（任务顶层字段，可选）：保证金（USD）。仓位名义 =
 # 保证金 × 基准腿杠杆：资金费没写 notional_usd 时按它换算单边
-# 名义，溢价用它封顶最大持仓，网格（全自动）按总名义 = 保证金
+# 名义，溢价仓位由它 × 基准腿杠杆派生，网格（全自动）按总名义 = 保证金
 # × 网格腿杠杆反推每格量。老任务的 run_preset（风险档）已删除：
 # 写了会被忽略，全自动没填的参数按内置中性档补。
 # 启用示例：去掉对应行首的 "# "，并把占位符换成自己实测/设定的值。
@@ -94,7 +94,8 @@ tasks: []
 #      upper_bps: <上方入场带>
 #      lower_bps: <下方入场带>
 #      close_band_bps: 0          # 可选：回归平仓带（bps），价差回到中枢±此值内双腿全平（DeTSP 新增，原仓无此字段）；0=关
-#      max_position_usd: <仓位上限>
+#      # 仓位由保证金 × 杠杆派生，无 max_position_usd 参数：
+#      # 仓位 = 任务顶层 amount_usd（保证金）× leverage_base
 #      max_order_notional_usd: <单笔上限>
 #      execution_mode: taker      # taker 双腿立即成交 / maker 主腿
 #      # 先挂单等成交（源自 perp-dex-tools 的主腿执行方式，省手续费

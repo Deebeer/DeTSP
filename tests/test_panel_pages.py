@@ -17,8 +17,10 @@ market_value / how_it_works / neutral_defaults（第十二轮
 预设全砍）/ derived_fields / run_modes 与 fields 的 zone 分区）；
 /api/strategy-specs 把 page 元数据带给前端；数据库页数据服务
 状态行与启停（设置页费率表已撤）、溢价中枢接库与资金费库
-信息行的页面标记；第十二轮版式：选择两腿只剩场所下拉、仓位
-设置（统计行/保证金/杠杆信息行/数据块两行）、保证金语义。
+信息行的页面标记；第十三轮版式：选择两腿恢复方向徽标/每腿
+金额数量/可用余额（杠杆行不搬回）、仓位设置横排两列（第一
+行 币种|保证金、第二行 杠杆|杠杆；统计行/数据块仍整行）、
+保证金语义。
 """
 
 import json
@@ -154,11 +156,46 @@ def test_sixth_round_layout_markers():
 
 
 def test_leg_rows_show_available_balance():
-    # 第十二轮：选择两腿瘦身后腿行不再带余额——可用余额改在
-    # 交易预览的可用行里按腿列（paper 标模拟余额）
-    assert 'data-legbal="' not in PAGE_HTML
-    assert "可用 $" in PAGE_HTML and "模拟余额" in PAGE_HTML
+    # 第十三轮恢复：选择两腿腿行带回每腿可用余额（权益），
+    # 数据取 LAST_OV、随刷新更新（paper 标模拟余额）；交易
+    # 预览的可用行仍在，两处口径一致
+    assert 'data-legbal="' in PAGE_HTML
+    assert "可用 $" in PAGE_HTML and "（权益 $" in PAGE_HTML
+    assert "可用 —" in PAGE_HTML and "模拟余额" in PAGE_HTML
     assert "所需保证金不足" in PAGE_HTML
+
+
+def test_round13_leg_rows_restored_and_position_grid():
+    # 腿行恢复元素齐全且顺序为第十一轮原貌：腿标签 → 场所
+    # 下拉 → 方向徽标 → 金额只读输入 → 数量 → 可用余额；
+    # 杠杆 span（data-leglev）不得搬回
+    leg = PAGE_HTML[PAGE_HTML.index("const legRow="):
+                    PAGE_HTML.index("root.innerHTML=")]
+    flow = ["legLab", "vSel", "data-dir", "data-legamt",
+            "data-legqty", "data-legbal"]
+    pos = [leg.index(t) for t in flow]
+    assert pos == sorted(pos), "腿行元素顺序必须是第十一轮原貌"
+    assert "readonly" in leg and "dirB" in leg
+    assert "data-leglev" not in PAGE_HTML
+    # 方向三分支与余额文案都在 renderLegs 里
+    for marker in ("网格双向", "反向对冲", "做多", "做空",
+                   "可用 $", "（权益 $", "可用 —"):
+        assert marker in PAGE_HTML, marker
+    # gridSug 移回选择两腿（listNote 之后）、仓位设置里不再有
+    assert PAGE_HTML.count('<div class="gridSug"></div>') == 1
+    assert PAGE_HTML.index('<div class="gridSug"></div>') \
+        < PAGE_HTML.index("positionBlock")
+    # 仓位设置横排两列：posGrid 包裹（第一行币种|保证金、
+    # 第二行 levGrid 杠杆|杠杆）与配套 CSS
+    for marker in ("posGrid", "levGrid", "posCell",
+                   ".posGrid{display:grid;"
+                   "grid-template-columns:1fr 1fr",
+                   ".posGrid .symWrap select{min-width:0;width:100%}",
+                   ".levGrid{margin-top:14px}"):
+        assert marker in PAGE_HTML, marker
+    renderer = PAGE_HTML[PAGE_HTML.index("root.innerHTML="):]
+    assert renderer.index("posGrid") < renderer.index("marginHtml") \
+        < renderer.index("levAreaHtml")
 
 
 def test_strategy_page_containers_exist():
@@ -220,16 +257,18 @@ def test_no_chips_no_presets_pairs_and_margin():
     assert "仓位名义 = 保证金 × 基准腿杠杆" in PAGE_HTML
     assert "gridTotalInp" not in PAGE_HTML and "目标总名义" not in PAGE_HTML
     assert "gridMarginToQty" in PAGE_HTML
-    # 仓位设置内部顺序：统计行 → 币种/保证金 → 杠杆区 → 数据块
-    # （在 root.innerHTML 组装串范围内断言顺序）
+    # 仓位设置内部顺序：统计行 → 第一行（币种/保证金）→ 杠杆
+    # 区 → 数据块（在 root.innerHTML 组装串范围内断言顺序）
     renderer = PAGE_HTML[PAGE_HTML.index("root.innerHTML="):]
     flow = ["pairsStats", "marginHtml", "levAreaHtml", "posData"]
     pos = [renderer.index(t) for t in flow]
-    assert pos == sorted(pos), "仓位设置顺序必须是第十二轮定版"
-    # 选择两腿只剩场所下拉：腿行不得再带方向/金额/数量/余额/杠杆
-    for gone in ("data-legamt", "data-legqty", "data-legbal",
-                 "data-leglev", "data-dir"):
-        assert gone not in PAGE_HTML, gone
+    assert pos == sorted(pos), "仓位设置顺序必须是第十三轮定版"
+    # 选择两腿第十三轮恢复：腿行带回方向/金额/数量/余额；
+    # 只有杠杆行不搬回（仍在仓位设置的 levInfo）
+    for back in ("data-legamt", "data-legqty", "data-legbal",
+                 "data-dir"):
+        assert back in PAGE_HTML, back
+    assert "data-leglev" not in PAGE_HTML
 
 
 def test_preview_block_markers():
@@ -243,8 +282,10 @@ def test_preview_block_markers():
     assert "每格间距" in PAGE_HTML
     # 仓位设置联动函数（杠杆信息行 + 保证金派生旁注）
     assert "renderLegs" in PAGE_HTML and "marginOf" in PAGE_HTML
-    # 溢价名义超最大持仓的预览警告（第十二轮）
-    assert "超过最大持仓" in PAGE_HTML
+    # 第十三轮：仓位 = 保证金 × 基准腿杠杆派生即上限，第十二轮
+    # 的「名义超最大持仓」预览警告构造上不再可能、已删除
+    assert "超过最大持仓" not in PAGE_HTML
+    assert "capWarn" not in PAGE_HTML
 
 
 def test_overview_stats_best_list_and_records_page():
@@ -362,8 +403,10 @@ def test_primary_fields_per_strategy():
           for s in strategy_specs()}
     assert "notional_usd" in by["funding_carry"]
     assert "min_edge_bps_per_hour" in by["funding_carry"]
-    assert {"execution_mode", "midline_bps", "upper_bps", "lower_bps",
-            "max_position_usd"} <= by["premium_arb"]
+    assert {"execution_mode", "midline_bps", "upper_bps", "lower_bps"} \
+        <= by["premium_arb"]
+    # 第十三轮：溢价删「最大持仓」，不再是 primary（改为内部派生）
+    assert "max_position_usd" not in by["premium_arb"]
     assert {"lower_price", "upper_price", "grid_count", "qty_per_grid"} \
         <= by["hedged_grid"]
 
