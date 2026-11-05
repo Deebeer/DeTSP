@@ -44,9 +44,9 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8320
 _LOOPBACK = ("127.0.0.1", "localhost", "::1")
 
-# 运行模式四值（第十轮）与全自动风险档三值；旧值 auto 归一 semi_auto
+# 运行模式四值（第十轮）；旧值 auto 归一 semi_auto。第十二轮
+# 预设全砍：不再有 run_preset / 风险档（老请求带了也忽略）
 RUN_MODES = ("manual", "semi_fixed", "semi_auto", "full_auto")
-RUN_PRESETS = ("conservative", "neutral", "aggressive")
 _RUN_MODE_ERROR = ("运行模式不合法：{v}，只许 manual（自主）/ "
                    "semi_fixed（半自动·固定标的）/ semi_auto"
                    "（半自动·自动选标）/ full_auto（全自动）；"
@@ -69,17 +69,8 @@ def _normalize_run_mode_or(value, default: str = "manual") -> str:
         return default
 
 
-def _validate_run_preset(value) -> str:
-    v = str(value or "neutral")
-    if v not in RUN_PRESETS:
-        raise ValueError(
-            f"风险档不合法：{value}，只许 conservative（保守）/ "
-            f"neutral（中性）/ aggressive（激进）")
-    return v
-
-
 def _validate_amount_usd(value):
-    """amount_usd 透传校验：None 原样返回，给了必须是正数。"""
+    """amount_usd（保证金）透传校验：None 原样返回，给了必须是正数。"""
     if value is None:
         return None
     try:
@@ -129,6 +120,22 @@ def _validate_params_for_mode(strategy, params, run_mode):
     return clean
 
 
+def _inject_margin_notional(strategy, params, amount_usd):
+    """资金费保证金换算（面板校验前）：给了 amount_usd（保证金）
+    且 params 没带 notional_usd 时，注入 notional_usd = 保证金 ×
+    杠杆（杠杆取 params 实填、缺省 6），与 core.engine.build_task
+    的换算同口径——引擎组装时按同一公式再算一次，幂等。"""
+    raw = dict(params or {})
+    if strategy == "funding_carry" and amount_usd is not None \
+            and "notional_usd" not in raw:
+        try:
+            lev = float(raw.get("leverage", 6.0))
+        except (TypeError, ValueError):
+            lev = 6.0   # 杠杆本身非法时校验会在后面逐项报错
+        raw["notional_usd"] = float(amount_usd) * lev
+    return raw
+
+
 def web_settings(env: dict) -> tuple[str, int]:
     """从 .env 取面板绑定：WEB_HOST/WEB_PORT 优先，其次 HOST/PORT。"""
     host = env.get("WEB_HOST") or env.get("HOST") or DEFAULT_HOST
@@ -164,9 +171,9 @@ class PanelState:
     # None 时维持现行懒构造 scanner 的行为，库服务不启用。
     scanner: object = None
     state_dir: object = None
-    # 场所费率表与中枢/费差库服务（stats_library 工作流提供）；
+    # 中枢/费差库服务（stats_library 工作流提供）；
     # 模块缺失或构造失败时保持 None，面板相关功能降级隐藏。
-    fee_table: object = None
+    # （第十二轮：费率改内置常量，不再有 fee_table 对象接线。）
     library_service: object = None
 
     def __post_init__(self):
@@ -177,48 +184,46 @@ class PanelState:
         self._init_library_services()
 
     def _init_library_services(self) -> None:
-        """按 state_dir 初始化费率表与库服务（容错降级）。
+        """按 state_dir 初始化库服务（容错降级）。
 
-        只在给了 state_dir 时尝试：fee_table = FeeTable(
-        state_dir/"fees.json")；library_service = LibraryService(
-        scanner, state_dir, fee_table)。任一模块 ImportError 或
-        构造异常都只让对应对象保持 None，面板其余功能不受影响。
-        已注入的对象（测试/外部）不覆盖；库服务自带的 fee_table
-        反过来补给 self.fee_table。
+        只在给了 state_dir 时尝试 LibraryService(scanner,
+        state_dir)（费率由库内读内置常量，不再传 fee_table）。
+        模块 ImportError 或构造异常只让对象保持 None，面板
+        其余功能不受影响。已注入的对象（测试/外部）不覆盖。
         """
-        from pathlib import Path
-
-        svc = self.library_service
-        if svc is not None and self.fee_table is None:
-            self.fee_table = getattr(svc, "fee_table", None)
-        if self.state_dir is None:
+        if self.state_dir is None or self.library_service is not None:
             return
-        if self.fee_table is None:
-            try:
-                from ..core.fee_table import FeeTable
+        try:
+            from ..core.stats_library import LibraryService
 
-                self.fee_table = FeeTable(Path(self.state_dir) / "fees.json")
-            except Exception:  # noqa: BLE001 — 缺模块/坏文件降级
-                self.fee_table = None
-        if self.library_service is None:
-            try:
-                from ..core.stats_library import LibraryService
+            self.library_service = LibraryService(
+                self._scanner(), self.state_dir)
+        except Exception:  # noqa: BLE001 — 缺模块降级
+            self.library_service = None
 
-                self.library_service = LibraryService(
-                    self._scanner(), self.state_dir, self.fee_table)
-            except Exception:  # noqa: BLE001 — 缺模块降级
-                self.library_service = None
-            if self.library_service is not None and self.fee_table is None:
-                self.fee_table = getattr(
-                    self.library_service, "fee_table", None)
+    def library_start(self) -> dict:
+        """数据库页启停：启动库录制服务。"""
+        svc = self.library_service
+        if svc is None:
+            return {"ok": False, "error": "数据服务不可用（库服务未就绪）"}
+        try:
+            svc.start()
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
+        self._event("数据库页启动数据服务（中枢库 / 费差库录制）")
+        return {"ok": True, "service": self._library_status()}
 
-    def _fee_table(self):
-        """有效费率表：自身优先，其次库服务自带的。"""
-        if self.fee_table is not None:
-            return self.fee_table
-        if self.library_service is not None:
-            return getattr(self.library_service, "fee_table", None)
-        return None
+    def library_stop(self) -> dict:
+        """数据库页启停：停止库录制服务。"""
+        svc = self.library_service
+        if svc is None:
+            return {"ok": False, "error": "数据服务不可用（库服务未就绪）"}
+        try:
+            svc.stop()
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
+        self._event("数据库页停止数据服务（中枢库 / 费差库录制）")
+        return {"ok": True, "service": self._library_status()}
 
     def _scanner(self):
         """惰性创建扫描器：观察列表取 config 的 watchlist。"""
@@ -421,41 +426,8 @@ class PanelState:
         return {"ok": True, "changed": changed,
                 "note": "已保存到 .env，需重启程序生效"}
 
-    # ----- 设置页（场所费率表：core.fee_table，单位 bps）-----
-    def fees_view(self) -> dict:
-        ft = self._fee_table()
-        if ft is None:
-            return {"ok": False, "fees": {},
-                    "error": "费率表不可用（费率表服务未就绪）"}
-        try:
-            return {"ok": True, "fees": ft.as_dict()}
-        except Exception as e:  # noqa: BLE001
-            return {"ok": False, "fees": {}, "error": str(e)}
-
-    def save_fees_view(self, body) -> dict:
-        """POST /api/settings/fees {venue_id, taker_bps, maker_bps}。"""
-        ft = self._fee_table()
-        if ft is None:
-            return {"ok": False, "error": "费率表不可用（费率表服务未就绪）"}
-        if not isinstance(body, dict):
-            return {"ok": False, "error": "请求体必须是 JSON 对象"}
-        venue_id = body.get("venue_id") or body.get("venue")
-        if venue_id not in VENUE_IDS:
-            return {"ok": False,
-                    "error": f"未知场所：{venue_id}，合法值：{VENUE_IDS}"}
-        try:
-            taker = float(body.get("taker_bps"))
-            maker = float(body.get("maker_bps"))
-        except (TypeError, ValueError):
-            return {"ok": False,
-                    "error": "taker_bps / maker_bps 必须是数字（单位 bps）"}
-        try:
-            ft.set(venue_id, taker, maker)
-        except (ValueError, TypeError) as e:
-            return {"ok": False, "error": str(e)}
-        self._event(f"设置页保存场所费率：{venue_id} "
-                    f"taker {taker} bps / maker {maker} bps")
-        return {"ok": True, "fees": ft.as_dict()}
+    # （第十二轮：场所费率表与 /api/settings/fees 已删除——费率
+    # 改内置通用默认常量，见 core.fee_table，面板不再提供编辑。）
 
     # ----- 中枢库 / 费差库（core.stats_library，缺失时降级）-----
     def _library(self):
@@ -515,12 +487,14 @@ class PanelState:
         return {"service": self._library_status(), "premium": premium}
 
     def _taker_bps(self, venue_id) -> float:
-        """某所 taker 费率（bps）；费率表不可用/场所非法时 0。"""
-        ft = self._fee_table()
-        if ft is None or venue_id not in VENUE_IDS:
+        """某所 taker 费率（bps）：内置通用默认常量（5 bps）；
+        场所非法时 0。"""
+        if venue_id not in VENUE_IDS:
             return 0.0
         try:
-            taker, _maker = ft.get(venue_id)
+            from ..core.fee_table import get_fees
+
+            taker, _maker = get_fees(venue_id)
             return float(taker)
         except Exception:  # noqa: BLE001
             return 0.0
@@ -761,11 +735,9 @@ class PanelState:
                 "source": self._source(t.name),
                 "last_error": t.last_error or self.engine.errors.get(t.name, ""),
                 "params": {k: v for k, v in cfg.items() if k != "name"},
-                # 运行模式（第十轮四值，归一后输出）+ 风险档 +
-                # 当前两腿（从 runtime 读，没有则空 list）
+                # 运行模式（第十轮四值，归一后输出）+ 当前两腿
+                # （从 runtime 读，没有则空 list）
                 "run_mode": run_mode,
-                "run_preset": cfg.get("run_preset")
-                or getattr(t, "run_preset", None) or "neutral",
                 "auto_phase": getattr(rt, "auto_phase", "")
                 if is_cycle else "",
                 "current_symbol": getattr(rt, "current_symbol", None)
@@ -787,7 +759,6 @@ class PanelState:
                     "params": {k: v for k, v in cfg.items() if k != "name"},
                     "run_mode": _normalize_run_mode_or(
                         cfg.get("run_mode") or "manual"),
-                    "run_preset": cfg.get("run_preset") or "neutral",
                     "auto_phase": "", "current_symbol": None,
                     "current_venues": [],
                     "cycles_completed": 0,
@@ -806,7 +777,6 @@ class PanelState:
                     "params": {k: v for k, v in cfg.items() if k != "name"},
                     "run_mode": _normalize_run_mode_or(
                         cfg.get("run_mode") or "manual"),
-                    "run_preset": cfg.get("run_preset") or "neutral",
                     "auto_phase": "", "current_symbol": None,
                     "current_venues": [],
                     "cycles_completed": 0,
@@ -884,14 +854,12 @@ class PanelState:
             return {"ok": False, "error": "引擎主循环繁忙，命令超时，请重试"}
 
     def create_task(self, name, strategy, params,
-                    run_mode="manual", run_preset=None,
-                    amount_usd=None) -> dict:
+                    run_mode="manual", amount_usd=None) -> dict:
         return self._run(lambda: self._do_create_task(
-            name, strategy, params, run_mode, run_preset, amount_usd))
+            name, strategy, params, run_mode, amount_usd))
 
     def _do_create_task(self, name, strategy, params,
-                        run_mode="manual", run_preset=None,
-                        amount_usd=None) -> dict:
+                        run_mode="manual", amount_usd=None) -> dict:
         name = str(name or "").strip()
         if not name:
             return {"ok": False, "error": "任务名必填"}
@@ -900,9 +868,10 @@ class PanelState:
                     f"未知策略：{strategy}，可用策略："
                     f"{' / '.join(PARAMS_CLASSES)}"}
         try:
-            # 归一后再落盘：新写入一律新值（auto → semi_auto）
+            # 归一后再落盘：新写入一律新值（auto → semi_auto）；
+            # run_preset 已随预设全砍删除（老请求带了也忽略）；
+            # amount_usd 是保证金（第十二轮语义）
             run_mode = _normalize_run_mode(run_mode)
-            run_preset = _validate_run_preset(run_preset)
             amount_usd = _validate_amount_usd(amount_usd)
         except ValueError as e:
             return {"ok": False, "error": str(e)}
@@ -910,12 +879,14 @@ class PanelState:
                 any(t.name == name for t in self.engine.tasks):
             return {"ok": False, "error": f"任务名已存在：{name}"}
         try:
-            clean = _validate_params_for_mode(strategy, params,
-                                              run_mode)
+            clean = _validate_params_for_mode(
+                strategy,
+                _inject_margin_notional(strategy, params, amount_usd),
+                run_mode)
         except ValueError as e:
             return {"ok": False, "error": f"参数不合法：{e}"}
         cfg = {"name": name, "strategy": strategy, "params": clean,
-               "run_mode": run_mode, "run_preset": run_preset}
+               "run_mode": run_mode}
         if amount_usd is not None:
             cfg["amount_usd"] = amount_usd
         try:
@@ -933,13 +904,13 @@ class PanelState:
             res["warnings"] = warnings
         return res
 
-    def update_task(self, name, params, run_mode=None, run_preset=None,
+    def update_task(self, name, params, run_mode=None,
                     amount_usd=None) -> dict:
         return self._run(lambda: self._do_update_task(
-            name, params, run_mode, run_preset, amount_usd))
+            name, params, run_mode, amount_usd))
 
     def _do_update_task(self, name, params, run_mode=None,
-                        run_preset=None, amount_usd=None) -> dict:
+                        amount_usd=None) -> dict:
         name = str(name or "").strip()
         if name not in self.panel_cfgs:
             if name in self.task_cfgs:
@@ -956,25 +927,24 @@ class PanelState:
         if run_mode is None:
             # 编辑弹窗不带模式时保持原模式，不许悄悄改语义
             run_mode = old_cfg.get("run_mode") or "manual"
-        if run_preset is None:
-            # 同理：弹窗不带风险档时保持原档（缺省 neutral）
-            run_preset = old_cfg.get("run_preset") or "neutral"
         if amount_usd is None:
             amount_usd = old_cfg.get("amount_usd")
         try:
-            # 归一后再落盘：旧值 auto 写回时也变 semi_auto
+            # 归一后再落盘：旧值 auto 写回时也变 semi_auto；
+            # 老 cfg 里的 run_preset 在此丢弃（预设已全砍）
             run_mode = _normalize_run_mode(run_mode)
-            run_preset = _validate_run_preset(run_preset)
             amount_usd = _validate_amount_usd(amount_usd)
         except ValueError as e:
             return {"ok": False, "error": str(e)}
         try:
-            clean = _validate_params_for_mode(strategy, params,
-                                              run_mode)
+            clean = _validate_params_for_mode(
+                strategy,
+                _inject_margin_notional(strategy, params, amount_usd),
+                run_mode)
         except ValueError as e:
             return {"ok": False, "error": f"参数不合法：{e}"}
         new_cfg = {"name": name, "strategy": strategy, "params": clean,
-                   "run_mode": run_mode, "run_preset": run_preset}
+                   "run_mode": run_mode}
         if amount_usd is not None:
             new_cfg["amount_usd"] = amount_usd
         # 运行中改参数 = 先停（撤单+平仓）再按新参数重组
@@ -1273,8 +1243,6 @@ def make_handler(state: PanelState):
             elif u.path == "/api/settings/secrets":
                 # 只返回已填/未填，绝不返回任何密钥值
                 self._json(state.secrets_view())
-            elif u.path == "/api/settings/fees":
-                self._json(state.fees_view())
             elif u.path == "/api/libraries":
                 q = parse_qs(u.query)
                 self._json(state.libraries_view(
@@ -1344,7 +1312,6 @@ def make_handler(state: PanelState):
                                         body.get("strategy"),
                                         body.get("params") or {},
                                         body.get("run_mode") or "manual",
-                                        body.get("run_preset"),
                                         body.get("amount_usd"))
                 self._json(res, 200 if res.get("ok") else 400)
             elif parts == ["api", "tasks", "update"]:
@@ -1354,7 +1321,6 @@ def make_handler(state: PanelState):
                 res = state.update_task(body.get("name"),
                                         body.get("params") or {},
                                         body.get("run_mode"),
-                                        body.get("run_preset"),
                                         body.get("amount_usd"))
                 self._json(res, 200 if res.get("ok") else 400)
             elif parts == ["api", "tasks", "delete"]:
@@ -1376,11 +1342,11 @@ def make_handler(state: PanelState):
                     return
                 res = state.save_secrets_view(body)
                 self._json(res, 200 if res.get("ok") else 400)
-            elif parts == ["api", "settings", "fees"]:
-                body = self._json_body()
-                if body is None:
-                    return
-                res = state.save_fees_view(body)
+            elif parts == ["api", "libraries", "start"]:
+                res = state.library_start()
+                self._json(res, 200 if res.get("ok") else 400)
+            elif parts == ["api", "libraries", "stop"]:
+                res = state.library_stop()
                 self._json(res, 200 if res.get("ok") else 400)
             else:
                 self._json({"error": "not found"}, 404)

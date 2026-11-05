@@ -1,113 +1,66 @@
-"""场所费率表：每所 taker（吃单）/ maker（挂单）费率（bps），JSON 落盘。
+"""场所费率（内置通用默认，第十二轮定版）。
 
-设置页的场所费率表与中枢库 / 费差库的扣费口径共用这一份数据：
-- 文件不存在时用默认值、不报错（唯 tradexyz taker=1.0 bps，
-  其余全 0——与现行 premium_arb 参数默认 0 的口径一致，tradexyz
-  的 1.0 是第十一轮定版值，仓库此前没有统一费率表）；
-- set() 立即原子落盘（写临时文件再 replace），重启不丢；
-- 未知场所一律 ValueError，不静默吞掉笔误。
+第十二轮起不再有可编辑的场所费率表：全所统一一组内置默认值
+（taker 5 bps / maker 2 bps，宁高勿低——中枢库算带、溢价开仓
+扣费、费差库算回本时把费估高一点更安全），写死在本模块常量
+里，不进面板、不落盘。
+
+兼容说明：
+- 历史上落盘的 data/fees.json **不再读取**（文件留着不管即可，
+  本模块任何路径都不打开它）；
+- FeeTable 类保留为只读适配层（构造参数 path 被忽略），让
+  stats_library 等旧调用方无需改签名即可拿到同一组常量；
+  它没有 set()、不写任何文件。
 """
 
 from __future__ import annotations
 
-import json
-import math
-import os
-import tempfile
 from copy import deepcopy
-from pathlib import Path
 
 from .config import VENUE_IDS
 
-# 默认费率（bps）：tradexyz taker 1.0，其余 0
-_DEFAULT_TAKER: dict[str, float] = {"tradexyz": 1.0}
+# 内置通用默认费率（bps）：全所统一
+TAKER_FEE_BPS = 5.0
+MAKER_FEE_BPS = 2.0
 
 
-def _defaults() -> dict[str, dict[str, float]]:
+def get_fees(venue_id: str) -> tuple[float, float]:
+    """返回某场所 (taker_bps, maker_bps)；未知场所抛 ValueError。"""
+    if venue_id not in VENUE_IDS:
+        raise ValueError(
+            f"未知 venue_id：{venue_id}，合法值：{VENUE_IDS}")
+    return TAKER_FEE_BPS, MAKER_FEE_BPS
+
+
+def fees_dict() -> dict[str, dict[str, float]]:
+    """全部场所的费率（深拷贝）：{venue_id: {taker_bps, maker_bps}}。"""
     return {
-        vid: {
-            "taker_bps": float(_DEFAULT_TAKER.get(vid, 0.0)),
-            "maker_bps": 0.0,
-        }
+        vid: {"taker_bps": TAKER_FEE_BPS, "maker_bps": MAKER_FEE_BPS}
         for vid in VENUE_IDS
     }
 
 
-def _check_fee(value, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{name} 必须是数字")
-    v = float(value)
-    if not math.isfinite(v) or v < 0:
-        raise ValueError(f"{name} 必须是非负数字")
-    return v
-
-
 class FeeTable:
-    """场所费率表（JSON 文件持久化）。"""
+    """只读适配层：返回内置通用默认费率，不读不写任何文件。
 
-    def __init__(self, path) -> None:
-        self._path = Path(path)
-        self._data: dict[str, dict[str, float]] = _defaults()
-        if self._path.exists():
-            try:
-                raw = json.loads(self._path.read_text(encoding="utf-8"))
-            except (ValueError, OSError):
-                raw = None
-            if isinstance(raw, dict):
-                for vid in VENUE_IDS:
-                    entry = raw.get(vid)
-                    if not isinstance(entry, dict):
-                        continue
-                    try:
-                        taker = _check_fee(entry.get("taker_bps", 0.0),
-                                           "taker_bps")
-                        maker = _check_fee(entry.get("maker_bps", 0.0),
-                                           "maker_bps")
-                    except ValueError:
-                        continue
-                    self._data[vid] = {"taker_bps": taker,
-                                       "maker_bps": maker}
+    第十一轮的可编辑费率表（JSON 持久化 + set()）已按第十二轮
+    定版删除；保留这个类只是让既有调用方（stats_library 的
+    LibraryService / StatsLibrary 构造参数）不用改签名。构造时
+    传入的 path 一律忽略——历史 fees.json 不再被读取。
+    """
+
+    def __init__(self, path=None) -> None:
+        # path 仅为签名兼容，刻意不读不写
+        self._path = path
 
     @property
-    def path(self) -> Path:
+    def path(self):
         return self._path
 
     def get(self, venue_id: str) -> tuple[float, float]:
         """返回 (taker_bps, maker_bps)；未知场所抛 ValueError。"""
-        if venue_id not in VENUE_IDS:
-            raise ValueError(
-                f"未知 venue_id：{venue_id}，合法值：{VENUE_IDS}")
-        entry = self._data[venue_id]
-        return float(entry["taker_bps"]), float(entry["maker_bps"])
-
-    def set(self, venue_id: str, taker_bps, maker_bps) -> None:
-        """更新一所费率并立即原子落盘。"""
-        if venue_id not in VENUE_IDS:
-            raise ValueError(
-                f"未知 venue_id：{venue_id}，合法值：{VENUE_IDS}")
-        taker = _check_fee(taker_bps, "taker_bps")
-        maker = _check_fee(maker_bps, "maker_bps")
-        self._data[venue_id] = {"taker_bps": taker, "maker_bps": maker}
-        self._save()
+        return get_fees(venue_id)
 
     def as_dict(self) -> dict[str, dict[str, float]]:
         """全部费率的深拷贝：{venue_id: {"taker_bps":…, "maker_bps":…}}。"""
-        return deepcopy(self._data)
-
-    def _save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(
-            dir=str(self._path.parent),
-            prefix=self._path.name + ".", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(self._data, fh, ensure_ascii=False, indent=2)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp_name, self._path)
-        except BaseException:
-            try:
-                os.unlink(tmp_name)
-            except OSError:
-                pass
-            raise
+        return deepcopy(fees_dict())

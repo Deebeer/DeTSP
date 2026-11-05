@@ -94,7 +94,8 @@ def test_run_mode_default_is_manual_and_single_cycle():
                                   "params": dict(CARRY_PARAMS)})
     task = engine.tasks[0]
     assert task.run_mode == "manual"
-    assert task.run_preset == "neutral"
+    # 第十二轮：预设全砍，Task 不再有 run_preset
+    assert not hasattr(task, "run_preset")
     assert task.runtime.single_cycle is True
     # 第十轮：自主模式同时设 manual_immediate（立即开仓语义）
     assert task.runtime.manual_immediate is True
@@ -419,7 +420,7 @@ def test_panel_create_manual_task_default_mode(panel):
 
 # ═══════════ 第十轮：三模式后端 ═══════════
 
-from detsp.core.engine import normalize_run_mode, normalize_run_preset
+from detsp.core.engine import normalize_run_mode
 
 
 def test_normalize_run_mode_four_values_and_auto_alias():
@@ -432,22 +433,24 @@ def test_normalize_run_mode_four_values_and_auto_alias():
     assert normalize_run_mode("auto") == "semi_auto"
     with pytest.raises(ValueError, match="manual"):
         normalize_run_mode("turbo")
-    assert normalize_run_preset(None) == "neutral"
-    with pytest.raises(ValueError):
-        normalize_run_preset("wild")
+    # 第十二轮：预设全砍，normalize_run_preset 不再存在
+    import detsp.core.engine as _eng
+    assert not hasattr(_eng, "normalize_run_preset")
 
 
 def test_modes_normalized_in_config_and_build_task():
-    # config 入口：auto 归一 semi_auto 并写回，run_preset/amount 校验
+    # config 入口：auto 归一 semi_auto 并写回，amount 校验；
+    # run_preset（第十二轮预设全砍）老任务带了容忍并忽略、
+    # 写回丢弃——连非法值也不再报错
     cfg = build_config(env={}, yaml_data={"tasks": [{
         "name": "c1", "strategy": "funding_carry", "run_mode": "auto",
-        "run_preset": "aggressive", "amount_usd": 500,
+        "run_preset": "wild", "amount_usd": 500,
         "params": dict(CARRY_PARAMS)}]})
     t0 = cfg.tasks[0]
     assert t0["run_mode"] == "semi_auto"
-    assert t0["run_preset"] == "aggressive"
+    assert "run_preset" not in t0
     assert t0["amount_usd"] == 500.0
-    for bad in ({"run_mode": "turbo"}, {"run_preset": "wild"},
+    for bad in ({"run_mode": "turbo"},
                 {"amount_usd": -1}, {"amount_usd": "x"}):
         with pytest.raises(ConfigError):
             build_config(env={}, yaml_data={"tasks": [{
@@ -468,7 +471,7 @@ def test_modes_normalized_in_config_and_build_task():
                           eng.executor, eng.risk_cfg,
                           scanner=FakeScanner([_row("BTC")]))
         assert task.run_mode == mode
-        assert task.run_preset == "neutral"
+        assert not hasattr(task, "run_preset")
         if is_sup:
             assert task.runtime.selection_scope == \
                 ("pair" if mode == "semi_auto" else "all_pairs")
@@ -476,10 +479,15 @@ def test_modes_normalized_in_config_and_build_task():
         else:
             assert task.runtime.single_cycle is (mode == "manual")
             assert task.runtime.manual_immediate is (mode == "manual")
-    with pytest.raises(ValueError, match="run_preset"):
-        build_task({"name": "bad", "strategy": "funding_carry",
-                    "run_preset": "wild", "params": dict(CARRY_PARAMS)},
-                   eng.executor, eng.risk_cfg)
+    # 老任务带 run_preset（任意值）容忍并忽略，正常组装
+    # （另起一个干净引擎，避开上面任务的归属占用）
+    eng2 = Engine.from_config(cfg2, _venues(), ledger=Ledger())
+    legacy = build_task({"name": "legacy", "strategy": "funding_carry",
+                         "run_preset": "wild",
+                         "params": {**CARRY_PARAMS, "symbol": "ETH"}},
+                        eng2.executor, eng2.risk_cfg)
+    assert legacy.run_mode == "manual"
+    assert not hasattr(legacy, "run_preset")
 
 
 def test_full_auto_occupied_keys_and_config_conflict():
@@ -643,11 +651,12 @@ def test_full_auto_premium_assembles_from_best_row():
         "suspect": False}])
     engine = _engine(venues, {
         "name": "arb-full", "strategy": "premium_arb",
-        "run_mode": "full_auto", "run_preset": "neutral",
+        "run_mode": "full_auto",
         "params": {"max_position_usd": 1000,
                    "max_order_notional_usd": 500}}, scanner=scanner)
     task = engine.tasks[0]
-    assert task.run_mode == "full_auto" and task.run_preset == "neutral"
+    assert task.run_mode == "full_auto"
+    assert not hasattr(task, "run_preset")
     rt = task.runtime
     engine.tick(now=0)
     assert rt.auto_phase == "running"
@@ -680,8 +689,9 @@ def test_full_auto_grid_qty_from_amount_usd():
     assert rt.current_venues == ["arcus", "lighter"]
     inner = rt._inner
     assert inner is not None
-    # 每格量 = 总名义 6000 /（格数 10 × 现价 60000）= 0.01
-    assert inner.params.qty_per_grid == pytest.approx(0.01)
+    # 每格量 = 总名义（保证金 6000 × 网格腿杠杆 3，内置中性
+    # 档）/（格数 10 × 现价 60000）= 0.03
+    assert inner.params.qty_per_grid == pytest.approx(0.03)
     assert inner.params.lower_price == pytest.approx(54_000.0)
     assert inner.params.upper_price == pytest.approx(66_000.0)
     rt.stop()

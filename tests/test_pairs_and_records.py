@@ -31,7 +31,7 @@ from detsp.core.engine import Engine
 from detsp.core.ledger import Fill, Ledger
 from detsp.core.market_scanner import MarketScanner
 from detsp.core.venue import OrderRequest, Side
-from detsp.strategies.specs import AMOUNT_RATIOS, PRESETS, strategy_specs
+from detsp.strategies.specs import NEUTRAL_DEFAULTS, strategy_specs
 from detsp.venues.paper import PaperVenue
 from detsp.web.server import PanelState, serve
 
@@ -271,81 +271,47 @@ def test_best_all_merges_strategies_sorted_by_score(scanner):
         r["strategy"] for r in rows).values())
 
 
-# ── presets ────────────────────────────────────────────────
+# ── 内置中性档（第十二轮：预设全砍后） ────────────────────
 
-# 金额类字段：用户先填、预设绝不许碰（第五轮用户定版语义）
+# 金额类字段：保证金/名义类，内置中性档绝不许含（金额归用户填）
 _AMOUNT_FIELDS = {"notional_usd", "max_position_usd",
                   "max_order_notional_usd", "_total_usd"}
 
 
-def test_presets_shape_and_neutral_equals_defaults():
+def test_neutral_defaults_are_former_neutral_tier_values():
+    """第十二轮定版：内置中性档 = 原 PRESETS 各策略 neutral 档
+    原值（用户点名数值）；只含结构参数、不含金额字段；specs
+    接口带 neutral_defaults、不再带 presets/amount_ratios。"""
     import dataclasses as _dc
 
     from detsp.strategies.specs import PARAMS_CLASSES
+    assert NEUTRAL_DEFAULTS["hedged_grid"] == {
+        "grid_count": 20, "leverage_grid": 3.0, "leverage_hedge": 3.0,
+        "skip_band_frac": 0.25, "mode": "long_short"}
+    assert NEUTRAL_DEFAULTS["premium_arb"] == {
+        "leverage_base": 1.0, "leverage_hedge": 1.0,
+        "execution_mode": "taker"}
+    assert NEUTRAL_DEFAULTS["funding_carry"] == {
+        "leverage": 6.0, "min_edge_bps_per_hour": 1.0}
     for spec in strategy_specs():
         st = spec["strategy"]
-        presets = spec["page"]["presets"]
-        assert set(presets) == {"conservative", "neutral", "aggressive"}
-        # 预设字段以 Params dataclass 全集为准：系统值字段
-        # （zone=hidden，如网格 skip_band_frac）不出现在面板
-        # fields 里，但仍是合法的结构参数、可进预设
-        fields = {f.name: f.default
-                  for f in _dc.fields(PARAMS_CLASSES[st])}
-        for tier, vals in presets.items():
-            assert vals, f"{st}/{tier} 预设不能为空"
-            for k, v in vals.items():
-                assert k in fields, f"{st}/{tier} 含未知字段 {k}"
-                # 只锁结构参数：中性档结构值必须与 Params 默认
-                # 值一致；金额字段不进预设（见下个测试），本来
-                # 就不是原仓默认语义的一部分（原仓金额是表单
-                # 必填项），故这里没有金额可锁
-                if tier == "neutral" and fields[k] is not None:
-                    assert v == fields[k], \
-                        f"{st} 中性档 {k}={v} 与默认值 " \
-                        f"{fields[k]} 漂移"
+        assert "presets" not in spec["page"]
+        assert "amount_ratios" not in spec["page"]
+        assert "preset_labels" not in spec["page"]
+        nd = spec["page"]["neutral_defaults"]
+        assert nd == NEUTRAL_DEFAULTS[st]
+        fields = {f.name for f in _dc.fields(PARAMS_CLASSES[st])}
+        for k in nd:
+            assert k in fields, f"{st} 中性档含未知字段 {k}"
+        assert not (_AMOUNT_FIELDS & set(nd)), \
+            f"{st} 中性档含金额字段"
 
 
-def test_presets_never_touch_amount_fields():
-    # 点预设绝不改用户填的金额：任何一档都不许出现金额类字段
-    for st, tiers in PRESETS.items():
-        for tier, vals in tiers.items():
-            bad = _AMOUNT_FIELDS & set(vals)
-            assert not bad, f"{st}/{tier} 预设含金额字段 {bad}"
-    # 网格也不再有 _total_usd 伪字段（总名义归用户填）
-    for vals in PRESETS["hedged_grid"].values():
-        assert "_total_usd" not in vals
-
-
-def test_amount_ratios_for_derived_amount_fields():
-    # 金额派生量按比例换算：只有溢价套利的单笔上限，比例
-    # 保守 25% / 中性 50% / 激进 100%，对用户所填最大持仓生效
-    assert set(AMOUNT_RATIOS) == {"premium_arb"}
-    ratios = AMOUNT_RATIOS["premium_arb"]["max_order_notional_usd"]
-    assert ratios == {"conservative": 0.25, "neutral": 0.5,
-                      "aggressive": 1.0}
-    # specs 接口把比例表带给前端（applyPreset 据此换算）
-    for spec in strategy_specs():
-        assert spec["page"]["amount_ratios"] == \
-            AMOUNT_RATIOS.get(spec["strategy"], {})
-
-
-def test_presets_tiers_differ_on_key_fields():
-    p = PRESETS
-    # 结构参数单调：保守 < 中性 < 激进（网格看格数与杠杆）
-    assert p["funding_carry"]["conservative"]["leverage"] < \
-        p["funding_carry"]["neutral"]["leverage"] < \
-        p["funding_carry"]["aggressive"]["leverage"]
-    assert p["funding_carry"]["conservative"][
-        "min_edge_bps_per_hour"] > \
-        p["funding_carry"]["aggressive"]["min_edge_bps_per_hour"]
-    # 溢价套利三档靠杠杆与执行方式差异化（金额不再进预设）
-    assert p["premium_arb"]["conservative"]["execution_mode"] == "maker"
-    assert p["premium_arb"]["neutral"]["execution_mode"] == "taker"
-    assert p["premium_arb"]["aggressive"]["leverage_base"] > \
-        p["premium_arb"]["neutral"]["leverage_base"]
-    assert p["hedged_grid"]["conservative"]["grid_count"] < \
-        p["hedged_grid"]["neutral"]["grid_count"] < \
-        p["hedged_grid"]["aggressive"]["grid_count"]
+def test_preset_api_fully_removed():
+    import detsp.strategies.specs as specs_mod
+    assert not hasattr(specs_mod, "PRESETS")
+    assert not hasattr(specs_mod, "AMOUNT_RATIOS")
+    assert not hasattr(specs_mod, "PRESET_LABELS")
 
 
 # ── 策略记录（运行仓位 + 历史落库） ────────────────────────

@@ -1,13 +1,15 @@
 """第十轮：配置五段 + 四模式（面板与 server）。
 
 覆盖：策略页产物含四模式文案与大白话说明、五段标题与段序、
-总结句容器（secSummary）与模板替换、风险档按钮与全自动只读
-参数区、manual 隐藏三段与网格 out_of_range_action 豁免标记、
+总结句容器（secSummary）与模板替换、全自动只读参数区、
+manual 隐藏三段与网格 out_of_range_action 豁免标记、
 specs 无 section 时的兜底分组渲染分支；server 创建 full_auto
-任务后 /api/tasks 带 run_mode=full_auto 与 run_preset 且落盘、
-amount_usd 透传（网格可不带 qty_per_grid）、创建传 auto 落盘
-归一为 semi_auto、非法风险档被拒、编辑不带模式/风险档时保持
-原值；specs 的 section/section_summaries 与字段自洽。
+任务后 /api/tasks 带 run_mode=full_auto 且落盘、amount_usd
+（保证金）透传（网格可不带 qty_per_grid）、创建传 auto 落盘
+归一为 semi_auto；第十二轮预设全砍：run_preset 不再有按钮与
+提交字段、老请求带了容忍并忽略、落盘丢弃，非法 run_mode
+仍被拒、编辑不带模式时保持原值；specs 的
+section/section_summaries 与字段自洽。
 """
 
 import json
@@ -48,7 +50,7 @@ def test_page_has_four_run_modes_and_plain_descriptions():
     assert "点「开仓」立即开仓，平仓你手动点" in PAGE_HTML
     assert "在这个标的上按条件开仓→平仓→再开仓" in PAGE_HTML
     assert "每轮系统重新选标" in PAGE_HTML
-    assert "只选策略、金额和风险档，两腿/标的/参数系统全定" in PAGE_HTML
+    assert "只选策略和保证金，两腿/标的/参数系统全定" in PAGE_HTML
     # 网格 manual 例外说明
     assert "网格在区间内自动铺格交易，开/停由你手动" in PAGE_HTML
     # 旧两段切换不得残留
@@ -71,17 +73,17 @@ def test_page_mode_visibility_rules():
     # semi_auto：币种下拉禁用 + 自动选标注明
     assert 'S.runMode==="semi_auto"' in PAGE_HTML
     assert "半自动·自动选标：标的由系统自动选" in PAGE_HTML
-    # full_auto：隐藏订单腿/选市场、占位说明、只留金额+风险档+
-    # 总结句+只读参数
+    # full_auto：隐藏订单腿/选市场、占位说明、只留保证金+
+    # 总结句+只读参数（第十二轮：风险档随预设全砍删除）
     assert "两腿和标的都由系统选" in PAGE_HTML
     assert "fullAutoCfg" in PAGE_HTML and "fullAutoNote" in PAGE_HTML
     assert "看系统用的参数" in PAGE_HTML
     assert "要改参数请切到半自动" in PAGE_HTML
-    assert "data-run-preset" in PAGE_HTML
-    for preset in ("conservative", "neutral", "aggressive"):
-        assert f'"{preset}"' in PAGE_HTML
-    # 提交组装：full_auto 附 run_preset；网格附顶层 amount_usd
-    assert "body.run_preset" in PAGE_HTML
+    assert "data-run-preset" not in PAGE_HTML
+    assert "风险档" not in PAGE_HTML
+    # 提交组装：保证金走顶层 amount_usd（全模式统一），不再带
+    # run_preset
+    assert "body.run_preset" not in PAGE_HTML
     assert "body.amount_usd" in PAGE_HTML
 
 
@@ -115,10 +117,10 @@ def test_page_section_fallback_when_specs_lack_section():
 
 
 def test_mode_badge_labels():
-    # 任务徽标四值文案 + 全自动带风险档中文
+    # 任务徽标四值文案（第十二轮：不再带档位后缀）
     assert "半自动·固定标的" in PAGE_HTML
     assert "MODE_BADGE_LABELS" in PAGE_HTML
-    assert "RUN_PRESET_LABELS" in PAGE_HTML
+    assert "RUN_PRESET_LABELS" not in PAGE_HTML
     # 全自动任务列表显示当前两腿
     assert "current_venues" in PAGE_HTML
 
@@ -239,11 +241,12 @@ def test_create_full_auto_persists_and_tasks_view(panel):
     assert status == 200 and res["ok"] is True, res
     saved = load_panel_tasks(store)
     assert saved[0]["run_mode"] == "full_auto"
-    assert saved[0]["run_preset"] == "aggressive"
+    # 第十二轮：老请求带的 run_preset 容忍并忽略、落盘丢弃
+    assert "run_preset" not in saved[0]
     _, body = _req(base, "/api/tasks")
     t = next(x for x in body["tasks"] if x["name"] == "fa-1")
     assert t["run_mode"] == "full_auto"
-    assert t["run_preset"] == "aggressive"
+    assert "run_preset" not in t
     assert isinstance(t["current_venues"], list)
 
 
@@ -259,7 +262,7 @@ def test_create_full_auto_grid_amount_usd_without_qty(panel):
     assert status == 200 and res["ok"] is True, res
     saved = load_panel_tasks(store)
     assert saved[0]["run_mode"] == "full_auto"
-    assert saved[0]["run_preset"] == "conservative"
+    assert "run_preset" not in saved[0]
     assert saved[0]["amount_usd"] == 1000.0
     assert "qty_per_grid" not in saved[0]["params"]
 
@@ -278,15 +281,16 @@ def test_create_auto_normalizes_to_semi_auto(panel):
     assert t["run_mode"] == "semi_auto"
 
 
-def test_create_bad_run_preset_and_mode_rejected(panel):
+def test_create_legacy_run_preset_tolerated_mode_rejected(panel):
     base, state, _ = panel
     status, res = _req(base, "/api/tasks/create", "POST",
                        token=state.api_token,
-                       body={"name": "bad-1", "strategy": "funding_carry",
+                       body={"name": "ok-1", "strategy": "funding_carry",
                              "params": CARRY_PARAMS,
                              "run_mode": "full_auto",
                              "run_preset": "turbo"})
-    assert status == 400 and "风险档" in res["error"]
+    # 第十二轮：run_preset 任意值都容忍并忽略，不再报错
+    assert status == 200 and res["ok"] is True, res
     status, res = _req(base, "/api/tasks/create", "POST",
                        token=state.api_token,
                        body={"name": "bad-2", "strategy": "funding_carry",
@@ -303,7 +307,8 @@ def test_update_without_mode_fields_preserves_them(panel):
                              "run_mode": "semi_fixed",
                              "run_preset": "conservative"})
     assert status == 200 and res["ok"] is True, res
-    # 编辑弹窗口径：只带 params，不带 run_mode/run_preset → 保持原值
+    # 编辑弹窗口径：只带 params、不带 run_mode → 保持原模式；
+    # run_preset 创建时已丢弃、编辑后仍不出现
     status, res = _req(base, "/api/tasks/update", "POST",
                        token=state.api_token,
                        body={"name": "sf-1",
@@ -312,5 +317,23 @@ def test_update_without_mode_fields_preserves_them(panel):
     assert status == 200 and res["ok"] is True, res
     saved = load_panel_tasks(store)
     assert saved[0]["run_mode"] == "semi_fixed"
-    assert saved[0]["run_preset"] == "conservative"
+    assert "run_preset" not in saved[0]
     assert saved[0]["params"]["notional_usd"] == 250.0
+
+
+def test_create_funding_with_margin_only_derives_notional(panel):
+    """第十二轮保证金语义（server 路径）：资金费任务只给
+    amount_usd（保证金）+ 杠杆、不给 notional_usd，也能创建；
+    落盘 params 里的 notional_usd = 保证金 × 杠杆。"""
+    base, state, store = panel
+    params = {"symbol": "BTC", "venue_a": "arcus",
+              "venue_b": "lighter", "leverage": 6}
+    status, res = _req(base, "/api/tasks/create", "POST",
+                       token=state.api_token,
+                       body={"name": "fm-1", "strategy": "funding_carry",
+                             "params": params, "run_mode": "semi_fixed",
+                             "amount_usd": 100})
+    assert status == 200 and res["ok"] is True, res
+    saved = load_panel_tasks(store)
+    assert saved[0]["amount_usd"] == 100.0
+    assert saved[0]["params"]["notional_usd"] == 600.0

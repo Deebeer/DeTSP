@@ -37,6 +37,12 @@ class PremiumParams:
     hedge_taker_fee_bps: float = 0.0
     max_position_usd: float = 1000.0
     max_order_notional_usd: float = 500.0
+    # 单笔上限占最大持仓的百分比（第十二轮新增）：任务组装时
+    # （core.engine.build_runtime）若参数里带了本字段，单笔上限
+    # 按「最大持仓 × 本值 / 100」派生、覆盖 max_order_notional_usd；
+    # 直接构造 PremiumParams（纯函数/回测）时不自动派生，
+    # max_order_notional_usd 仍以显式值为准
+    order_cap_pct: float = 50.0
     min_order_notional_usd: float = 10.0  # 单笔名义下限（entropy-arb
     # sizing.min_order_notional_usd=10）：切片低于此值跳过不下单
     take_fraction: float = 0.5  # 吃对手盘深度的比例
@@ -98,6 +104,8 @@ class PremiumParams:
             raise ValueError("max_position_usd 必须大于 0")
         if self.max_order_notional_usd <= 0:
             raise ValueError("max_order_notional_usd 必须大于 0")
+        if not 0 < self.order_cap_pct <= 100:
+            raise ValueError("order_cap_pct 须在 (0, 100]")
         if self.min_order_notional_usd < 0:
             raise ValueError("min_order_notional_usd 不能为负")
         if self.cooldown_seconds < 0:

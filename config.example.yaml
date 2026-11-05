@@ -47,22 +47,22 @@ venues:
 # run_mode（任务顶层字段，可选）：四值——manual = 自主（两腿/
 # 标的/金额都自己定，点开仓立即开、手动平仓）；semi_fixed =
 # 半自动·固定标的（定死一个标的，系统按条件开→平→再开循环）；
-# semi_auto = 半自动·自动选标（定两腿/金额/条件，系统每轮重新
-# 选标循环）；full_auto = 全自动（只定策略/金额/风险档，两腿、
+# semi_auto = 半自动·自动选标（定两腿/保证金/条件，系统每轮
+# 重新选标循环）；full_auto = 全自动（只定策略/保证金，两腿、
 # 标的、参数系统全定）。缺省 manual；旧值 auto 自动按 semi_auto
 # 处理。自动选标类任务（semi_auto / full_auto）按「该场所任意
 # 币种」占位，与同场所的其他任务都算冲突。
-# run_preset（任务顶层字段，可选）：仅 full_auto 用的风险档，
-# conservative（保守）/ neutral（中性，缺省）/ aggressive（激进）。
-# amount_usd（任务顶层字段，可选）：仅 full_auto 的中性网格用，
-# 填目标总名义（USD），系统按它反推每格量。
+# amount_usd（任务顶层字段，可选）：保证金（USD）。仓位名义 =
+# 保证金 × 基准腿杠杆：资金费没写 notional_usd 时按它换算单边
+# 名义，溢价用它封顶最大持仓，网格（全自动）按总名义 = 保证金
+# × 网格腿杠杆反推每格量。老任务的 run_preset（风险档）已删除：
+# 写了会被忽略，全自动没填的参数按内置中性档补。
 # 启用示例：去掉对应行首的 "# "，并把占位符换成自己实测/设定的值。
 tasks: []
 #  - name: <任务名，如 hgrid-btc-arcus>
 #    strategy: hedged_grid        # 中性网格：WGALL 网格 + Parallax 对锁
 #    run_mode: manual          # 运行模式四值：manual 自主 / semi_fixed 半自动·固定标的 / semi_auto 半自动·自动选标 / full_auto 全自动（旧值 auto 按 semi_auto 处理）
-#    run_preset: neutral       # 仅 full_auto 用：风险档 conservative 保守 / neutral 中性 / aggressive 激进
-#    amount_usd: <目标总名义 USD>  # 仅 full_auto 的中性网格用：系统按它反推每格量（其余策略删掉此行）
+#    amount_usd: <保证金 USD>  # 保证金：总名义 = 保证金 × 网格腿杠杆，系统按总名义反推每格量
 #    params:
 #      grid_venue: <venue_id>     # 网格腿
 #      hedge_venue: <venue_id>    # 对冲腿（与网格腿净仓位反向等量）
@@ -86,7 +86,6 @@ tasks: []
 #  - name: <任务名，如 arb-entropy-rh>
 #    strategy: premium_arb        # 溢价套利：entropy-arb 价差带逻辑
 #    run_mode: manual          # 运行模式四值：manual 自主 / semi_fixed 半自动·固定标的 / semi_auto 半自动·自动选标 / full_auto 全自动（旧值 auto 按 semi_auto 处理）
-#    run_preset: neutral       # 仅 full_auto 用：风险档 conservative 保守 / neutral 中性 / aggressive 激进
 #    params:
 #      symbol: <币种>
 #      base_venue: <venue_id>     # 基准腿
@@ -115,7 +114,6 @@ tasks: []
 #  - name: <任务名，如 carry-arcus-lighter>
 #    strategy: funding_carry      # 资金费 carry：Parallax 资金费选向独立成策略
 #    run_mode: manual          # 运行模式四值：manual 自主 / semi_fixed 半自动·固定标的 / semi_auto 半自动·自动选标 / full_auto 全自动（旧值 auto 按 semi_auto 处理）
-#    run_preset: neutral       # 仅 full_auto 用：风险档 conservative 保守 / neutral 中性 / aggressive 激进
 #    params:
 #      symbol: <币种>
 #      venue_a: <venue_id>

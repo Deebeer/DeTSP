@@ -1,9 +1,9 @@
 """左侧边栏 + 每策略一页测试（第六轮：用户定版结构）。
 
 覆盖：边栏入口与三个策略页容器存在且顺序为用户定版（总览 /
-中性网格 / 溢价套利 / 资金费套利 / 策略记录 /
-设置，共 6 项，无账本、无「数据」入口、无通用新建任务按钮、
-无轮换对冲页）；
+中性网格 / 溢价套利 / 资金费套利 / 策略记录 / 数据库 /
+设置，共 7 项，无账本、无「数据」入口、无通用新建任务按钮、
+无轮换对冲页；第十二轮新增数据库页在设置上面）；
 策略页第十一轮定版流程的区块标记（运作方式 / 运行模式 /
 选择两腿 / 仓位设置 / 策略配置 / 更多配置（折叠）/ 交易预览 /
 运行中仓位，无热门机会表）；总览两行统计（今日 +
@@ -13,10 +13,12 @@ fname/fdesc 两行呈现）；颜色只用一套变量、
 无杂色残留；极客风主题关键样式；「资金费套利」改名一致性；
 实时性与杠杆维度（20 秒刷新、更新戳与失败保留、选市场统计/
 价格行、订单腿杠杆行、预览超限警告）；specs 的 page 元数据自洽（primary / venue_fields / amount /
-market_value / how_it_works / presets / amount_ratios /
-run_modes 与 fields 的 zone 分区）；
-/api/strategy-specs 把 page 元数据带给前端；设置页场所费率表
-与数据服务状态行、溢价中枢接库与资金费库信息行的页面标记。
+market_value / how_it_works / neutral_defaults（第十二轮
+预设全砍）/ derived_fields / run_modes 与 fields 的 zone 分区）；
+/api/strategy-specs 把 page 元数据带给前端；数据库页数据服务
+状态行与启停（设置页费率表已撤）、溢价中枢接库与资金费库
+信息行的页面标记；第十二轮版式：选择两腿只剩场所下拉、仓位
+设置（统计行/保证金/杠杆信息行/数据块两行）、保证金语义。
 """
 
 import json
@@ -29,16 +31,15 @@ import pytest
 from detsp.core.config import build_config
 from detsp.core.engine import Engine
 from detsp.core.ledger import Ledger
-from detsp.strategies.specs import (AMOUNT_RATIOS, PAGE_META,
-                                    PARAMS_CLASSES, PRESETS,
-                                    PRESET_LABELS, STRATEGY_TITLES,
+from detsp.strategies.specs import (NEUTRAL_DEFAULTS, PAGE_META,
+                                    PARAMS_CLASSES, STRATEGY_TITLES,
                                     strategy_specs)
 from detsp.venues.paper import PaperVenue
 from detsp.web.page import PAGE_HTML
 from detsp.web.server import PanelState, serve
 
 SIDEBAR_PAGES = ["overview", "strat-hedged_grid", "strat-premium_arb",
-                 "strat-funding_carry", "records", "settings"]
+                 "strat-funding_carry", "records", "database", "settings"]
 
 
 # ── 边栏与策略页容器 ────────────────────────────────────────
@@ -49,9 +50,9 @@ def test_sidebar_entries_and_order():
     sidebar = PAGE_HTML[start:end]
     pos = [sidebar.index(f'data-page="{p}"') for p in SIDEBAR_PAGES]
     assert pos == sorted(pos), \
-        "边栏顺序必须是用户定版：总览/网格/套利/资金费/策略记录/设置"
+        "边栏顺序必须是用户定版：总览/网格/套利/资金费/策略记录/数据库/设置"
     for label in ("总览", "中性网格", "溢价套利", "资金费套利",
-                  "策略记录", "设置"):
+                  "策略记录", "数据库", "设置"):
         assert label in sidebar
     # 账本已按定版从边栏移除
     assert "账本" not in sidebar
@@ -131,10 +132,12 @@ def test_sixth_round_layout_markers():
     # 三段式渲染：fname（名）/ fdesc（说明）两行 + 输入框
     assert 'class="fname"' in PAGE_HTML and 'class="fdesc"' in PAGE_HTML
     assert "fldHead" in PAGE_HTML
-    # 选市场定版版式：统计行 + 币种下拉 + 价格行（实际价格带口径）
-    assert "pairsStats" in PAGE_HTML and "pairPrices" in PAGE_HTML
+    # 仓位设置定版版式（第十二轮）：统计行 + 币种下拉 + 数据块
+    # 两行（价格行与「标的数据：」前缀已按定版去掉）
+    assert "pairsStats" in PAGE_HTML and "posData" in PAGE_HTML
     assert '"共同 "' in PAGE_HTML and '" 上市 "' in PAGE_HTML
-    assert '"价格："' in PAGE_HTML and "renderPairPrices" in PAGE_HTML
+    assert "renderPosData" in PAGE_HTML
+    assert '"价格："' not in PAGE_HTML
     # 数据区块更新戳：时间取接口 updated_at，失败标黄保留旧数据
     for marker in ('id="ovUpd"', 'id="bestUpd"', 'id="recUpd"',
                    "pairsUpd", "prevUpd", "setUpd", "更新 ",
@@ -143,20 +146,19 @@ def test_sixth_round_layout_markers():
     # 实时节奏：pairs/最佳机会 20 秒（与扫描缓存对齐），旧 30 秒不得残留
     assert "},20000);" in PAGE_HTML
     assert "},30000);" not in PAGE_HTML
-    # 订单腿杠杆行 + 预览超限警告（只展示与警告，不改执行行为）
-    assert "data-leglev" in PAGE_HTML and "legLevText" in PAGE_HTML
+    # 仓位设置杠杆信息行 + 预览超限警告（只展示与警告，不改执行）
+    assert "data-levinfo-leg" in PAGE_HTML and "legLevText" in PAGE_HTML
     assert "杠杆上限未知" in PAGE_HTML and "逐仓 only" in PAGE_HTML
     assert "实际执行可能被该所拒绝或按上限成交" in PAGE_HTML
-    assert "所需保证金按各腿所填杠杆计算" in PAGE_HTML
+    assert "占用保证金 = 名义 ÷ 该腿杠杆" in PAGE_HTML
 
 
 def test_leg_rows_show_available_balance():
-    # 订单腿每行显示该所可用余额（权益），paper 标模拟，取不到
-    # 显示「可用 —」，随 refresh 的 renderLegs 更新
-    assert 'data-legbal="' in PAGE_HTML
-    assert "legBal" in PAGE_HTML
-    assert "可用 $" in PAGE_HTML and "（权益 $" in PAGE_HTML
-    assert "可用 —" in PAGE_HTML and "模拟余额" in PAGE_HTML
+    # 第十二轮：选择两腿瘦身后腿行不再带余额——可用余额改在
+    # 交易预览的可用行里按腿列（paper 标模拟余额）
+    assert 'data-legbal="' not in PAGE_HTML
+    assert "可用 $" in PAGE_HTML and "模拟余额" in PAGE_HTML
+    assert "所需保证金不足" in PAGE_HTML
 
 
 def test_strategy_page_containers_exist():
@@ -198,37 +200,51 @@ def test_strategy_page_flow_blocks():
     # 热门机会表已按定版从策略页移除（移去总览做最佳机会卡片）
     assert "热门机会" not in PAGE_HTML
 
-def test_no_chips_but_presets_and_pairs():
+def test_no_chips_no_presets_pairs_and_margin():
     # 金额改为纯自由输入：快捷额 chips 整体删除
     assert "AMT_CHIPS" not in PAGE_HTML
     assert "chipAmt" not in PAGE_HTML
     assert "setAmountChip" not in PAGE_HTML
-    # 配置预设四态：按钮渲染 + 整组填入 + 改动转自定义
-    assert "data-preset" in PAGE_HTML
-    assert "applyPreset" in PAGE_HTML and "markCustom" in PAGE_HTML
-    for label in ("保守", "中性", "激进", "自定义"):
-        assert label in PAGE_HTML
+    # 第十二轮：预设全砍——按钮、组装与风险档一律不得残留
+    assert "data-preset" not in PAGE_HTML
+    assert "data-run-preset" not in PAGE_HTML
+    assert "applyPreset" not in PAGE_HTML and "markCustom" not in PAGE_HTML
+    assert "body.run_preset" not in PAGE_HTML
+    assert "风险档" not in PAGE_HTML
     # 选市场走 pairs 接口（两所共同上市全量），指标用 apr_pct 等行字段
     assert "/api/pairs" in PAGE_HTML and "loadPairs" in PAGE_HTML
     assert "apr_pct" in PAGE_HTML and "共同" in PAGE_HTML
-    # 网格金额 = 目标总名义自由输入，反推每格量
-    assert "gridTotalInp" in PAGE_HTML and "目标总名义" in PAGE_HTML
-    assert "gridTotalToQty" in PAGE_HTML
+    # 保证金语义（三策略统一）：保证金输入框 + 派生口径文案；
+    # 旧「目标总名义」输入不得残留
+    assert "marginInp" in PAGE_HTML and "保证金" in PAGE_HTML
+    assert "仓位名义 = 保证金 × 基准腿杠杆" in PAGE_HTML
+    assert "gridTotalInp" not in PAGE_HTML and "目标总名义" not in PAGE_HTML
+    assert "gridMarginToQty" in PAGE_HTML
+    # 仓位设置内部顺序：统计行 → 币种/保证金 → 杠杆区 → 数据块
+    # （在 root.innerHTML 组装串范围内断言顺序）
+    renderer = PAGE_HTML[PAGE_HTML.index("root.innerHTML="):]
+    flow = ["pairsStats", "marginHtml", "levAreaHtml", "posData"]
+    pos = [renderer.index(t) for t in flow]
+    assert pos == sorted(pos), "仓位设置顺序必须是第十二轮定版"
+    # 选择两腿只剩场所下拉：腿行不得再带方向/金额/数量/余额/杠杆
+    for gone in ("data-legamt", "data-legqty", "data-legbal",
+                 "data-leglev", "data-dir"):
+        assert gone not in PAGE_HTML, gone
 
 
 def test_preview_block_markers():
     # 交易预览：按平台分列 + 入场条件指示（前端用 market/overview 算）
-    for marker in ("标记价", "预估执行价", "所需保证金", "总保证金",
+    for marker in ("标记价", "预估执行价", "占用保证金", "总占用保证金",
                    "renderPreview", "pairRates"):
         assert marker in PAGE_HTML
     assert "已达入场门槛" in PAGE_HTML
     assert "未达门槛" in PAGE_HTML and "启动后等待机会" in PAGE_HTML
     assert "已进入入场带" in PAGE_HTML
     assert "每格间距" in PAGE_HTML
-    # 订单腿：方向徽标与数量联动
-    assert "做多" in PAGE_HTML and "做空" in PAGE_HTML
-    assert "网格双向" in PAGE_HTML and "反向对冲" in PAGE_HTML
-    assert "renderLegs" in PAGE_HTML
+    # 仓位设置联动函数（杠杆信息行 + 保证金派生旁注）
+    assert "renderLegs" in PAGE_HTML and "marginOf" in PAGE_HTML
+    # 溢价名义超最大持仓的预览警告（第十二轮）
+    assert "超过最大持仓" in PAGE_HTML
 
 
 def test_overview_stats_best_list_and_records_page():
@@ -289,9 +305,9 @@ def test_page_meta_consistency():
                         "primary": list(PAGE_META[st]["primary"]),
                         "run_modes": [dict(m) for m in
                                       PAGE_META[st].get("run_modes", [])],
-                        "presets": PRESETS[st],
-                        "preset_labels": PRESET_LABELS,
-                        "amount_ratios": AMOUNT_RATIOS.get(st, {})}
+                        "derived_fields": list(
+                            PAGE_META[st].get("derived_fields", ())),
+                        "neutral_defaults": NEUTRAL_DEFAULTS.get(st, {})}
         vf = page["venue_fields"]
         assert len(vf) == 2 and len(page["venue_labels"]) == 2
         for name in vf:
@@ -326,6 +342,11 @@ def test_page_meta_mob_flow_fields():
             # 网格无单一金额字段：页面用每格量×格数折算总名义
             assert page["amount"] is None
             assert page["market_value"] == "price"
+        elif st == "premium_arb":
+            # 第十二轮：溢价改保证金口径，仓位名义由顶层
+            # amount_usd（保证金）× 基准腿杠杆派生，无单一
+            # 金额字段
+            assert page["amount"] is None
         else:
             # 主金额必须是真实字段，且在 primary 里（金额区渲染）
             assert page["amount"] in fields
@@ -381,8 +402,12 @@ def test_run_modes_and_zone_contract():
             "inventory_scale_bps", "inventory_floor_frac",
             "min_order_notional_usd", "max_slippage_bps",
             "settle_grace_seconds", "maker_offset_ticks",
-            "maker_timeout_seconds", "max_order_notional_usd"} <= \
+            "maker_timeout_seconds", "max_order_notional_usd",
+            "order_cap_pct"} <= \
         {n for n, z in prem.items() if z == "more"}
+    # 单笔上限是组装派生字段：specs 标 derived、面板不渲染
+    assert by["premium_arb"]["page"]["derived_fields"] == \
+        ["max_order_notional_usd"]
     fund = zones["funding_carry"]
     assert {n for n, z in fund.items() if z == "config"} == \
         {"max_open_spread_bps", "min_edge_bps_per_hour",
@@ -411,18 +436,24 @@ def test_library_and_fees_page_markers():
                    "7 天平均费差 ", "预计回本 ", "样本 ",
                    "TASK_WARNINGS", "r.warnings"):
         assert marker in PAGE_HTML, marker
-    # 任务 5：设置页场所费率表 + 数据服务状态行
-    settings = PAGE_HTML[PAGE_HTML.index('id="page-settings"'):]
-    for marker in ("场所费率表", 'id="feeTable"', 'id="feeSave"',
-                   "数据服务", 'id="libStatus"'):
-        assert marker in settings, marker
-    for marker in ("loadFees", "/api/settings/fees", "feeEntryVal",
-                   "FEE_VENUES", "renderLibStatus", "loadLibraryStatus",
+    # 任务 5（第十二轮）：数据服务挪到「数据库」页（状态行 +
+    # 启停按钮）；设置页费率表整个撤掉、费率接口不得残留
+    database = PAGE_HTML[PAGE_HTML.index('id="page-database"'):]
+    for marker in ("数据服务", 'id="libStatus"', 'id="libStart"',
+                   'id="libStop"', "/api/libraries/start",
+                   "/api/libraries/stop"):
+        assert marker in database, marker
+    for marker in ("renderLibStatus", "loadLibraryStatus",
                    "中枢库条目数 ", "最近录制 ", "最近重算 "):
         assert marker in PAGE_HTML, marker
-    # 7 所费率行名单与 VENUE_IDS 一致
-    assert '"arcus","lighter","lighter_rh","hyperliquid","entropy",' \
-           '"tradexyz","aster"' in PAGE_HTML
+    settings = PAGE_HTML[PAGE_HTML.index('id="page-settings"'):
+                         PAGE_HTML.index('id="page-database"')]
+    for gone in ("场所费率表", 'id="feeTable"', 'id="feeSave"',
+                 'id="libStatus"', "数据服务"):
+        assert gone not in settings, gone
+    for gone in ("loadFees", "/api/settings/fees", "feeEntryVal",
+                 "FEE_VENUES", "feeSave"):
+        assert gone not in PAGE_HTML, gone
 
 
 # ── 接口把 page 元数据带给前端 ──────────────────────────────
@@ -504,15 +535,13 @@ def test_overview_block_order():
 
 
 def test_config_note_and_advanced_plain_language():
-    # 配置区说明行：用户定版原文，位于「策略配置」标题正下方、
-    # 预设按钮行之上（第十一轮金额区并入仓位设置，措辞同步）
-    note = "先在「仓位设置」区填好金额，再点预设：只套结构参数" \
-           "（杠杆/门槛/格数等），金额不改（中性 = 原仓对齐" \
-           "默认值）；改动任何字段自动切到「自定义」。"
+    # 配置区说明行（第十二轮：预设全砍后的引导文案），位于
+    # 「策略配置」标题正下方、配置字段之上
+    note = "正面只放核心字段，其余在下方「更多配置」里。"
     assert note in PAGE_HTML
     renderer = PAGE_HTML[PAGE_HTML.index("function buildStrategyPage"):]
     assert renderer.index("<h3>策略配置</h3>") < renderer.index(note) \
-        < renderer.index("presetRow")
+        < renderer.index("libNote")
     # 第十轮五段：段序常量、总结句容器与模板替换函数都在
     assert 'SECTION_ORDER=["交易对象","开仓条件","平仓条件","平仓后怎么办","保护"]' \
         in PAGE_HTML
@@ -543,10 +572,11 @@ def test_symbol_dropdown_two_segments_and_stats_line():
     # 选市场去拥挤：下拉选项只剩「币种 · 关键指标」两段，现价
     # 与混口径都不进下拉（混口径移到价格行末尾小字）
     seg = PAGE_HTML[PAGE_HTML.index("function fillPairSymbols"):
-                    PAGE_HTML.index("function renderPairPrices")]
+                    PAGE_HTML.index("function renderPosData")]
     assert "现价" not in seg and "混口径" not in seg
     assert "疑似同名不同资产" not in seg
-    assert "混口径，仅供参考" in PAGE_HTML
+    # 第十二轮：数据块不再带「混口径」小标签（口径逻辑不变）
+    assert "混口径，仅供参考" not in PAGE_HTML
     # 统计行精简：删括号长尾，过滤后数量不同才短注「可交易 M」
     assert "（按策略排序后可交易" not in PAGE_HTML
     assert '" · 可交易 "' in PAGE_HTML
@@ -555,28 +585,24 @@ def test_symbol_dropdown_two_segments_and_stats_line():
 
 # ── 第八轮：标的数据条 / 渲染字段集合完整性 ────────────────
 
-def test_symbol_data_strip():
-    # 选市场价格行下方有「标的数据」指标条：按策略从 pairs 行
-    # 渲染关键指标，费率带口径，网格带 candles 的高低/建议区间
-    seg = PAGE_HTML[PAGE_HTML.index("function renderSymData"):
+def test_position_data_block():
+    # 仓位设置数据块（第十二轮定版两行）：第 1 行两腿价 + 价差、
+    # 第 2 行两腿资金费（资金费页补费差）；腿名走 specs 的
+    # venue_labels，价差口径随策略（溢价有符号/其余普通价差）
+    seg = PAGE_HTML[PAGE_HTML.index("function renderPosData"):
                     PAGE_HTML.index("function legLevText")]
-    assert "标的数据" in PAGE_HTML and "symData" in PAGE_HTML
-    # 资金费类（资金费套利/轮换）：两腿费率+口径、费差、年化、价差
-    for marker in ("A腿资金费", "B腿资金费", "费差", "预计年化",
-                   "价差", "rate_kind_a", "rate_kind_b", "rateKindTxt",
-                   "edge_bps_h", "apr_pct"):
+    assert "posData" in PAGE_HTML and "数据" in seg
+    for marker in ("venue_labels", "price_a", "price_b",
+                   "signed_spread_bps", "spread_bps",
+                   "rate_a_bps_h", "rate_b_bps_h", "edge_bps_h",
+                   "疑似同名不同资产"):
         assert marker in seg, marker
-    # 溢价套利：两腿价、带符号价差、两腿资金费
-    for marker in ("基准腿价", "对冲腿价", "基准腿资金费",
-                   "对冲腿资金费", "signed_spread_bps"):
-        assert marker in seg, marker
-    # 中性网格：现价、日波动、24h 高低、建议区间、两腿资金费
-    for marker in ("现价", "日波动", "24h 高", "24h 低", "建议区间",
-                   "网格腿资金费", "volatility_pct", "suggested_lower"):
-        assert marker in seg, marker
-    # 无数据显「—」；渲染挂在选币与 pairs 刷新路径上
-    assert '"—"' in seg
-    assert "renderSymData(st)" in PAGE_HTML
+    # 无数据显占位；渲染挂在选币与 pairs 刷新路径上
+    assert "暂无所选标的的数据" in seg
+    assert "renderPosData(st)" in PAGE_HTML
+    # 旧「标的数据：」前缀与价格行文案不得残留
+    assert "标的数据" not in PAGE_HTML
+    assert "（标记价）" not in PAGE_HTML
 
 
 def test_rendered_field_partition_matches_specs():

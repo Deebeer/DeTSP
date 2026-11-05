@@ -34,7 +34,6 @@ from .risk import ErrorCounter, KillSwitch, RiskHaltError
 
 
 RUN_MODES = ("manual", "semi_fixed", "semi_auto", "full_auto")
-RUN_PRESETS = ("conservative", "neutral", "aggressive")
 
 
 def normalize_run_mode(value) -> str:
@@ -56,18 +55,6 @@ def normalize_run_mode(value) -> str:
         f"/ full_auto（全自动），auto 是 semi_auto 的旧名")
 
 
-def normalize_run_preset(value) -> str:
-    """配置预设归一：缺省 neutral，三档之外抛 ValueError。"""
-    if value is None or value == "":
-        return "neutral"
-    v = str(value)
-    if v in RUN_PRESETS:
-        return v
-    raise ValueError(
-        f"run_preset 非法：{value}，只许 conservative（保守）/ "
-        f"neutral（中性）/ aggressive（激进）")
-
-
 @dataclass
 class Task:
     """一个可执行任务：策略运行时 + 独立错误计数。"""
@@ -79,9 +66,10 @@ class Task:
     # 运行模式（归一后）：manual=自主 / semi_fixed=半自动·固定标的
     # / semi_auto=半自动·自动选标 / full_auto=全自动
     run_mode: str = "manual"
-    # 配置预设档位（仅 full_auto 组装内层参数时用，其余模式保留值）
-    run_preset: str = "neutral"
-    # 全自动中性网格的总名义（USD，可选）：折算 qty_per_grid 用
+    # 保证金（USD，可选，第十二轮语义）：仓位名义 = 保证金 ×
+    # 基准腿杠杆（网格为网格腿杠杆）；溢价/资金费组装时按此
+    # 换算仓位，网格全自动时折算 qty_per_grid。任务顶层旧字段
+    # run_preset 已随预设全砍删除（老任务带了也容忍忽略）
     amount_usd: float | None = None
     errors: ErrorCounter = field(default_factory=ErrorCounter)
     last_error: str = ""
@@ -120,35 +108,47 @@ def task_occupied_keys(task_cfg: dict) -> set[tuple[str, str]]:
     return used
 
 
-def _premium_params_with_fee_table(clean_params: dict) -> dict:
-    """溢价套利两腿 taker 费率覆盖（第十一轮）：core/fee_table.py
-    的 FeeTable（设置页场所费率表）存在时，用 data/fees.json 里
-    两腿场所的 taker 费率覆盖任务参数。文件不存在或任何异常都
-    静默回落原参数（缺省即 dataclass 默认 0），不炸启动。"""
-    try:
-        import importlib
+def _premium_params_derived(clean_params: dict,
+                            amount_usd: float | None = None) -> dict:
+    """溢价套利组装派生（费率 / 保证金仓位 / 单笔上限）：
 
-        mod = importlib.import_module(f"{__package__}.fee_table")
-        table_cls = getattr(mod, "FeeTable", None)
-        if table_cls is None:
-            return clean_params
-        table = table_cls(Path("data/fees.json"))
+    - 两腿 taker 费率：一律覆盖为内置通用默认（core.fee_table
+      常量，全所 taker 5 bps；第十二轮起不再读任何费率文件）；
+    - 保证金仓位（amount_usd 给定时）：仓位名义 = 保证金 ×
+      基准腿杠杆，实际最大持仓取 min(用户最大持仓, 该名义)；
+    - 单笔上限：参数带 order_cap_pct 时按「生效最大持仓 ×
+      order_cap_pct / 100」派生，覆盖 max_order_notional_usd；
+      没带 order_cap_pct 时显式 max_order_notional_usd 原样保留。
+    任何异常静默回落原参数，不炸启动。
+    """
+    try:
+        from .fee_table import get_fees
+
         out = dict(clean_params)
-        base_taker, _ = table.get(out.get("base_venue") or "")
-        hedge_taker, _ = table.get(out.get("hedge_venue") or "")
+        base_taker, _ = get_fees(out.get("base_venue") or "")
+        hedge_taker, _ = get_fees(out.get("hedge_venue") or "")
         out["base_taker_fee_bps"] = float(base_taker)
         out["hedge_taker_fee_bps"] = float(hedge_taker)
+        max_pos = float(out.get("max_position_usd", 1000.0))
+        if amount_usd is not None:
+            lev = float(out.get("leverage_base", 1.0))
+            max_pos = min(max_pos, float(amount_usd) * lev)
+            out["max_position_usd"] = max_pos
+        if out.get("order_cap_pct") is not None:
+            out["max_order_notional_usd"] = \
+                max_pos * float(out["order_cap_pct"]) / 100.0
         return out
-    except Exception:  # noqa: BLE001 — 费率表缺失/损坏不挡启动
+    except Exception:  # noqa: BLE001 — 派生失败不挡启动
         return clean_params
 
 
 def build_runtime(strategy: str, clean_params: dict, executor: Executor,
-                  risk_cfg, owner: str):
+                  risk_cfg, owner: str, amount_usd: float | None = None):
     """按策略用已清洗参数构造运行时并 start() 后返回。
 
     build_task（单笔/自主）与全自动监督器（core.auto_cycle 每轮
-    选标后组装内层单笔运行时）共用同一条构造路径。
+    选标后组装内层单笔运行时）共用同一条构造路径。amount_usd
+    是保证金（第十二轮语义），溢价组装派生用（见上）。
     """
     from ..strategies.funding_carry import CarryParams, FundingCarryStrategy
     from ..strategies.hedged_grid import HedgedGridParams, HedgedGridStrategy
@@ -161,7 +161,8 @@ def build_runtime(strategy: str, clean_params: dict, executor: Executor,
             executor=executor, owner=owner)
     elif strategy == "premium_arb":
         runtime = PremiumArbStrategy(
-            PremiumParams(**_premium_params_with_fee_table(clean_params)),
+            PremiumParams(**_premium_params_derived(
+                clean_params, amount_usd)),
             executor=executor, owner=owner)
     elif strategy == "funding_carry":
         runtime = FundingCarryStrategy(
@@ -183,7 +184,8 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg,
     名字一样报错，并明确列出可用策略，避免用户对着旧配置猜。
 
     运行模式（task 顶层 run_mode，不进 params，归一见
-    normalize_run_mode；run_preset/amount_usd 同为顶层字段）：
+    normalize_run_mode；amount_usd 同为顶层字段 = 保证金，
+    第十二轮语义：仓位名义 = 保证金 × 基准腿杠杆）：
     - manual=自主（缺省）：运行时设 single_cycle + manual_immediate，
       立即开一笔、平仓靠人工，安全平仓后引擎停用任务；
     - semi_fixed=半自动·固定标的：不设 single_cycle/manual_immediate，
@@ -192,7 +194,9 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg,
       固定两腿场所自动选标循环（selection_scope="pair"）；
     - full_auto=全自动：AutoCycleRuntime 跨全部场所对选组合
       （selection_scope="all_pairs"），内层参数按
-      用户实填 > PRESETS[run_preset] > dataclass 默认组装。
+      用户实填 > 内置中性档（specs.NEUTRAL_DEFAULTS）> dataclass
+      默认组装。
+    顶层旧字段 run_preset（预设已全砍）带了也容忍并忽略。
     """
     from ..strategies.specs import validate_params
 
@@ -203,10 +207,8 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg,
         run_mode = normalize_run_mode(task_cfg.get("run_mode"))
     except ValueError as e:
         raise ValueError(f"任务 {name} 的 {e}") from e
-    try:
-        run_preset = normalize_run_preset(task_cfg.get("run_preset"))
-    except ValueError as e:
-        raise ValueError(f"任务 {name} 的 {e}") from e
+    # run_preset：第十二轮预设全砍，老任务带了容忍并忽略（不读、
+    # 不校验、保存时由上层丢弃），不再有 normalize_run_preset
     amount_raw = task_cfg.get("amount_usd")
     if amount_raw is None:
         amount_usd = None
@@ -271,6 +273,18 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg,
             params_raw.pop("min_entry_edge_bps_per_hour", None)
         params_raw.pop("exit_edge_bps_per_hour", None)
         params_raw.pop("max_hold_seconds", None)
+    # 保证金换算（第十二轮）：资金费给了顶层 amount_usd（保证金）
+    # 且 params 没实填 notional_usd 时，单边名义 notional_usd =
+    # 保证金 × 杠杆（杠杆取 params 实填，缺省 CarryParams 默认
+    # 6），校验前注入——面板任务的 params 不再单独带
+    # notional_usd；params 实填了 notional_usd 的以实填为准
+    if stype == "funding_carry" and amount_usd is not None \
+            and params_raw.get("notional_usd") is None:
+        try:
+            lev = float(params_raw.get("leverage", 6.0))
+        except (TypeError, ValueError):
+            lev = 6.0   # 杠杆本身非法时校验会在后面逐项报错
+        params_raw["notional_usd"] = amount_usd * lev
     # 参数校验走 strategies.specs 的单一事实源（与面板表单同一份
     # 规格）：未知字段/缺必填/类型不符都在这里逐项报错
     clean = validate_params(str(stype), params_raw) \
@@ -289,9 +303,10 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg,
             risk_cfg=risk_cfg, owner=name, scanner=scanner,
             selection_scope="pair" if run_mode == "semi_auto"
             else "all_pairs",
-            run_preset=run_preset, amount_usd=amount_usd)
+            amount_usd=amount_usd)
     else:
-        runtime = build_runtime(stype, clean, executor, risk_cfg, name)
+        runtime = build_runtime(stype, clean, executor, risk_cfg, name,
+                                amount_usd=amount_usd)
         if run_mode == "manual":
             # 自主模式：只跑一笔 + 立即开仓语义（manual_immediate，
             # 各策略 tick 内实现）；安全平仓置 cycle_done 后引擎
@@ -304,9 +319,12 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg,
                     "不按 reopen 参数自动重开")
         # semi_fixed：什么都不设——策略原生循环，carry 的
         # reopen 用用户原值，premium/grid 原生节奏
+    # 金额语义（第十二轮，用户定版）：amount_usd 一律按保证金
+    # 解释——老任务数值不变、直接按保证金算仓位，不加任何
+    # 提示事件或标记（用户明确不要复核提示）；新语义写在使用
+    # 说明里
     return Task(name=name, strategy_type=str(stype), runtime=runtime,
-                run_mode=run_mode, run_preset=run_preset,
-                amount_usd=amount_usd)
+                run_mode=run_mode, amount_usd=amount_usd)
 
 
 @dataclass

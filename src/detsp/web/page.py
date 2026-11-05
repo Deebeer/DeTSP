@@ -1,9 +1,13 @@
 """面板单页 HTML（内嵌，无外部资源依赖）。
 
 布局（用户定版）：左侧窄边栏 + 主区域分页，不整页刷新。边栏自上
-而下共 6 项：总览 / 中性网格 / 溢价套利 / 资金费套利 /
-策略记录 / 设置——没有账本页、没有独立「数据」页，
-也没有通用新建任务入口：新建任务只能从各策略页发起。
+而下共 7 项：总览 / 中性网格 / 溢价套利 / 资金费套利 /
+策略记录 / 数据库 / 设置——没有账本页，也没有通用新建
+任务入口：新建任务只能从各策略页发起。「数据库」页（第十二
+轮新增，在设置上面）放数据服务（中枢库 / 费差库的运行状态、
+条目数、更新时间与启停）；设置页只留密钥。费率不再有可编辑
+表：全所统一内置默认（taker 5 / maker 2 bps，core.fee_table
+常量）。
 
 总览（顺序定版）：页头三行——标题「总览」→ 安全警告（原文）
 → 运行状态与全局停机按钮同一行；其后是今日与累计两行统计
@@ -17,38 +21,41 @@ Top 5 合并、按机会值 % 降序，点行跳策略页并带入两腿与
 仓位历史按平仓时间倒序，历史由后端追踪仓位消失落库）。
 
 每个策略页同构，由通用渲染器按 /api/strategy-specs 的规格
-（含 page 元数据：两腿字段、主金额、primary、预设三档、运作
-方式文案）生成，第十一轮起分区顺序统一为：页头（策略名 +
-说明 + 「运作方式」折叠）→ 运行模式 → 选择两腿 → 仓位设置 →
-策略配置 → 更多配置（折叠）→ 交易预览。字段按 specs 的
-field.zone 分区渲染（legs/position/config/more，hidden 不
-渲染）；specs 尚未带 zone 时回退旧渲染（配置区按五段 section
-组织、再无 section 时走 primary + adv_group 分组），不白屏。
+（含 page 元数据：两腿字段、primary、内置中性档、运作方式
+文案）生成，分区顺序统一为：页头（策略名 + 说明 + 「运作
+方式」折叠）→ 运行模式 → 选择两腿 → 仓位设置 → 策略配置 →
+更多配置（折叠）→ 交易预览。字段按 specs 的 field.zone
+分区渲染（legs/position/config/more，hidden 不渲染；
+derived_fields 组装派生、面板不渲染输入框）；specs 尚未带
+zone 时回退旧渲染（配置区按五段 section 组织、再无 section
+时走 primary + adv_group 分组），不白屏。
 运行模式用 page.run_modes 的显示名渲染（中性网格只有「自主」
 一项时不渲染切换器、只显示静态文字；溢价/资金费三档为
 固腿固标 semi_fixed / 固腿优标 semi_auto / 优腿优标
 full_auto；旧值 auto 按 semi_auto 处理；semi_auto 时仓位设置
 的币种下拉禁用并注明由系统自动选标，full_auto 时隐藏选择
-两腿、只留金额 + 风险档 + 系统参数只读展示，提交带 run_mode
-（full_auto 另带 run_preset，网格另带 amount_usd），任务列表
-与策略记录的任务名带模式徽标、自动选标类任务显示当前标的
-与已循环轮数）。选择两腿：先选两所，每行带该所可用余额与
-该标的最高杠杆/保证金模式，下带配对统计行「共同 N · A所
-上市 X · B所上市 Y」、所选标的在两腿的实际价格行与「标的
-数据」指标条（按策略列资金费/费差/年化、价差、波动与 24h
-高低等关键指标）。仓位设置：一行放币种下拉 + 单边金额（自由
-输入；网格是目标总名义，反推每格量）+ 两腿杠杆。策略配置：
-保守/中性/激进/自定义预设 + zone=config 的正面字段（第十轮
-五段的 section_summaries 总结句在回退渲染时保留）；预设只套
-结构参数、绝不改用户填的金额，金额派生量按比例换算。溢价
-中枢/上带/下带接中枢库（/api/libraries）：自动选标类模式下
-只读、无库条目时提示需录制满 3 小时；固腿固标可改、有库值
-时自动填入且不冲掉用户已改的值。资金费仓位设置下方有一行
-费差库信息（中位持续/平均费差/预计回本/样本）。交易预览
-（按平台分列标记价/预估执行价/所需保证金 + 入场条件指示 +
-所填杠杆超过某所该标的上限时的黄色警告）→ 运行按钮 →
-运行中仓位（本策略任务与持仓，含启停改删/平仓）。运行中的
-全部仓位在策略页与策略记录页双处可见。
+两腿、只留保证金 + 系统参数只读展示，提交带 run_mode 与
+顶层 amount_usd（保证金），任务列表与策略记录的任务名带
+模式徽标、自动选标类任务显示当前标的与已循环轮数）。
+第十二轮定版：预设已全砍（优腿优标没填的参数按内置中性档
+补，specs.NEUTRAL_DEFAULTS）。
+选择两腿（第十二轮瘦身）：只剩两个场所下拉（其余统计/价格/
+杠杆信息全挪进仓位设置）。仓位设置从上到下：配对统计行
+「共同 N · A所上市 X · B所上市 Y」→ 币种下拉 + 保证金输入框
+→ 两腿杠杆（每腿输入框上方一行「场所名 · 最高杠杆 · 保证金
+模式」，如 entropy · 15x · 逐仓 only）→ 数据块两行（两腿价 +
+价差 / 两腿资金费）。金额语义（第十二轮）：仓位设置填的是
+保证金（USD），仓位名义 = 保证金 × 基准腿杠杆（网格为网格
+腿杠杆），对冲腿开相同名义、其实际占用保证金 = 名义 ÷ 对冲
+腿杠杆，在预览与保证金行旁列清；网格按总名义反推每格量。
+溢价中枢/上带/下带接中枢库（/api/libraries）：自动选标类
+模式下只读、无库条目时提示需录制满 3 小时；固腿固标可改、
+有库值时自动填入且不冲掉用户已改的值。资金费仓位设置下方
+有一行费差库信息（中位持续/平均费差/预计回本/样本）。交易
+预览（按平台分列标记价/预估执行价/名义/占用保证金 + 入场
+条件指示 + 所填杠杆超过某所该标的上限时的黄色警告）→ 运行
+按钮 → 运行中仓位（本策略任务与持仓，含启停改删/平仓）。
+运行中的全部仓位在策略页与策略记录页双处可见。
 
 数据实时性：策略页打开期间 pairs 每 20 秒自动重拉（与扫描
 缓存对齐），排序/预览/腿数量随新数据重算，已选标的与表单
@@ -175,6 +182,8 @@ details div{font-size:12px;padding:6px 4px;line-height:1.8}
 .sec input{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:5px 8px;width:100%;box-sizing:border-box;margin-top:3px;font:inherit}
 .pairPrices{margin-top:8px}
 .gridSug{margin-top:10px}
+.levInfo{font-size:12px;color:var(--mut);margin:10px 0 0}
+.posData{margin-top:12px}
 .symData{margin-top:8px;font-size:12px;line-height:1.7}
 .symData .sdT{color:var(--bright)}
 .symData .sdLab{color:var(--mut)}
@@ -197,6 +206,7 @@ details.cfgSec summary{cursor:pointer;color:var(--bright);font-size:12px;letter-
 <button data-page="strat-premium_arb">溢价套利</button>
 <button data-page="strat-funding_carry">资金费套利</button>
 <button data-page="records">策略记录</button>
+<button data-page="database">数据库</button>
 <div class="sideSep"></div>
 <button data-page="settings">设置</button>
 <p class="sideNote">新建任务只能从各策略页发起；
@@ -251,14 +261,18 @@ token 校验（防跨站借道），但<b>不等于登录鉴权</b>：不要改�
 <div id="secGroups"></div>
 <p><button id="secSave">保存密钥设置</button>
 <span id="secMsg" class="ok"></span></p>
-<h3>场所费率表</h3>
-<p class="muted">7 个场所每所的 taker（吃单）/ maker（挂单）费率，单位 bps；
-中枢库/费差库的回本与门槛计算共用这张表。逐所填写后点保存（逐所提交）。</p>
-<div id="feeTable"></div>
-<p><button id="feeSave">保存费率表</button>
-<span id="feeMsg" class="ok"></span></p>
+</section>
+
+<section class="page" id="page-database">
+<h2>数据库</h2>
+<p class="muted">中枢库（溢价套利的中枢/入场带）与费差库（资金费的持续性
+统计）共用同一条录制流水线：随面板启动自动录制，也可在这里手动启停。
+费率不用在这里维护：全所统一内置默认（taker 5 / maker 2 bps）。</p>
 <h3>数据服务</h3>
 <div id="libStatus"><p class="muted">数据服务状态加载中…</p></div>
+<p><button id="libStart">启动数据服务</button>
+<button id="libStop">停止数据服务</button>
+<span id="libMsg" class="ok"></span></p>
 </section>
 
 </main>
@@ -431,24 +445,18 @@ S.spec.fields.forEach(f=>{if(f.default!=null) values[f.name]=f.default});
 Object.assign(values, collectFrom(S.root, S.spec));
 return values;
 }
-// 全自动的总结句/只读参数取值：该档预设（page.presets）合并
-// Params 默认，金额派生量与 applyPreset 同口径按比例换算
-function mergedPresetValues(S){
+// 全自动的总结句/只读参数取值：内置中性档（page.neutral_
+// defaults，第十二轮取代预设）合并 Params 默认
+function mergedAutoValues(S){
 const values={};
 S.spec.fields.forEach(f=>{if(f.default!=null) values[f.name]=f.default});
-Object.assign(values, (S.spec.page.presets||{})[S.runPreset||"neutral"]||{});
-const ratios=S.spec.page.amount_ratios||{}, amtField=S.spec.page.amount;
-for(const fname in ratios){
-const ratio=(ratios[fname]||{})[S.runPreset||"neutral"];
-const amt=amtField?numField(S, amtField):null;
-if(ratio!=null&&amt!=null) values[fname]=Math.round(amt*ratio*100)/100;
-}
+Object.assign(values, S.spec.page.neutral_defaults||{});
 return values;
 }
 function updateSectionSummaries(st){
 const S=SPAGES[st]; if(!S) return;
 const sums=(S.spec.page&&S.spec.page.section_summaries)||{};
-const vals=S.runMode==="full_auto"?mergedPresetValues(S):currentFormValues(S);
+const vals=S.runMode==="full_auto"?mergedAutoValues(S):currentFormValues(S);
 S.root.querySelectorAll("[data-sec-summary]").forEach(el=>{
 if(el.closest(".fullAutoCfg")) return;   // 全自动区自己渲染
 const sec=el.getAttribute("data-sec-summary"), tpl=sums[sec];
@@ -462,7 +470,7 @@ function renderFullAutoCfg(st, valsOpt, sumsOpt){
 const S=SPAGES[st]; if(!S) return;
 const sums=sumsOpt||(S.spec.page&&S.spec.page.section_summaries)||{};
 const box=S.root.querySelector(".fullAutoSums"); if(!box) return;
-const vals=valsOpt||mergedPresetValues(S);
+const vals=valsOpt||mergedAutoValues(S);
 box.innerHTML=["开仓条件","平仓条件","平仓后怎么办","保护"].map(sec=>{
 const tpl=sums[sec]; if(!tpl) return "";
 return '<p class="secSummary">'+esc(sec)+"："+
@@ -477,7 +485,11 @@ esc(f.label)+"："+esc(formatSummaryValue(S.spec, f.name, vals[f.name]))
 function buildForm(st, values){
 const spec=specOf(st); if(!spec){$("#mForm").innerHTML="";return}
 $("#mBlurb").textContent=spec.blurb||"";
-$("#mForm").innerHTML=fieldsHtml(spec.fields, values, false);
+// 组装派生字段（如溢价单笔上限）不渲染输入框：它由「单笔上
+// 限占最大持仓 %」在组装时算出，弹窗里改它会被覆盖
+const derived=(spec.page&&spec.page.derived_fields)||[];
+$("#mForm").innerHTML=fieldsHtml(
+spec.fields.filter(f=>derived.indexOf(f.name)<0), values, false);
 }
 
 // 从容器内按规格收集参数（弹窗与策略页共用同一口径）
@@ -751,7 +763,8 @@ document.querySelectorAll("#sidebar button[data-page]").forEach(b=>b.classList.t
 document.querySelectorAll(".page").forEach(p=>p.classList.toggle("on",p.id==="page-"+name));
 if(name.indexOf("strat-")===0){const st=name.slice(6); if(SPAGES[st]) loadPairs(st)}
 if(name==="overview"){loadBest()}
-if(name==="settings"){if(!SECLOADED) loadSecrets(); loadFees(); loadLibraryStatus()}
+if(name==="settings"){if(!SECLOADED) loadSecrets()}
+if(name==="database"){loadLibraryStatus()}
 }
 document.querySelectorAll("#sidebar button[data-page]").forEach(b=>b.addEventListener("click",()=>switchPage(b.dataset.page)));
 
@@ -816,21 +829,25 @@ if(!root) return;
 const amtField=pg.amount?fieldOf(spec, pg.amount):null;
 const primaryRest=spec.fields.filter(f=>f.primary&&pg.venue_fields.indexOf(f.name)<0&&f.name!=="symbol"&&f.name!==pg.amount);
 const advanced=spec.fields.filter(f=>!f.primary&&pg.venue_fields.indexOf(f.name)<0);
-// 分区（第十一轮）：字段按 zone 分组——legs=选择两腿（场所
-// 下拉专用渲染）、position=仓位设置（symbol/金额专用渲染 +
-// 其余 position 字段如两腿杠杆）、config=策略配置、more=更多
-// 配置（折叠）、hidden=系统值不渲染。specs 未带 zone 时回退
-// 旧口径：配置区字段 = 非两腿/非 symbol/非金额的全部字段，
-// 按五段 section 渲染（或再回退 legacy 分组），position 区
-// 只放 symbol + 金额。
+// 分区：字段按 zone 分组——legs=选择两腿（场所下拉专用渲
+// 染）、position=仓位设置（symbol/保证金专用渲染 + 统计行 +
+// 两腿杠杆 + 其余 position 字段 + 数据块）、config=策略配置、
+// more=更多配置（折叠）、hidden=系统值不渲染；page.derived_
+// fields 是组装派生字段（单笔上限），任何区都不渲染输入框。
+// specs 未带 zone 时回退旧口径：配置区字段 = 非两腿/非
+// symbol/非金额的全部字段，按五段 section 渲染（或再回退
+// legacy 分组），position 区只放 symbol + 保证金。
 const runModes=(pg.run_modes&&pg.run_modes.length)?pg.run_modes:defaultRunModes(st);
 const initialMode=runModes[0].value;
 const hasZone=spec.fields.some(f=>f.zone);
-let positionFields=[], configFields, moreFields=[];
+const derivedFields=pg.derived_fields||[];
+let positionFields=[], configFields, moreFields=[], levFields=[], posPlainFields=[];
 if(hasZone){
-positionFields=spec.fields.filter(f=>f.zone==="position"&&pg.venue_fields.indexOf(f.name)<0&&f.name!=="symbol"&&f.name!==pg.amount);
-configFields=spec.fields.filter(f=>f.zone==="config");
-moreFields=spec.fields.filter(f=>f.zone==="more");
+positionFields=spec.fields.filter(f=>f.zone==="position"&&pg.venue_fields.indexOf(f.name)<0&&f.name!=="symbol"&&f.name!==pg.amount&&derivedFields.indexOf(f.name)<0);
+levFields=positionFields.filter(f=>f.name.indexOf("leverage")===0);
+posPlainFields=positionFields.filter(f=>f.name.indexOf("leverage")!==0);
+configFields=spec.fields.filter(f=>f.zone==="config"&&derivedFields.indexOf(f.name)<0);
+moreFields=spec.fields.filter(f=>f.zone==="more"&&derivedFields.indexOf(f.name)<0);
 }else{
 configFields=spec.fields.filter(f=>isConfigField(spec, f));
 }
@@ -844,27 +861,45 @@ moreBlockHtml='<details class="block moreBlock"><summary>更多配置</summary>'
 const secHtml=sectionsHtml(spec, configFields);
 configInner=secHtml!==null?secHtml:legacyConfigHtml(primaryRest, advanced);
 }
-const runPresetBtns=["conservative","neutral","aggressive"].map(k=>
-'<button data-run-preset="'+k+'"'+(k==="neutral"?' class="on"':"")+">"+
-({conservative:"保守",neutral:"中性",aggressive:"激进"})[k]+"</button>").join("");
 const steps=(pg.how_it_works||[]).map(s=>"<li>"+esc(s)+"</li>").join("");
-const amtHtml=amtField
-? '<div class="amtRow"><div class="amtMain">'+renderField(amtField, amtField.default, false, pg.amount_desc||"")+"</div></div>"
-: '<div class="amtRow"><div class="amtMain"><label class="fld"><span class="fname">目标总名义</span><span class="fdesc">自由填写（USD）</span>'+
-'<input type="number" step="any" class="gridTotalInp" placeholder="如 1000"></label></div>'+
-'<span class="muted gridAmtInfo"></span></div>'+
-'<p class="muted">网格按总名义定仓：改这里会按网格腿现价反推每格量（在下方配置区）；反过来改每格量/格数，这里显示约合总名义。</p>';
+// 保证金输入框（三策略统一，第十二轮）：填的是保证金（USD），
+// 仓位名义 = 保证金 × 基准腿杠杆（网格为网格腿杠杆、资金费
+// 为单杠杆）；marginInfo 旁注实时显示派生名义与对冲腿占用
+const marginDesc={
+hedged_grid:"USD，仓位名义 = 保证金 × 网格腿杠杆",
+premium_arb:"USD，仓位名义 = 保证金 × 基准腿杠杆",
+funding_carry:"USD，仓位名义 = 保证金 × 杠杆"}[st]||"USD（保证金）";
+const marginHtml='<div class="amtRow"><div class="amtMain"><label class="fld">'+
+'<span class="fname">保证金</span><span class="fdesc">'+esc(marginDesc)+"</span>"+
+'<input type="number" step="any" min="0" class="marginInp" placeholder="如 100"></label></div>'+
+'<span class="muted marginInfo"></span></div>'+
+(st==="hedged_grid"
+? '<p class="muted">网格总名义 = 保证金 × 网格腿杠杆，用作网格资金上限：改保证金会按网格腿现价反推每格量（在下方配置区）；反过来改每格量/格数，这里显示约合保证金。</p>'
+: "");
+// 两腿杠杆区：每腿杠杆输入框上方一行 levInfo（「场所名 ·
+// 最高杠杆 · 保证金模式」，renderLegs 随数据刷新填）；资金费
+// 是单杠杆字段，两腿共用，两行 levInfo 一起标
+let levAreaHtml="";
+if(levFields.length){
+levAreaHtml='<div class="positionFields">';
+if(levFields.length===1){
+levAreaHtml+='<div class="levInfo" data-levinfo-leg="0"></div>'+
+'<div class="levInfo" data-levinfo-leg="1"></div>'+
+renderField(levFields[0], levFields[0].default, false);
+}else{
+levFields.forEach((f,i)=>{levAreaHtml+=
+'<div class="levInfo" data-levinfo-leg="'+i+'"></div>'+
+renderField(f, f.default, false)});
+}
+levAreaHtml+="</div>";
+}
+const posPlainHtml=posPlainFields.length
+? '<div class="pform positionFields">'+posPlainFields.map(f=>renderField(f,f.default,false)).join("")+"</div>"
+: "";
+// 选择两腿（第十二轮瘦身）：只剩两个场所下拉
 const legRow=idx=>
 '<div class="legRow"><span class="legLab">'+esc(pg.venue_labels[idx])+'</span>'+
-'<select class="vSel" data-leg="'+idx+'"></select>'+
-'<span class="dirB" data-dir="'+idx+'">-</span>'+
-'<span class="muted">金额 $</span><input class="legAmt" data-legamt="'+idx+'" readonly>'+
-'<span class="muted">数量</span><span data-legqty="'+idx+'">-</span>'+
-'<span class="legBal" data-legbal="'+idx+'">可用 —</span>'+
-'<span class="legLev" data-leglev="'+idx+'"></span></div>';
-const presetBtns=["conservative","neutral","aggressive","custom"].map(k=>
-'<button data-preset="'+k+'"'+(k==="neutral"?' class="on"':"")+">"+
-({conservative:"保守",neutral:"中性",aggressive:"激进",custom:"自定义"})[k]+"</button>").join("");
+'<select class="vSel" data-leg="'+idx+'"></select></div>';
 root.innerHTML=
 "<h2>"+esc(spec.title)+'</h2><p class="muted">'+esc(spec.blurb)+"</p>"+
 '<details class="block howBox"><summary>运作方式</summary><ol>'+steps+"</ol></details>"+
@@ -872,34 +907,28 @@ root.innerHTML=
 '<div class="modeRow"><button data-mode="manual" class="on">自主</button><button data-mode="semi_fixed">半自动·固定标的</button><button data-mode="semi_auto">半自动·自动选标</button><button data-mode="full_auto">全自动</button></div>'+
 '<p class="muted modeStatic" style="display:none"></p>'+
 '<p class="muted modeDesc"></p></div>'+
-'<div class="block fullAutoNote" style="display:none"><p class="muted">全自动：两腿和标的都由系统选，你只选策略、在下面填金额、选风险档。</p></div>'+
+'<div class="block fullAutoNote" style="display:none"><p class="muted">全自动：两腿和标的都由系统选，你只选策略、在下面填保证金。</p></div>'+
 '<div class="block legsBlock"><span class="upd pairsUpd"></span><h3>选择两腿</h3><div class="legs">'+legRow(0)+legRow(1)+"</div>"+
-'<p class="muted">先选两所：这里会列出这两所共同上市的全部标的并按策略排序。方向由所选标的的机会自动定；金额与仓位设置的主金额联动（两腿自动配平，只读），数量按现价实时换算；每条腿下方显示该所可用余额（权益）与该标的在该所的最高杠杆/保证金模式（各所各标的不同、有的仅逐仓；未知则显示未知），随数据刷新更新。</p>'+
-'<div class="pairsStats muted"></div>'+
-'<div class="pairPrices muted"></div>'+
-'<div class="symData"></div>'+
-'<p class="bad listNote"></p><div class="gridSug"></div></div>'+
+'<p class="muted">先选两所：系统会列出这两所共同上市的全部标的并按策略排序（统计与数据在下面「仓位设置」里）。方向由所选标的的机会自动定。</p>'+
+'<p class="bad listNote"></p></div>'+
 '<div class="block positionBlock"><h3>仓位设置</h3>'+
+'<div class="pairsStats muted"></div>'+
 '<p class="muted autoPickNote" style="display:none">半自动·自动选标：标的由系统自动选——每轮开仓都按当前策略口径重新选排第一的共同标的，下方下拉不用选。</p>'+
 '<div class="symWrap"><label>币种 <select class="symSel" data-f="symbol"></select></label></div>'+
-amtHtml+
-(positionFields.length?'<div class="pform positionFields">'+positionFields.map(f=>renderField(f,f.default,false)).join("")+"</div>":"")+
-'<div class="fundingLibInfo muted"></div></div>'+
+marginHtml+levAreaHtml+posPlainHtml+
+'<div class="symData posData"></div>'+
+'<div class="fundingLibInfo muted"></div><div class="gridSug"></div></div>'+
 '<div class="block configBlock"><h3>策略配置</h3>'+
 '<div class="configFields">'+
-'<p class="muted">先在「仓位设置」区填好金额，再点预设：只套结构参数（杠杆/门槛/格数等），金额不改（中性 = 原仓对齐默认值）；改动任何字段自动切到「自定义」。'+(hasZone?"正面只放核心字段，其余在下方「更多配置」里。":"配置按五段排：交易对象 / 开仓条件 / 平仓条件 / 平仓后怎么办 / 保护，每段标题下有一句随你填写实时变化的总结。")+'</p>'+
-'<div class="presetRow"><span class="muted">预设：</span>'+
-presetBtns+"</div>"+
+'<p class="muted">正面只放核心字段，其余在下方「更多配置」里。'+(hasZone?"":"配置按五段排：交易对象 / 开仓条件 / 平仓条件 / 平仓后怎么办 / 保护，每段标题下有一句随你填写实时变化的总结。")+'</p>'+
 (pg.note?'<p class="muted">'+esc(pg.note)+"</p>":"")+
 configInner+'<p class="muted libNote" style="display:none"></p></div>'+
 '<div class="fullAutoCfg" style="display:none">'+
-'<p class="muted">全自动只定这三样：策略（本页）、金额（上面「仓位设置」区）、风险档（下面三档）。两腿、标的和其余参数都由系统按风险档定。</p>'+
-'<div class="presetRow runPresetRow"><span class="muted">风险档：</span>'+
-runPresetBtns+"</div>"+
+'<p class="muted">全自动只定这两样：策略（本页）和保证金（上面「仓位设置」区）。两腿、标的和其余参数都由系统按内置中性档定。</p>'+
 '<div class="fullAutoSums"></div>'+
 '<details class="fullAutoParams"><summary>看系统用的参数</summary>'+
 '<div class="faParams muted"></div>'+
-'<p class="muted">只读展示这一档实际会用的参数（预设合并默认值）。要改参数请切到半自动。</p></details></div></div>'+
+'<p class="muted">只读展示实际会用的参数（内置中性档合并默认值）。要改参数请切到半自动。</p></details></div></div>'+
 moreBlockHtml+
 '<div class="block"><span class="upd prevUpd"></span><h3>交易预览</h3><div class="preview"><p class="muted">加载中…</p></div></div>'+
 '<div class="block"><p class="bad runErr"></p><p class="runWarn" style="color:var(--yel)"></p>'+
@@ -908,15 +937,14 @@ moreBlockHtml+
 '<div class="block"><h3>运行中仓位</h3><table class="ttasks"><thead><tr>'+
 "<th>名称</th><th>标的</th><th>来源</th><th>状态</th><th>持仓</th><th>今日成交</th><th>最近错误</th><th>操作</th>"+
 '</tr></thead><tbody></tbody></table></div>';
-const S={spec:spec, root:root, runMode:initialMode, runModes:runModes, libEdited:{}, runPreset:"neutral", selSymbol:"", candles:{}, candleFetching:{},
+const S={spec:spec, root:root, runMode:initialMode, runModes:runModes, libEdited:{}, selSymbol:"", candles:{}, candleFetching:{},
 pairsRows:[], pairsMeta:null, pairKey:"", pairSeq:0, pairsStale:false,
 totalManual:false,
-pendingSymbol:"", pendingPrefill:null, presetName:"neutral", applying:false,
+pendingSymbol:"", pendingPrefill:null, applying:false,
 vA:root.querySelector('[data-leg="0"]'), vB:root.querySelector('[data-leg="1"]'),
 symSel:root.querySelector(".symSel"),
 pairsStats:root.querySelector(".pairsStats"),
-pairPrices:root.querySelector(".pairPrices"),
-symData:root.querySelector(".symData"),
+posData:root.querySelector(".posData"),
 pairsUpd:root.querySelector(".pairsUpd"),
 prevUpd:root.querySelector(".prevUpd"),
 listNote:root.querySelector(".listNote"),
@@ -931,19 +959,16 @@ if(VENUES.length>1) S.vB.selectedIndex=1;
 const onVenue=()=>{S.pendingSymbol=pageSymbol(S); S.libEdited={}; loadPairs(st)};
 S.vA.addEventListener("change",onVenue);
 S.vB.addEventListener("change",onVenue);
-S.symSel.addEventListener("change",()=>{S.selSymbol=S.symSel.value; S.libEdited={}; renderPairPrices(st); renderSymData(st); renderLegs(st); renderPreview(st); updateGridSug(st); syncGridTotal(st); loadPremiumEntry(st); loadFundingInfo(st)});
-root.querySelectorAll("[data-preset]").forEach(b=>b.addEventListener("click",()=>applyPreset(st, b.dataset.preset)));
-root.querySelectorAll("[data-run-preset]").forEach(b=>b.addEventListener("click",()=>setRunPreset(st, b.dataset.runPreset)));
+S.symSel.addEventListener("change",()=>{S.selSymbol=S.symSel.value; S.libEdited={}; renderPosData(st); renderLegs(st); renderPreview(st); updateGridSug(st); syncGridMargin(st); loadPremiumEntry(st); loadFundingInfo(st)});
 root.querySelectorAll("[data-mode]").forEach(b=>b.addEventListener("click",()=>setRunMode(st, b.dataset.mode)));
 applyRunModeButtons(S);
 setRunMode(st, initialMode);
-const gt=root.querySelector(".gridTotalInp");
-if(gt) gt.addEventListener("input",()=>{S.totalManual=true; gridTotalToQty(st)});
+const mi=root.querySelector(".marginInp");
+if(mi) mi.addEventListener("input",()=>{S.totalManual=true; if(st==="hedged_grid") gridMarginToQty(st); renderLegs(st); renderPreview(st)});
 root.addEventListener("input",e=>{
 if(e.target.dataset&&e.target.dataset.libField&&(S.runMode==="semi_fixed"||S.runMode==="manual"))
 S.libEdited[e.target.dataset.libField]=true;   // 固腿固标手改的中枢值：刷新不冲掉
 if(e.target.dataset&&["qty_per_grid","grid_count"].indexOf(e.target.dataset.f)>=0) S.totalManual=false;
-if(!S.applying&&(e.target.closest(".pform")||e.target.closest(".aform")||e.target.closest(".amtRow"))) markCustom(st);
 updateSectionSummaries(st);
 renderLegs(st); renderPreview(st);
 });
@@ -967,6 +992,14 @@ const f=fieldOf(S.spec, name);
 return f?f.default:null;
 }
 
+// 保证金输入框（三策略统一，第十二轮）：仓位设置里填的保证金
+// （USD）；没填/非法按 0。仓位名义 = 保证金 × 基准腿杠杆
+function marginOf(S){
+const el=S.root.querySelector(".marginInp");
+if(!el||el.value==="") return 0;
+const v=Number(el.value); return isNaN(v)?0:v;
+}
+
 // ---------- 运行模式（第十轮：四值三模式） ----------
 // manual 自主 / semi_fixed 半自动·固定标的 / semi_auto 半自动·
 // 自动选标 / full_auto 全自动；旧值 auto 一律归一为 semi_auto。
@@ -975,21 +1008,13 @@ const MODE_DESCS={
 manual:"自主：两腿、标的、金额都你定；点「开仓」立即开仓，平仓你手动点。",
 semi_fixed:"固腿固标（半自动·固定标的）：你定两腿/标的/金额和条件，系统在这个标的上按条件开仓→平仓→再开仓，循环到你停止。",
 semi_auto:"固腿优标（半自动·自动选标）：你定两腿/金额和条件，每轮系统重新选标，自动开仓→平仓→再选标，循环到你停止。",
-full_auto:"优腿优标（全自动）：只选策略、金额和风险档，两腿/标的/参数系统全定，循环到你停止。"};
+full_auto:"优腿优标（全自动）：只选策略和保证金，两腿/标的/参数系统全定（没填的参数按内置中性档），循环到你停止。"};
 const MODE_BADGE_LABELS={manual:"自主",semi_fixed:"固腿固标",
 semi_auto:"固腿优标",full_auto:"优腿优标"};
-const RUN_PRESET_LABELS={conservative:"保守",neutral:"中性",aggressive:"激进"};
 function normalizeModeClient(mode){
 if(mode==="auto") return "semi_auto";
 return ["manual","semi_fixed","semi_auto","full_auto"].indexOf(mode)>=0
 ?mode:"manual";
-}
-function setRunPreset(st, name){
-const S=SPAGES[st]; if(!S) return;
-S.runPreset=RUN_PRESET_LABELS[name]?name:"neutral";
-S.root.querySelectorAll("[data-run-preset]").forEach(b=>
-b.classList.toggle("on", b.dataset.runPreset===S.runPreset));
-updateSectionSummaries(st);
 }
 // manual 隐藏开/平/平仓后三段；网格例外（最终做法）：网格的
 // out_of_range_action 是唯一退出方式，给它的字段打了
@@ -1056,14 +1081,12 @@ renderPreview(st);
 applyPremiumEntry(st);   // 模式变了：中枢三字段的只读/回填口径跟着变
 }
 // 任务的模式徽标（任务列表与策略记录共用）：四值文案；旧值
-// auto 显示为半自动·自动选标；全自动另带风险档中文
+// auto 显示为固腿优标
 function modeBadge(name){
 const t=TASKS.find(x=>x.name===name);
 if(!t) return "";
 const mode=normalizeModeClient(t.run_mode);
-let txt=MODE_BADGE_LABELS[mode]||"自主";
-if(mode==="full_auto")
-txt+=" · "+(RUN_PRESET_LABELS[t.run_preset]||"中性");
+const txt=MODE_BADGE_LABELS[mode]||"自主";
 return ' <span class="tag">'+esc(txt)+"</span>";
 }
 
@@ -1202,79 +1225,50 @@ S.pairsStats.textContent="共同 "+(meta.common??"-")+" · "+S.vA.value+" 上市
 (meta.listed_a??"-")+" · "+S.vB.value+" 上市 "+(meta.listed_b??"-")+
 (rows.length!==(meta.common??rows.length)?" · 可交易 "+rows.length+" 个":"");
 setUpd(S.pairsUpd, meta.updated_at, S.pairsStale);
-renderPairPrices(st);
-renderSymData(st);
+renderPosData(st);
 const errs=meta.errors||{};
 const errTxt=Object.keys(errs).map(v=>v+" "+errs[v]).join("；");
 S.listNote.textContent=errTxt||(rows.length?"":"所选两所暂无共同上市标的，换一对场所试试。");
 if(S.pendingPrefill){applyPrefill(S.root, S.pendingPrefill); S.pendingPrefill=null}
 updateSectionSummaries(st);
-renderLegs(st); renderPreview(st); updateGridSug(st); syncGridTotal(st);
+renderLegs(st); renderPreview(st); updateGridSug(st); syncGridMargin(st);
 loadPremiumEntry(st); loadFundingInfo(st);
 }
 
-// 选市场价格行（定版格式）：所选标的在两腿的实际价格 + 口径，
-// 随选币与 pairs 刷新（20 秒）更新；某腿无价显示「—」
-function renderPairPrices(st){
-const S=SPAGES[st]; if(!S||!S.pairPrices) return;
-const row=pairRow(st), kinds=(S.pairsMeta&&S.pairsMeta.price_kinds)||{};
-const va=S.vA.value, vb=S.vB.value;
+// 仓位设置数据块（第十二轮定版，两行）：第 1 行「数据：
+// 基准腿价：X · 对冲腿价：Y · 价差：+Z bps」、第 2 行「基准
+// 腿资金费：+A bps/时 · 对冲腿资金费：+B bps/时」；腿名用本
+// 页两腿标签，价差口径随策略（溢价用有符号价差，资金费/
+// 网格用价差），资金费页第 2 行末尾补费差。随选币与 pairs
+// 刷新（20 秒）更新；数据全部取 pairs 行的原始价格与资金
+// 费字段，口径逻辑不变，某项无数据显「—」
+function renderPosData(st){
+const S=SPAGES[st]; if(!S||!S.posData) return;
+const row=pairRow(st), pg=S.spec.page, kind=pg.opportunity;
 const px=x=>x==null?"—":fmt(x, x<10?4:2);
-if(!row){S.pairPrices.textContent="价格：暂无所选标的的价格"; return}
-let html="价格："+esc(va)+" "+px(row.price_a)+"（"+esc(kinds[va]||"价格")+"） · "+
-esc(vb)+" "+px(row.price_b)+"（"+esc(kinds[vb]||"价格")+"）";
-// 混口径/疑似同名标注从下拉移出，只在价格行末尾小字出现
-if(row.mixed) html+=' <span class="tag">混口径，仅供参考</span>';
-if(row.suspect) html+=' <span class="tag">疑似同名不同资产</span>';
-S.pairPrices.innerHTML=html;
+const bpsH=x=>x==null?"—":((x>=0?"+":"")+fmt(x,3)+" bps/时");
+if(!row){
+S.posData.innerHTML='<span class="sdT">数据</span>：暂无所选标的的数据';
+return;
 }
+const spreadVal=kind==="spread"?row.signed_spread_bps:row.spread_bps;
+let line1='<span class="sdT">数据</span>：'+
+'<span class="sdLab">'+esc(pg.venue_labels[0])+"价</span>："+px(row.price_a)+" · "+
+'<span class="sdLab">'+esc(pg.venue_labels[1])+"价</span>："+px(row.price_b)+" · "+
+'<span class="sdLab">价差</span>：'+(spreadVal==null?"—":((spreadVal>=0?"+":"")+fmt(spreadVal,2)+" bps"));
+if(row.suspect) line1+=' <span class="tag">疑似同名不同资产</span>';
+let line2='<span class="sdLab">'+esc(pg.venue_labels[0])+"资金费</span>："+bpsH(row.rate_a_bps_h)+" · "+
+'<span class="sdLab">'+esc(pg.venue_labels[1])+"资金费</span>："+bpsH(row.rate_b_bps_h);
+if(kind==="funding") line2+=' · <span class="sdLab">费差</span>：'+(row.edge_bps_h==null?"—":fmt(row.edge_bps_h,3)+" bps/时");
+S.posData.innerHTML=line1+"<br>"+line2;
+}
+// 旧名保留为转调（个别刷新路径仍以旧名触发）
+function renderPairPrices(st){ renderPosData(st); }
+function renderSymData(st){ renderPosData(st); }
 
 // 资金费口径的中文短名（pairs 行 rate_kind_* 原值的展示口径）
 function rateKindTxt(k){
 return {predicted:"预测", current:"当期", last_settled:"上期已结算"}[k]||"口径未知";
-}
-
-// 「标的数据」指标条：价格行下方一行小字，按策略列所选标的
-// 的关键指标，供填配置时参考——全部取自当前 pairs 行（网格
-// 的 24h 高低/建议区间取自 candles 缓存），不新增接口；随选
-// 币与 pairs 刷新（20 秒）更新，某项无数据显「—」
-function renderSymData(st){
-const S=SPAGES[st]; if(!S||!S.symData) return;
-const row=pairRow(st), kind=S.spec.page.opportunity;
-const px=x=>x==null?null:fmt(x, x<10?4:2);
-const bpsH=x=>x==null?null:((x>=0?"+":"")+fmt(x,3)+" bps/时");
-const items=[];
-if(!row){
-S.symData.innerHTML='<span class="sdT">标的数据</span>：暂无所选标的的数据';
-return;
-}
-if(kind==="funding"){
-items.push(["A腿资金费", row.rate_a_bps_h==null?null:
-bpsH(row.rate_a_bps_h)+"（"+rateKindTxt(row.rate_kind_a)+"）"]);
-items.push(["B腿资金费", row.rate_b_bps_h==null?null:
-bpsH(row.rate_b_bps_h)+"（"+rateKindTxt(row.rate_kind_b)+"）"]);
-items.push(["费差", row.edge_bps_h==null?null:fmt(row.edge_bps_h,3)+" bps/时"]);
-items.push(["预计年化", row.apr_pct==null?null:((row.apr_pct>=0?"+":"")+fmt(row.apr_pct,1)+"%")]);
-items.push(["价差", row.spread_bps==null?null:fmt(row.spread_bps,1)+" bps"]);
-}else if(kind==="spread"){
-items.push(["基准腿价", px(row.price_a)]);
-items.push(["对冲腿价", px(row.price_b)]);
-items.push(["价差", row.signed_spread_bps==null?null:
-((row.signed_spread_bps>=0?"+":"")+fmt(row.signed_spread_bps,2)+" bps")]);
-items.push(["基准腿资金费", bpsH(row.rate_a_bps_h)]);
-items.push(["对冲腿资金费", bpsH(row.rate_b_bps_h)]);
-}else{
-const cd=S.candles[S.vA.value+"|"+pageSymbol(S)], okC=!!(cd&&cd.ok);
-items.push(["现价", px(row.price_a)]);
-items.push(["日波动", row.volatility_pct==null?null:fmt(row.volatility_pct,2)+"%"]);
-items.push(["24h 高", okC?px(cd.high):null]);
-items.push(["24h 低", okC?px(cd.low):null]);
-items.push(["建议区间", okC?(px(cd.suggested_lower)+" ~ "+px(cd.suggested_upper)):null]);
-items.push(["网格腿资金费", bpsH(row.rate_a_bps_h)]);
-items.push(["对冲腿资金费", bpsH(row.rate_b_bps_h)]);
-}
-S.symData.innerHTML='<span class="sdT">标的数据</span>：'+items.map(([lab, v])=>
-'<span class="sdLab">'+esc(lab)+'</span>：'+(v==null?"—":esc(v))).join(" · ");
 }
 
 // 腿的杠杆行文案：最高杠杆 + 保证金模式（数据来自 pairs 行，
@@ -1304,44 +1298,18 @@ edge:row.edge_bps_h, mixed:!!row.mixed,
 longV:row.long_venue, shortV:row.short_venue};
 }
 
-// ---------- 配置预设（保守 / 中性 / 激进 / 自定义） ----------
-function setPresetUi(S, name){
-S.presetName=name;
-S.root.querySelectorAll("[data-preset]").forEach(b=>b.classList.toggle("on", b.dataset.preset===name));
-}
-function markCustom(st){
-const S=SPAGES[st];
-if(S&&S.presetName!=="custom") setPresetUi(S, "custom");
-}
-function applyPreset(st, name){
-const S=SPAGES[st]; if(!S) return;
-if(name==="custom"){setPresetUi(S, "custom"); return}
-const vals=(S.spec.page.presets||{})[name]; if(!vals) return;
-S.applying=true;
-applyPrefill(S.root, vals);
-// 预设只套结构参数，绝不改用户填的金额：金额派生量（溢价套利
-// 的单笔上限）按「当前主金额 × 档位比例」换算填入
-const ratios=S.spec.page.amount_ratios||{};
-const amtField=S.spec.page.amount;
-for(const fname in ratios){
-const ratio=(ratios[fname]||{})[name];
-const amt=amtField?numField(S, amtField):null;
-const el=S.root.querySelector('[data-f="'+fname+'"]');
-if(ratio!=null&&amt!=null&&el)
-el.value=Math.round(amt*ratio*100)/100;
-}
-S.applying=false;
-setPresetUi(S, name);
-updateSectionSummaries(st);
-renderLegs(st); renderPreview(st);
-}
+// （第十二轮：预设已全砍——不再有预设按钮与档位切换；优腿
+// 优标没填的参数由系统按内置中性档补。）
 
-// 网格金额：目标总名义 → 每格量（qty = 总名义 / (格数 × 参考价)，
-// 参考价优先网格腿现价，取不到用区间中价）；反向只更新约合显示
-function gridTotalToQty(st){
+// 网格保证金：总名义 = 保证金 × 网格腿杠杆 → 每格量（qty =
+// 总名义 / (格数 × 参考价)，参考价优先网格腿现价，取不到用
+// 区间中价）；反向只更新保证金输入框的约合显示
+function gridMarginToQty(st){
 const S=SPAGES[st]; if(!S) return;
-const inp=S.root.querySelector(".gridTotalInp"); if(!inp) return;
-const total=Number(inp.value); if(!(total>0)) return;
+const inp=S.root.querySelector(".marginInp"); if(!inp) return;
+const margin=Number(inp.value); if(!(margin>0)) return;
+const levGrid=numField(S,"leverage_grid")||1;
+const total=margin*levGrid;
 const row=pairRow(st);
 let price=row?row.price_a:null;
 if(!price){
@@ -1352,15 +1320,16 @@ const cnt=numField(S,"grid_count");
 const qEl=S.root.querySelector('[data-f="qty_per_grid"]');
 if(price&&cnt&&qEl) qEl.value=Number((total/(cnt*price)).toPrecision(6));
 }
-function syncGridTotal(st){
+function syncGridMargin(st){
 const S=SPAGES[st]; if(!S||st!=="hedged_grid") return;
-const inp=S.root.querySelector(".gridTotalInp"); if(!inp) return;
-if(S.totalManual) return;   // 用户手填过总名义：自动刷新不许冲掉
+const inp=S.root.querySelector(".marginInp"); if(!inp) return;
+if(S.totalManual) return;   // 用户手填过保证金：自动刷新不许冲掉
 const q=numField(S,"qty_per_grid"), cnt=numField(S,"grid_count");
+const levGrid=numField(S,"leverage_grid")||1;
 const row=pairRow(st);
 let px=row?row.price_a:null;
 if(!px){const lo=numField(S,"lower_price"), hi=numField(S,"upper_price"); if(lo&&hi) px=(lo+hi)/2}
-if(q&&cnt&&px) inp.value=Math.round(q*cnt*px*100)/100;
+if(q&&cnt&&px) inp.value=Math.round(q*cnt*px/levGrid*100)/100;
 }
 
 // 网格建议区间小提示（选市场区下方）：网格腿是 HL 家族时拉
@@ -1381,7 +1350,7 @@ S.gridSug.innerHTML='<span class="muted">近 24h 高 '+d4(cd.high)+" / 低 "+d4(
 '<button class="mini" data-sug="1">填入区间</button>';
 S.gridSug.querySelector("[data-sug]").addEventListener("click",()=>{
 applyPrefill(S.root, {lower_price:cd.suggested_lower, upper_price:cd.suggested_upper});
-markCustom(st); updateSectionSummaries(st); renderLegs(st); renderPreview(st);
+updateSectionSummaries(st); renderLegs(st); renderPreview(st);
 });
 }
 else if(cd){S.gridSug.innerHTML='<span class="muted">'+esc(cd.error||"无 K 线数据")+"</span>"}
@@ -1403,60 +1372,41 @@ updateGridSug(st);
 renderSymData(st);
 }
 
-// ---------- 订单腿（方向徽标 + 金额/数量联动） ----------
+// ---------- 仓位设置联动（杠杆信息行 + 保证金派生旁注） ----------
+// renderLegs 保持函数名（刷新/切标的/输入的公共调用点不变）：
+// 第十二轮起它负责仓位设置里的两处联动——每腿杠杆输入框上方
+// 的 levInfo 行（「场所名 · 最高杠杆 · 保证金模式」，随 pairs
+// 数据刷新）和保证金行旁的 marginInfo（派生名义与两腿占用
+// 保证金，预览里还有分列明细）
 function renderLegs(st){
-const S=SPAGES[st]; if(!S||!S.legsEl) return;
-const pg=S.spec.page, kind=pg.opportunity;
-const row=pairRow(st), pr=pairRates(st);
-const amt=pg.amount?numField(S, pg.amount):null;
+const S=SPAGES[st]; if(!S) return;
+const row=pairRow(st);
 [0,1].forEach(i=>{
+const el=S.root.querySelector('[data-levinfo-leg="'+i+'"]');
+if(!el) return;
 const vid=i===0?S.vA.value:S.vB.value;
-const price=row?(i===0?row.price_a:row.price_b):null;
-const dirEl=S.root.querySelector('[data-dir="'+i+'"]');
-const amtEl=S.root.querySelector('[data-legamt="'+i+'"]');
-const qtyEl=S.root.querySelector('[data-legqty="'+i+'"]');
-const balEl=S.root.querySelector('[data-legbal="'+i+'"]');
-if(balEl){
-const vv=LAST_OV?LAST_OV.venues.find(x=>x.venue_id===vid):null;
-balEl.textContent=(!vv||vv.available==null)?"可用 —"
-:("可用 $"+fmt(vv.available)+"（权益 $"+fmt(vv.equity)+"）"+
-(vv.mode==="paper"?" 模拟余额":""));
-}
-const levEl=S.root.querySelector('[data-leglev="'+i+'"]');
-if(levEl){
 const ml=row?(i===0?row.max_leverage_a:row.max_leverage_b):null;
 const mm=row?(i===0?row.margin_mode_a:row.margin_mode_b):"unknown";
-levEl.textContent=legLevText(ml, mm);
-}
-let dir="-", cls="dirB";
-if(kind==="grid"){dir=i===0?"网格双向":"反向对冲"}
-else if(kind==="funding"&&pr&&pr.longV){
-const isLong=vid===pr.longV;
-dir=isLong?"做多":"做空"; cls+=" "+(isLong?"long":"short");
-}
-else if(kind==="spread"&&pr){
-const isShort=i===0?(pr.signedBps>0):!(pr.signedBps>0);
-dir=isShort?"做空":"做多"; cls+=" "+(isShort?"short":"long");
-}
-dirEl.textContent=dir; dirEl.className=cls;
-let legAmt=null, qty=null;
-if(kind==="grid"){
-const q=numField(S,"qty_per_grid"), cnt=numField(S,"grid_count");
-if(q&&cnt){qty=q*cnt; if(price) legAmt=qty*price}
-}else if(amt!=null){
-legAmt=amt;
-if(price) qty=amt/price;
-}
-amtEl.value=legAmt==null?"":fmt(legAmt);
-qtyEl.textContent=qty==null?"-":fmt(qty, qty<1?6:4)+(pageSymbol(S)?" "+esc(pageSymbol(S)):"");
+el.textContent=vid+" · "+legLevText(ml, mm);
 });
-if(kind==="grid"){
-const gi=S.root.querySelector(".gridAmtInfo");
-if(gi){
+const mi=S.root.querySelector(".marginInfo");
+if(mi){
+const margin=marginOf(S);
+const levNames=st==="hedged_grid"?["leverage_grid","leverage_hedge"]
+:st==="premium_arb"?["leverage_base","leverage_hedge"]
+:["leverage","leverage"];
+const levB=numField(S, levNames[0])||1, levH=numField(S, levNames[1])||1;
+if(st==="hedged_grid"){
 const q=numField(S,"qty_per_grid"), cnt=numField(S,"grid_count");
 const px=row?row.price_a:null;
-gi.textContent=(q&&cnt&&px)?("当前约合总名义 $"+fmt(q*cnt*px)):"";
-}
+mi.textContent=(q&&cnt&&px)
+?("当前约合总名义 $"+fmt(q*cnt*px)+"（保证金 $"+fmt(q*cnt*px/levB)+"）")
+:(margin>0?("总名义 $"+fmt(margin*levB)+" = 保证金 × 网格腿杠杆 "+levB):"");
+}else if(margin>0){
+const notional=margin*levB;
+mi.textContent="仓位名义 $"+fmt(notional)+"（基准腿占用保证金 $"+fmt(margin)+
+" · 对冲腿占用保证金 $"+fmt(notional/levH)+"）";
+}else mi.textContent="";
 }
 }
 
@@ -1469,7 +1419,8 @@ const levNames=st==="hedged_grid"?["leverage_grid","leverage_hedge"]
 :st==="premium_arb"?["leverage_base","leverage_hedge"]
 :["leverage","leverage"];
 const row=pairRow(st), pr=pairRates(st);
-const amt=pg.amount?numField(S, pg.amount):null;
+const marginIn=marginOf(S);
+const levBase=numField(S, levNames[0])||1;
 const legs=[0,1].map(i=>{
 const vid=i===0?S.vA.value:S.vB.value;
 const lev=numField(S, levNames[i])||1;
@@ -1480,7 +1431,9 @@ const q=numField(S,"qty_per_grid"), cnt=numField(S,"grid_count");
 let px=mark;
 if(!px){const lo=numField(S,"lower_price"), hi=numField(S,"upper_price"); if(lo&&hi) px=(lo+hi)/2}
 if(q&&cnt&&px) notional=q*cnt*px;
-}else if(amt!=null) notional=amt;
+}else if(marginIn>0) notional=marginIn*levBase;
+// 占用保证金 = 名义 ÷ 该腿杠杆：基准腿即所填保证金，对冲腿
+// 开相同名义、占用 = 名义 ÷ 对冲腿杠杆，都在下面分列列清
 return {vid:vid, lab:pg.venue_labels[i], mark:mark, lev:lev,
 notional:notional, margin:notional!=null?notional/lev:null};
 });
@@ -1529,7 +1482,7 @@ if(ml==null||!(L.lev>ml)) return "";
 const lv=Number.isInteger(ml)?String(ml):fmt(ml, 2);
 return '<p style="color:var(--yel)">⚠ '+esc(L.vid)+" 该标的最高 "+lv+
 "x，你填了 "+L.lev+"x，实际执行可能被该所拒绝或按上限成交"+
-"（逐仓/全仓限制见选择两腿）。</p>";
+"（逐仓/全仓见仓位设置的杠杆行）。</p>";
 }).join("");
 const levModes=legs.map((L, i)=>{
 const mm=row?(i===0?row.margin_mode_a:row.margin_mode_b):"unknown";
@@ -1538,19 +1491,29 @@ return mm==="isolated_only"
 : "";
 }).join("");
 const modeTxt=S.runMode==="full_auto"
-?"运行模式：全自动——只选策略、金额和风险档，系统定两腿/标的/参数，自动选标、开仓、平仓、再选标循环，点停止才停。"
+?"运行模式：优腿优标（全自动）——只选策略和保证金，系统定两腿/标的/参数，自动选标、开仓、平仓、再选标循环，点停止才停。"
 :S.runMode==="semi_auto"
-?"运行模式：半自动·自动选标——你定两腿/金额/条件，系统每轮重新选标，自动开仓、平仓、再选标循环，点停止才停。"
+?"运行模式：固腿优标（半自动·自动选标）——你定两腿/保证金/条件，系统每轮重新选标，自动开仓、平仓、再选标循环，点停止才停。"
 :S.runMode==="semi_fixed"
-?"运行模式：半自动·固定标的——在你选的标的上按条件开仓、平仓、再开仓，循环到你点停止。"
+?"运行模式：固腿固标（半自动·固定标的）——在你选的标的上按条件开仓、平仓、再开仓，循环到你点停止。"
 :"运行模式：自主——点「开仓」立即开仓，平仓你手动点，平完这一笔任务结束。";
-S.previewEl.innerHTML="<table><thead><tr><th>腿</th><th>平台</th><th>标记价</th><th>预估执行价</th><th>名义</th><th>所需保证金</th></tr></thead><tbody>"+
+// 溢价：派生名义超过最大持仓（名义上限）时黄字警告（预览区
+// 现行预警机制）
+let capWarn="";
+if(st==="premium_arb"){
+const maxPos=numField(S,"max_position_usd");
+const n0=legs[0].notional;
+if(maxPos!=null&&n0!=null&&n0>maxPos)
+capWarn='<p style="color:var(--yel)">⚠ 仓位名义 $'+fmt(n0)+
+" 超过最大持仓 $"+fmt(maxPos)+"（名义上限）：实际开仓会被策略的持仓上限截断，请调大最大持仓或减小保证金/杠杆。</p>";
+}
+S.previewEl.innerHTML="<table><thead><tr><th>腿</th><th>平台</th><th>标记价</th><th>预估执行价</th><th>名义</th><th>占用保证金</th></tr></thead><tbody>"+
 rowsHtml+"</tbody></table>"+
-'<p>总名义：<b>'+(totN!=null?"$"+fmt(totN):"-")+'</b>　总保证金：<b>'+(totM!=null?"$"+fmt(totM):"-")+"</b></p>"+
+'<p>总名义：<b>'+(totN!=null?"$"+fmt(totN):"-")+'</b>　总占用保证金：<b>'+(totM!=null?"$"+fmt(totM):"-")+"</b></p>"+
 "<p>"+avail+"</p>"+
-'<p class="muted">所需保证金按各腿所填杠杆计算；程序不自动改杠杆，交易所的实际上限见选择两腿。</p>'+
+'<p class="muted">名义 = 保证金 × 基准腿杠杆（网格按每格量 × 格数 × 现价）；占用保证金 = 名义 ÷ 该腿杠杆。程序不自动改杠杆，各所实际上限见仓位设置的杠杆行。</p>'+
 '<p class="muted">'+modeTxt+"</p>"+
-levWarns+levModes+ind;
+levWarns+levModes+capWarn+ind;
 }
 
 // 运行中仓位表（本策略任务：状态/持仓/今日成交/操作）
@@ -1601,16 +1564,14 @@ const pad=n=>String(n).padStart(2,"0");
 const name=pg.name_prefix+"-"+(params.symbol||"NA")+"-"+pad(now.getHours())+pad(now.getMinutes())+pad(now.getSeconds());
 S.runErr.textContent=""; S.runOk.textContent=""; if(S.runWarn) S.runWarn.textContent="";
 const body={name:name, strategy:st, params:params, run_mode:S.runMode};
-if(S.runMode==="full_auto"){
-body.run_preset=S.runPreset||"neutral";
-if(st==="hedged_grid"){
-// 全自动网格：金额区的目标总名义走顶层 amount_usd，
-// params 里的 qty_per_grid 不提交（后端按总名义反推）
-const gt=S.root.querySelector(".gridTotalInp");
-const tot=gt?Number(gt.value):NaN;
-if(tot>0) body.amount_usd=tot;
+// 保证金（三策略统一，第十二轮）：仓位设置填的保证金走顶层
+// amount_usd（后端按保证金 × 基准腿杠杆换算名义/额度）
+const mg=marginOf(S);
+if(mg>0) body.amount_usd=mg;
+if(S.runMode==="full_auto"&&st==="hedged_grid"){
+// 全自动网格：params 里的 qty_per_grid 不提交（后端按保证金
+// × 网格腿杠杆得到的总名义反推每格量）
 delete params.qty_per_grid;
-}
 }
 const r=await postJson("/api/tasks/create",body);
 if(!r.ok){S.runErr.textContent=r.error||"创建失败"; return}
@@ -1708,42 +1669,7 @@ $("#secMsg").textContent="已保存字段："+r.changed.join("、")+"。需重�
 loadSecrets();
 });
 
-// ---------- 设置页：场所费率表（/api/settings/fees，单位 bps） ----------
-const FEE_VENUES=["arcus","lighter","lighter_rh","hyperliquid","entropy","tradexyz","aster"];
-function feeEntryVal(entry, kind){
-if(!entry) return "";
-if(Array.isArray(entry)) return kind==="taker_bps"?(entry[0]??""):(entry[1]??"");
-const v=entry[kind]; return v==null?"":v;
-}
-async function loadFees(){
-const box=$("#feeTable"); if(!box) return;
-let d=null;
-try{ d=await (await fetch("/api/settings/fees")).json(); }catch(e){/* 取不到走降级文案 */}
-if(!d||d.ok===false){
-box.innerHTML='<p class="muted">费率表暂不可用'+(d&&d.error?"："+esc(d.error):"")+"</p>"; return;
-}
-const fees=d.fees||d;
-box.innerHTML=FEE_VENUES.map(v=>{
-const e=fees[v];
-return '<div class="legRow"><span class="legLab">'+esc(v)+'</span>'+
-'<span class="muted">taker（bps）</span><input type="number" step="any" min="0" data-fee-taker="'+esc(v)+'" value="'+esc(feeEntryVal(e,"taker_bps"))+'" style="width:110px">'+
-'<span class="muted">maker（bps）</span><input type="number" step="any" min="0" data-fee-maker="'+esc(v)+'" value="'+esc(feeEntryVal(e,"maker_bps"))+'" style="width:110px"></div>';
-}).join("");
-}
-$("#feeSave").addEventListener("click",async()=>{
-const errs=[], done=[];
-for(const v of FEE_VENUES){
-const t=document.querySelector('[data-fee-taker="'+v+'"]');
-const m=document.querySelector('[data-fee-maker="'+v+'"]');
-if(!t||!m||t.value===""||m.value==="") continue;
-const r=await postJson("/api/settings/fees",{venue_id:v, taker_bps:Number(t.value), maker_bps:Number(m.value)});
-if(r.ok) done.push(v); else errs.push(v+"："+(r.error||"保存失败"));
-}
-$("#feeMsg").textContent=errs.length?("保存失败："+errs.join("；")):(done.length?("已保存费率："+done.join("、")):"没有要保存的费率（输入框都是空的）");
-if(!errs.length) loadFees();
-});
-
-// ---------- 设置页：数据服务状态行（/api/libraries 的 service） ----------
+// ---------- 数据库页：数据服务状态行与启停（/api/libraries） ----------
 function renderLibStatus(){
 const el=$("#libStatus"); if(!el) return;
 const s=LIBRARIES&&LIBRARIES.service;
@@ -1762,6 +1688,18 @@ try{ LIBRARIES=await (await fetch("/api/libraries")).json(); }
 catch(e){ LIBRARIES=null }
 renderLibStatus();
 }
+$("#libStart").addEventListener("click",async()=>{
+const r=await post("/api/libraries/start");
+$("#libMsg").textContent=r.ok?"已启动数据服务":("启动失败："+(r.error||""));
+$("#libMsg").className=r.ok?"ok":"bad";
+loadLibraryStatus();
+});
+$("#libStop").addEventListener("click",async()=>{
+const r=await post("/api/libraries/stop");
+$("#libMsg").textContent=r.ok?"已停止数据服务":("停止失败："+(r.error||""));
+$("#libMsg").className=r.ok?"ok":"bad";
+loadLibraryStatus();
+});
 
 loadSpecs().then(()=>{refresh(); loadBest(); loadMarket(false); loadLibraries()}); setInterval(refresh, 5000);
 </script>

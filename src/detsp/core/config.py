@@ -194,19 +194,16 @@ def build_config(env: dict[str, str] | None = None, yaml_data: dict | None = Non
         # 运行模式（归一走 core.engine.normalize_run_mode 单一
         # 事实源，延迟导入避免循环）：manual/semi_fixed/semi_auto/
         # full_auto，旧名 auto 归一为 semi_auto；缺省 manual
-        from .engine import normalize_run_mode, normalize_run_preset
+        from .engine import normalize_run_mode
 
         try:
             run_mode_norm = normalize_run_mode(t.get("run_mode"))
         except ValueError as e:
             raise ConfigError(f"tasks[{i}].{e}") from e
-        # 预设档位：缺省 neutral，写了必须三档之一
-        try:
-            run_preset_norm = normalize_run_preset(t.get("run_preset"))
-        except ValueError as e:
-            raise ConfigError(f"tasks[{i}].{e}") from e
-        # amount_usd（仅 full_auto 中性网格用，总名义）：可选，
-        # 写了必须是大于 0 的数字
+        # run_preset：第十二轮预设全砍——老配置带了容忍并忽略，
+        # 归一写回时丢弃（见下方 t_out 组装），不再校验档位
+        # amount_usd（保证金，第十二轮语义：仓位名义 = 保证金 ×
+        # 基准腿杠杆）：可选，写了必须是大于 0 的数字
         amount_norm = t.get("amount_usd")
         if amount_norm is not None:
             if isinstance(amount_norm, bool) or \
@@ -260,10 +257,11 @@ def build_config(env: dict[str, str] | None = None, yaml_data: dict | None = Non
                 f"tasks[{i}]（{name}）与已有任务占用同一 (venue,symbol)："
                 f"{sorted(dup)}，归属冲突，拒绝启动")
         seen_keys.extend(used)
-        # 归一结果写回任务 dict（下游 build_task 幂等再归一）
+        # 归一结果写回任务 dict（下游 build_task 幂等再归一）；
+        # run_preset 在此丢弃（老配置容忍忽略，保存不带回）
         t_out = dict(t)
         t_out["run_mode"] = run_mode_norm
-        t_out["run_preset"] = run_preset_norm
+        t_out.pop("run_preset", None)
         if amount_norm is not None:
             t_out["amount_usd"] = amount_norm
         tasks.append(t_out)

@@ -49,27 +49,6 @@ def _req_json(base, path, payload, token):
         return e.code, json.loads(e.read().decode("utf-8"))
 
 
-class _FakeFeeTable:
-    """FeeTable 契约的假实现：get/set/as_dict。"""
-
-    def __init__(self):
-        self.data = {"arcus": {"taker_bps": 5.0, "maker_bps": 2.0}}
-
-    def get(self, venue):
-        e = self.data[venue]
-        return e["taker_bps"], e["maker_bps"]
-
-    def set(self, venue, taker, maker):
-        if venue not in ("arcus", "lighter", "lighter_rh",
-                          "hyperliquid", "entropy", "tradexyz", "aster"):
-            raise ValueError(f"未知场所：{venue}")
-        self.data[venue] = {"taker_bps": float(taker),
-                            "maker_bps": float(maker)}
-
-    def as_dict(self):
-        return {k: dict(v) for k, v in self.data.items()}
-
-
 class _FakeLibrary:
     """StatsLibrary 契约的假实现（premium_entry/funding_*）。"""
 
@@ -216,32 +195,29 @@ def test_libraries_degrades_without_service(panel):
     assert d["service"] is None and d["funding"] is None
 
 
-def test_fees_degrades_without_fee_table(panel):
+def test_fees_endpoint_removed(panel):
+    # 第十二轮：场所费率表撤掉——/api/settings/fees 的读与写都
+    # 不再存在（404），PanelState 也不再有费率表与编辑方法；
+    # 费率走 core.fee_table 内置常量（全所 taker 5 / maker 2）
     base, state, _ = panel
-    if state.fee_table is not None:
-        pytest.skip("本环境费率表已就绪，降级路径不适用")
-    _, body = _req(base, "/api/settings/fees")
-    d = json.loads(body)
-    assert d["ok"] is False and d["fees"] == {}
-
-
-def test_fees_read_write(panel):
-    base, state, _ = panel
-    state.fee_table = _FakeFeeTable()
-    _, body = _req(base, "/api/settings/fees")
-    d = json.loads(body)
-    assert d["ok"] is True
-    assert d["fees"]["arcus"] == {"taker_bps": 5.0, "maker_bps": 2.0}
+    import urllib.error
+    try:
+        _req(base, "/api/settings/fees")
+        raise AssertionError("GET /api/settings/fees 应返回 404")
+    except urllib.error.HTTPError as e:
+        assert e.code == 404
+        assert json.loads(e.read().decode("utf-8")) == \
+            {"error": "not found"}
     status, res = _req_json(base, "/api/settings/fees",
                             {"venue_id": "arcus", "taker_bps": 7.5,
                              "maker_bps": 1.5}, state.api_token)
-    assert status == 200 and res["ok"] is True
-    assert res["fees"]["arcus"] == {"taker_bps": 7.5, "maker_bps": 1.5}
-    # 非法场所按现行 API 错误格式回 400 + error
-    status, res = _req_json(base, "/api/settings/fees",
-                            {"venue_id": "nope", "taker_bps": 1,
-                             "maker_bps": 1}, state.api_token)
-    assert status == 400 and "error" in res and res["ok"] is False
+    assert status == 404 and res == {"error": "not found"}
+    assert not hasattr(state, "fee_table")
+    assert not hasattr(state, "fees_view")
+    assert not hasattr(state, "save_fees_view")
+    # 回本成本改读常量：taker 两所合计 10 bps
+    assert state._taker_bps("arcus") == 5.0
+    assert state._taker_bps("nope") == 0.0
 
 
 def test_libraries_with_fake_service(panel):
@@ -258,14 +234,16 @@ def test_libraries_with_fake_service(panel):
                          "&symbol=BTC")
     assert "arcus__lighter__BTC" in json.loads(body)["premium"]
     # 费差库信息：回本 = ((taker 和)×2 + 最大开仓价差) / 当前净费差
+    # （taker 取内置常量 5 bps/所）
     _, body = _req(base, "/api/libraries/funding?va=arcus&vb=lighter"
                          "&symbol=BTC&line=1&max_open_spread=300"
                          "&current_net=2")
     d = json.loads(body)
     f = d["funding"]
     assert f["median_duration_h"] == 1.0 and f["sample_hours"] == 10
-    assert f["roundtrip_cost_bps"] == 300.0   # 无费率表时 taker 按 0
-    assert f["breakeven_hours"] == 150.0
+    # 内置费率常量：往返成本 = (5+5)×2 + 最大开仓价差 300
+    assert f["roundtrip_cost_bps"] == 320.0
+    assert f["breakeven_hours"] == 160.0
 
 
 def test_funding_start_warnings_force_start(panel):
@@ -296,7 +274,7 @@ def test_funding_start_warnings_force_start(panel):
     assert any("样本不足" in w for w in res.get("warnings", [])), res
 
 
-def test_panel_state_state_dir_wires_real_fee_table(tmp_path):
+def test_panel_state_state_dir_wires_library_service(tmp_path):
     pytest.importorskip("detsp.core.fee_table")
     pytest.importorskip("detsp.core.stats_library")
     cfg = build_config(env={}, yaml_data={"tasks": []})
@@ -308,17 +286,15 @@ def test_panel_state_state_dir_wires_real_fee_table(tmp_path):
     state = PanelState(engine=engine, venues=venues, ledger=ledger,
                        app_config=cfg, task_cfgs={},
                        scanner=fake_scanner, state_dir=tmp_path)
-    # scanner 别名与 market_scanner 同步；费率表按 state_dir 落盘
+    # scanner 别名与 market_scanner 同步；数据服务按 state_dir 起
     assert state.market_scanner is fake_scanner
-    assert state.fee_table is not None
+    # 第十二轮：PanelState 不再持有可编辑费率表；库服务内部的
+    # 费率一律是内置常量，且不再落盘 fees.json
+    assert not hasattr(state, "fee_table")
     assert state.library_service is not None
-    assert state.library_service.fee_table is state.fee_table
-    res = state.save_fees_view({"venue_id": "arcus", "taker_bps": 3,
-                                "maker_bps": 1})
-    assert res["ok"] is True
-    assert res["fees"]["arcus"] == {"taker_bps": 3.0, "maker_bps": 1.0}
-    assert (tmp_path / "fees.json").exists()
-    assert state.fees_view()["fees"]["arcus"]["taker_bps"] == 3.0
+    assert state.library_service.fee_table.get("arcus") == (5.0, 2.0)
+    assert state.library_service.fee_table.get("aster") == (5.0, 2.0)
+    assert not (tmp_path / "fees.json").exists()
 
 
 def test_main_wires_scanner_and_state_dir():

@@ -6,7 +6,8 @@
   从两所共同上市标的里选第一个合格者 → 组装单笔内层运行时；
 - "all_pairs"（full_auto，全自动）：连两腿场所也由系统定——
   scanner.best(strategy) 第一行给出两腿与标的，内层参数按
-  用户实填 > PRESETS[run_preset] > Params 默认组装。
+  用户实填 > 内置中性档（specs.NEUTRAL_DEFAULTS）> Params
+  默认组装（第十二轮：预设全砍，不再有档位概念）。
 
 共同节奏：组装一台单笔运行时（single_cycle=True，构造走
 engine.build_runtime / specs.validate_params 同一条路径）运行
@@ -42,7 +43,7 @@ class AutoCycleRuntime:
 
     def __init__(self, strategy_type, params: dict, executor,
                  risk_cfg=None, owner: str = "", scanner=None,
-                 selection_scope: str = "pair", run_preset: str = "neutral",
+                 selection_scope: str = "pair",
                  amount_usd=None, library=None, fee_table=None) -> None:
         self.strategy_type = strategy_type
         # 原始（已清洗）参数替身：内层每笔按它组装，供序列化读
@@ -52,13 +53,17 @@ class AutoCycleRuntime:
         self.owner = owner
         self.scanner = scanner
         # 选标范围："pair"=固定两腿（semi_auto）/ "all_pairs"=跨所
-        # 选组合（full_auto）；run_preset/amount_usd 供 full_auto 组装
+        # 选组合（full_auto）；amount_usd 是保证金（第十二轮
+        # 语义），供 full_auto 组装与溢价派生用。run_preset 已随
+        # 预设全砍删除（第十二轮），老调用方多传也会 TypeError，
+        # 请直接去掉该参数
         self.selection_scope = selection_scope
-        self.run_preset = run_preset or "neutral"
         self.amount_usd = amount_usd
-        # 统计库与费率表（可选，server 注入；第十一轮接库契约，
-        # 见 core/stats_library.py 与 core/fee_table.py）：None 时
-        # 选标保持现行行为（扫描行口径），测试与旧部署兼容
+        # 统计库（可选，server 注入；第十一轮接库契约，见
+        # core/stats_library.py）：None 时选标保持现行行为
+        # （扫描行口径），测试与旧部署兼容。fee_table 参数仅为
+        # 签名兼容保留（第十二轮费率改内置常量，_taker_bps
+        # 直接读常量，不再用它）
         self.library = library
         self.fee_table = fee_table
         fa, fb = self._VENUE_FIELDS.get(strategy_type, ("venue_a", "venue_b"))
@@ -139,13 +144,16 @@ class AutoCycleRuntime:
 
     # ----- 统计库接库选标（第十一轮，library 非 None 时启用） -----
     def _taker_bps(self, venue_id: str) -> float:
-        """某场所 taker 费率（bps）：费率表未注入/查不到按 0。"""
-        if self.fee_table is None or not venue_id:
+        """某场所 taker 费率（bps）：第十二轮起读内置通用默认
+        常量（全所统一 5 bps）；场所为空/非法按 0（不挡选标）。"""
+        if not venue_id:
             return 0.0
         try:
-            taker, _maker = self.fee_table.get(venue_id)
+            from .fee_table import get_fees
+
+            taker, _maker = get_fees(venue_id)
             return float(taker)
-        except Exception:  # noqa: BLE001 — 费率表异常按 0（不挡选标）
+        except Exception:  # noqa: BLE001 — 非法场所按 0（不挡选标）
             return 0.0
 
     def _funding_min_line(self) -> float:
@@ -317,14 +325,14 @@ class AutoCycleRuntime:
         return None
 
     def _merged_full_auto(self, symbol: str, row: dict) -> dict:
-        """full_auto 内层参数组装：用户实填 > PRESETS[run_preset]
-        > Params dataclass 默认（缺省字段不进 dict、由默认补）；
-        缺的必填（两腿场所/标的）由选标结果填。"""
-        from ..strategies.specs import PRESETS
+        """full_auto 内层参数组装：用户实填 > 内置中性档
+        （specs.NEUTRAL_DEFAULTS）> Params dataclass 默认
+        （缺省字段不进 dict、由默认补）；缺的必填（两腿场所/
+        标的）由选标结果填。"""
+        from ..strategies.specs import NEUTRAL_DEFAULTS
 
         merged: dict = {}
-        merged.update(PRESETS.get(self.strategy_type, {})
-                      .get(self.run_preset, {}))
+        merged.update(NEUTRAL_DEFAULTS.get(self.strategy_type, {}))
         merged.update(self.params)
         va, vb = self._row_venues(self.strategy_type, row)
         fa, fb = self._VENUE_FIELDS.get(self.strategy_type,
@@ -369,13 +377,17 @@ class AutoCycleRuntime:
                         price = (merged["lower_price"]
                                  + merged["upper_price"]) / 2
                     grid_count = merged.get("grid_count") or 20
-                    # 每格量 = 总名义 /（格数 × 现价）
+                    # 保证金语义（第十二轮）：网格总名义 = 保证金
+                    # × 网格腿杠杆；每格量 = 总名义 /（格数 × 现价）
+                    lev_grid = float(merged.get("leverage_grid")
+                                     or 3.0)
+                    total_notional = float(self.amount_usd) * lev_grid
                     merged["qty_per_grid"] = \
-                        float(self.amount_usd) / (float(grid_count)
-                                                  * float(price))
+                        total_notional / (float(grid_count)
+                                          * float(price))
                 else:
                     raise ValueError(
-                        "全自动中性网格缺少每格数量：请填总名义 "
+                        "全自动中性网格缺少每格数量：请填保证金 "
                         "amount_usd 或 qty_per_grid")
         return merged
 
@@ -428,7 +440,8 @@ class AutoCycleRuntime:
                 inner_params["lower_bps"] = float(entry["lower_bps"])
         clean = validate_params(self.strategy_type, inner_params)
         inner = build_runtime(self.strategy_type, clean, self.executor,
-                              self.risk_cfg, self.owner)
+                              self.risk_cfg, self.owner,
+                              amount_usd=self.amount_usd)
         inner.single_cycle = True
         if self.library is not None and \
                 self.strategy_type == "funding_carry":

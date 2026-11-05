@@ -1,4 +1,4 @@
-"""费率表 + 中枢库 / 费差库测试：手造快照与 CSV，数值全部手算对账。"""
+"""费率常量 + 中枢库 / 费差库测试：手造快照与 CSV，数值全部手算对账。"""
 
 import csv
 import time
@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from detsp.core.config import VENUE_IDS
-from detsp.core.fee_table import FeeTable
+from detsp.core.fee_table import FeeTable, get_fees
 from detsp.core.stats_library import LibraryService, StatsLibrary
 from detsp.core.venue import FundingInfo
 from detsp.tools.analyze import analyze_rows
@@ -58,42 +58,38 @@ def _write_funding_csv(path: Path, nets, start_hour=0):
                 "net_bps_h": net})
 
 
-# ---------- FeeTable ----------
+# ---------- 费率常量（第十二轮：可编辑费率表已撤） ----------
 
-def test_fee_table_defaults(tmp_path):
+def test_fee_constants_uniform_defaults(tmp_path):
+    """全所统一 taker 5 / maker 2 bps（代码内常量，用户定版
+    「按普遍默认」）；FeeTable 退化为只读适配：构造路径被忽略、
+    不读不写文件、没有 set。"""
     ft = FeeTable(tmp_path / "fees.json")
     for vid in VENUE_IDS:
-        taker, maker = ft.get(vid)
-        assert maker == 0.0
-        assert taker == (1.0 if vid == "tradexyz" else 0.0)
-    assert ft.as_dict()["tradexyz"] == {"taker_bps": 1.0, "maker_bps": 0.0}
-
-
-def test_fee_table_set_persists_and_deep_copy(tmp_path):
-    path = tmp_path / "fees.json"
-    ft = FeeTable(path)
-    ft.set("hyperliquid", 2.5, 1.5)
-    assert ft.get("hyperliquid") == (2.5, 1.5)
-    # 落盘后新实例读回一致
-    ft2 = FeeTable(path)
-    assert ft2.get("hyperliquid") == (2.5, 1.5)
-    assert ft2.get("arcus") == (0.0, 0.0)
-    # as_dict 是深拷贝：改它不影响内部
-    d = ft.as_dict()
-    d["hyperliquid"]["taker_bps"] = 999.0
-    assert ft.get("hyperliquid") == (2.5, 1.5)
-
-
-def test_fee_table_validation(tmp_path):
-    ft = FeeTable(tmp_path / "fees.json")
-    with pytest.raises(ValueError):
-        ft.set("arcus", -1.0, 0.0)
-    with pytest.raises(ValueError):
-        ft.set("arcus", 0.0, -0.5)
-    with pytest.raises(ValueError):
-        ft.set("nope", 1.0, 1.0)
+        assert ft.get(vid) == (5.0, 2.0)
+        assert get_fees(vid) == (5.0, 2.0)
+    assert ft.as_dict()["tradexyz"] == {"taker_bps": 5.0,
+                                        "maker_bps": 2.0}
+    assert not hasattr(ft, "set")
+    assert not (tmp_path / "fees.json").exists()
     with pytest.raises(ValueError):
         ft.get("nope")
+    with pytest.raises(ValueError):
+        get_fees("nope")
+
+
+def test_fee_table_ignores_stale_fees_json(tmp_path):
+    """已有落盘的旧费率 JSON 不再读取：里面写了自定义值也按
+    常量走（文件留着不管，代码不读）。"""
+    import json
+
+    path = tmp_path / "fees.json"
+    path.write_text(json.dumps(
+        {"arcus": {"taker_bps": 99.0, "maker_bps": 88.0}}),
+        encoding="utf-8")
+    ft = FeeTable(path)
+    assert ft.get("arcus") == (5.0, 2.0)
+    assert ft.as_dict()["arcus"] == {"taker_bps": 5.0, "maker_bps": 2.0}
 
 
 # ---------- 溢价分钟聚合 ----------
@@ -194,7 +190,7 @@ def test_recompute_premium_admission_and_midline(tmp_path):
     rows = _read_rows(
         tmp_path / "premium_minutes" / "arcus__lighter__BTC.csv")
     rows = [r for r in rows if r["minute_ts"] >= now - 86400]
-    expected = analyze_rows(rows, fees_bps=0.0, min_fires=10)
+    expected = analyze_rows(rows, fees_bps=10.0, min_fires=10)
     entry = result["arcus__lighter__BTC"]
     assert entry["midline_bps"] == expected["suggested"]["midline_bps"]
     assert entry["upper_bps"] == expected["suggested"]["upper_bps"]

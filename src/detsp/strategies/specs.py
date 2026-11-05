@@ -121,7 +121,13 @@ _FIELD_META: dict[str, dict[str, dict]] = {
         "max_position_usd": {"label": "最大持仓（两腿最多持有多少美元）",
                              "group": "风控"},
         "max_order_notional_usd": {"label": "单笔上限（一笔订单最多下这么多美元，更大的量会拆成多笔下）",
-                                   "group": "风控"},
+                                   "group": "风控",
+                                   "help": "第十二轮起面板不填此值：单笔上限"
+                                           "由「单笔上限占最大持仓 %」在组装时"
+                                           "派生；手写配置里显式填了本字段且没填"
+                                           "百分比时，仍以本字段为准。"},
+        "order_cap_pct": {"label": "单笔上限占最大持仓 %（单笔上限 = 最大持仓 × 这个百分比，组装时自动换算）",
+                          "group": "风控"},
         "min_order_notional_usd": {"label": "单笔下限（算出的下单金额低于这个数就不下，跳过这次机会）",
                                    "group": "风控"},
         "inventory_scale_bps": {"label": "库存阶梯（持仓越接近上限，开仓门槛额外抬高，最多加这么多 bps）",
@@ -167,7 +173,7 @@ _FIELD_META: dict[str, dict[str, dict]] = {
         "venue_b": {"label": "场所 B（B 腿用的交易所）",
                     "group": "场所与标的", **_VENUE},
         "symbol": {"label": "币种（要交易的标的）", "group": "场所与标的"},
-        "notional_usd": {"label": "单边开仓金额（一边开多少美元）",
+        "notional_usd": {"label": "单边名义（仓位名义：一边开多少美元；面板任务由保证金 × 杠杆自动换算，手写配置时也可直接填）",
                          "group": "场所与标的"},
         "leverage": {"label": "两腿杠杆（填账户里实际设的杠杆，只对账校验，程序不自动改）",
                      "group": "场所与标的"},
@@ -262,7 +268,7 @@ SECTION_MAP: dict[str, dict[str, str]] = {
         "inventory_floor_frac": "开仓条件",
         "execution_mode": "开仓条件", "maker_offset_ticks": "开仓条件",
         "maker_timeout_seconds": "开仓条件",
-        "max_order_notional_usd": "开仓条件",
+        "max_order_notional_usd": "开仓条件", "order_cap_pct": "开仓条件",
         "min_order_notional_usd": "开仓条件",
         "take_fraction": "开仓条件",
         "close_band_bps": "平仓条件",
@@ -313,7 +319,7 @@ ZONE_MAP: dict[str, dict[str, str]] = {
         "min_order_notional_usd": "more",
         "settle_grace_seconds": "more", "max_slippage_bps": "more",
         "maker_offset_ticks": "more", "maker_timeout_seconds": "more",
-        "max_order_notional_usd": "more",
+        "max_order_notional_usd": "more", "order_cap_pct": "more",
         "take_fraction": "more",
         "reconcile_seconds": "hidden", "base_taker_fee_bps": "hidden",
         "hedge_taker_fee_bps": "hidden",
@@ -340,74 +346,33 @@ SYSTEM_KEYS: dict[str, frozenset] = {
 }
 
 
-# 配置预设（页面「配置」区的档位按钮）：保守 / 中性 / 激进 三组
-# 字段值，点一下整组填入表单；用户再改任何字段即变「自定义」。
-# 用户定版语义（第五轮修正）：预设只套**结构参数**（杠杆、门槛、
-# 格数、持有时长、冷却、执行方式等），**绝不含金额类字段**——
-# 金额由用户先在「金额」区填好，点预设时金额输入框一个字不动。
-# 中性 = 现行原仓对齐默认值：凡结构字段在 Params 里有默认值，
-# 中性档的值必须与默认值相等（tests 锁死，防漂移）。金额本来
-# 就不是原仓默认语义的一部分（原仓金额是表单必填项），故不锁。
-# 原先靠金额分档的量改为比例换算（见 AMOUNT_RATIOS）：溢价套利
-# 的单笔上限 = 用户填的最大持仓 × 档位比例，点预设时前端换算
-# 填入。中性网格的每格量继续由用户填的目标总名义反推（点预设
-# 只改格数/杠杆/跳档，总名义输入框不动）。
-PRESETS: dict[str, dict[str, dict]] = {
-    "hedged_grid": {
-        "conservative": {"grid_count": 10,
-                         "leverage_grid": 2.0, "leverage_hedge": 2.0,
-                         "skip_band_frac": 0.35},
-        "neutral": {"grid_count": 20,
+# 内置中性档（第十二轮定版，取代原三档预设）：预设已全砍，
+# 不再有档位概念。自动选标类模式（固腿优标 / 优腿优标）组装
+# 内层参数时，用户没填的字段按这里的中性值补（优先级：用户
+# 实填 > 本表 > Params dataclass 默认）。数值 = 原 PRESETS
+# 各策略 neutral 档原值（tests 锁死与 Params 默认一致，防漂移）。
+NEUTRAL_DEFAULTS: dict[str, dict] = {
+    "hedged_grid": {"grid_count": 20,
                     "leverage_grid": 3.0, "leverage_hedge": 3.0,
                     "skip_band_frac": 0.25, "mode": "long_short"},
-        "aggressive": {"grid_count": 40,
-                       "leverage_grid": 5.0, "leverage_hedge": 5.0,
-                       "skip_band_frac": 0.15},
-    },
-    "premium_arb": {
-        "conservative": {"leverage_base": 1.0, "leverage_hedge": 1.0,
-                         "execution_mode": "maker"},
-        "neutral": {"leverage_base": 1.0, "leverage_hedge": 1.0,
+    "premium_arb": {"leverage_base": 1.0, "leverage_hedge": 1.0,
                     "execution_mode": "taker"},
-        "aggressive": {"leverage_base": 3.0, "leverage_hedge": 3.0,
-                       "execution_mode": "taker"},
-    },
-    "funding_carry": {
-        "conservative": {"leverage": 3.0,
-                         "min_edge_bps_per_hour": 2.0},
-        "neutral": {"leverage": 6.0,
-                    "min_edge_bps_per_hour": 1.0},
-        "aggressive": {"leverage": 10.0,
-                       "min_edge_bps_per_hour": 0.5},
-    },
+    "funding_carry": {"leverage": 6.0,
+                      "min_edge_bps_per_hour": 1.0},
 }
-
-# 金额派生字段的档位比例：字段值 = 页面主金额（用户已填）× 比例。
-# 只有溢价套利有这种字段：单笔上限原先按最大持仓分档写死绝对值
-# （250/500/1500 对应最大持仓 500/1000/3000）；现按用户定版改
-# 比例 25% / 50% / 100%——保守/中性与原档在参考金额下等值，
-# 激进原为 50%（1500/3000），按定版语义改 100%（单笔可打满）。
-AMOUNT_RATIOS: dict[str, dict[str, dict[str, float]]] = {
-    "premium_arb": {
-        "max_order_notional_usd": {"conservative": 0.25,
-                                   "neutral": 0.5,
-                                   "aggressive": 1.0},
-    },
-}
-
-PRESET_LABELS = {"conservative": "保守", "neutral": "中性",
-                 "aggressive": "激进", "custom": "自定义"}
 
 
 # 策略页（左侧边栏布局）元数据：每策略一页，页面由通用渲染器按
-# 本表生成。venue_fields/venue_labels 是「订单腿」区的两腿场所
-# 下拉；primary 是「金额」区的常用字段（其余字段进「配置」区内
-# 折叠的「自动化配置」子区）；opportunity 决定 pairs 排序与总览最佳机会的口径；amount 是
-# 页面顶部大输入框的主金额字段（中性网格无单一金额，为 None，
-# 用每格量×格数×现价折算总名义）；market_value 是「选市场」下拉
-# 里每个币后面带的机会值类型；how_it_works 是页头「运作方式」
-# 折叠里的步骤短句（按各策略真实机制写）；name_prefix 是面板
-# 一键运行的自动任务名前缀。
+# 本表生成。venue_fields/venue_labels 是「选择两腿」区的两腿场所
+# 下拉；primary 是常用字段集合（弹窗/回退渲染用）；opportunity
+# 决定 pairs 排序与总览最佳机会的口径；amount 是被仓位设置
+# 「保证金」输入框取代的参数字段名（资金费的 notional_usd：
+# 页面不单独渲染它、由保证金换算；其余策略为 None——第十二轮
+# 起金额统一走顶层 amount_usd 保证金语义）；derived_fields 是
+# 组装时派生的字段（面板不渲染输入框，见 core.engine 的派生
+# 规则）；market_value 是币种下拉里每个币后面带的机会值类型；
+# how_it_works 是页头「运作方式」折叠里的步骤短句（按各策略
+# 真实机制写）；name_prefix 是面板一键运行的自动任务名前缀。
 PAGE_META: dict[str, dict] = {
     "hedged_grid": {
         "venue_fields": ("grid_venue", "hedge_venue"),
@@ -431,16 +396,19 @@ PAGE_META: dict[str, dict] = {
             "平仓条件": "价格冲出网格区间时按 {out_of_range_action} 处置：平掉双腿停机，或只减仓回收。",
             "保护": "两腿仓位差小于 {hedge_deadband_qty} 时先不补对冲；裸露超过 {max_unhedged_seconds} 秒、残差超过 {max_residual_seconds} 秒会强制对冲；启动时按系统费率估算校验每格利润，接管已有持仓的开关是 {takeover_position}。",
         },
-        "note": "区间上下限可在「选市场」下方用建议区间（近 24 小时"
-                "高低各扩 2%）一键填入；杠杆只用于校验与显示，须与"
-                "账户里实际设置的一致（程序不自动改杠杆）。",
+        "note": "区间上下限可用仓位设置下方的建议区间（近 24 小时"
+                "高低各扩 2%）一键填入；仓位设置里的金额是保证金，"
+                "网格总名义 = 保证金 × 网格腿杠杆，用作网格资金上限；"
+                "杠杆只用于校验与显示，须与账户里实际设置的一致"
+                "（程序不自动改杠杆）。",
     },
     "premium_arb": {
         "venue_fields": ("base_venue", "hedge_venue"),
         "venue_labels": ("基准腿", "对冲腿"),
         "opportunity": "spread",
-        "amount": "max_position_usd",
-        "amount_desc": "自由填写（USD）",
+        "amount": None,
+        "amount_desc": None,
+        "derived_fields": ("max_order_notional_usd",),
         "market_value": "spread_bps",
         "name_prefix": "arb",
         "run_modes": [{"value": "semi_fixed", "label": "固腿固标"},
@@ -461,14 +429,17 @@ PAGE_META: dict[str, dict] = {
             "平仓后怎么办": "平仓后先冷却 {cooldown_seconds} 秒，才允许再开下一笔。",
             "保护": "对账发现两腿不平时自动削腿修平；开仓后 {settle_grace_seconds} 秒内先等结算不削腿，削腿最多偏离现价 {max_slippage_bps} bps。",
         },
-        "note": "顶部金额是最大持仓名义（不是单笔）；单笔上限在更多"
-                "配置里，点预设时按最大持仓的比例换算（保守 25% / "
-                "中性 50% / 激进 100%），改金额不会被预设覆盖。"
-                "两腿费率不在本页填，在设置页场所费率表维护。"
-                "溢价带（中枢/上带/下带）必须先实测再填：用录制器"
-                "采集盘口后跑 analyze 得建议值（见使用说明第 6 节），"
-                "不要凭感觉填。执行模式 maker = 主腿先挂单、成交后"
-                "对冲腿跟上；taker = 双腿立即吃单；平仓恒为 taker。",
+        "note": "仓位设置里的金额是保证金：仓位名义 = 保证金 × "
+                "基准腿杠杆，对冲腿开相同名义；实际仓位以最大持仓"
+                "为上限（名义超过最大持仓时预览会警告）。单笔上限"
+                "不用填，在「更多配置」里按最大持仓的百分比定"
+                "（单笔上限占最大持仓 %，组装时自动换算）。两腿"
+                "费率不用填：全所统一内置默认（taker 5 / maker 2 "
+                "bps）。溢价带（中枢/上带/下带）必须先实测再填："
+                "用录制器采集盘口后跑 analyze 得建议值（见使用说明"
+                "第 6 节），不要凭感觉填。执行模式 maker = 主腿先"
+                "挂单、成交后对冲腿跟上；taker = 双腿立即吃单；"
+                "平仓恒为 taker。",
     },
     "funding_carry": {
         "venue_fields": ("venue_a", "venue_b"),
@@ -496,8 +467,10 @@ PAGE_META: dict[str, dict] = {
             "保护": "两腿数量不平时先削腿修平，削腿最多偏离现价 {max_slippage_bps} bps，超了不下单。",
         },
         "note": "方向由策略按资金费自动选（多费率低的一所、空费率"
-                "高的一所）；最低资金费率差是进出共用的一条线："
-                "达到才开仓，跌破并连续确认后平仓。",
+                "高的一所）；仓位设置里的金额是保证金：仓位名义 = "
+                "保证金 × 杠杆，两腿开相同名义；最低资金费率差是"
+                "进出共用的一条线：达到才开仓，跌破并连续确认后"
+                "平仓。",
     },
 }
 
@@ -574,9 +547,8 @@ def strategy_specs() -> list[dict]:
                 "primary": list(page["primary"]),
                 "note": page["note"],
                 "section_summaries": dict(page.get("section_summaries", {})),
-                "presets": PRESETS[stype],
-                "preset_labels": PRESET_LABELS,
-                "amount_ratios": AMOUNT_RATIOS.get(stype, {}),
+                "neutral_defaults": dict(NEUTRAL_DEFAULTS.get(stype, {})),
+                "derived_fields": list(page.get("derived_fields", ())),
             },
         })
     return out
