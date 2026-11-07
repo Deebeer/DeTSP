@@ -96,9 +96,9 @@ def _venues(fa=0.0001, fb=0.0005):
 
 def _build(venues, _run_mode=None, _scanner=None, **params):
     # 第十轮夹具调整：本文件验的是 carry 原生语义（门槛入场/
-    # 迟滞退出/重开），缺省自主（manual）已改为立即开仓且不
-    # 自动退出，故缺省钉 semi_fixed（原生循环）；显式传模式
-    # 的用例（全自动重开）不受影响
+    # 迟滞退出/重开），manual 已改为立即开仓的单笔语义（平仓
+    # 条件生效、平后结束），原生循环用例钉 semi_fixed；显式
+    # 传模式的用例（全自动重开）不受影响
     # 系统值（exit_confirm_checks=3、check_seconds=30、
     # cooldown_seconds=60）是 hidden 字段：写进 params 会被
     # validate 静默丢弃、走 dataclass 默认，故夹具不写它们，

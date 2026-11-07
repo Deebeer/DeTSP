@@ -200,7 +200,9 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg,
     normalize_run_mode；amount_usd 同为顶层字段 = 保证金，
     第十二轮语义：仓位名义 = 保证金 × 基准腿杠杆）：
     - manual=自主（缺省）：运行时设 single_cycle + manual_immediate，
-      立即开一笔、平仓靠人工，安全平仓后引擎停用任务；
+      点开仓立即开首笔（不等开仓条件）；平仓条件生效、到达
+      自动平仓，也可人工平仓；平仓后任务结束不自动重开；
+      安全保护照常；
     - semi_fixed=半自动·固定标的：不设 single_cycle/manual_immediate，
       策略原生循环（carry 保留用户 reopen 原值）；
     - semi_auto=半自动·自动选标（旧名 auto）：AutoCycleRuntime
@@ -322,13 +324,16 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg,
                                 amount_usd=amount_usd)
         if run_mode == "manual":
             # 自主模式：只跑一笔 + 立即开仓语义（manual_immediate，
-            # 各策略 tick 内实现）；安全平仓置 cycle_done 后引擎
-            # 停用任务（见 Engine.tick），不自动重开
+            # 各策略 tick 内实现）——点开仓立即开首笔、不等开仓
+            # 条件；平仓条件生效、到达自动平仓，也可人工平仓；
+            # 平仓置 cycle_done 后引擎停用任务（见 Engine.tick），
+            # 任务结束不自动重开；安全保护照常
             runtime.single_cycle = True
             runtime.manual_immediate = True
             if stype == "funding_carry":
                 runtime.recovery_notes.append(
-                    "自主模式：立即开一笔，本笔平仓后任务结束，"
+                    "自主模式：立即开一笔，平仓条件（费差退出）"
+                    "生效；本笔平仓后任务结束，"
                     "不按 reopen 参数自动重开")
         # semi_fixed：什么都不设——策略原生循环，carry 的
         # reopen 用用户原值，premium/grid 原生节奏

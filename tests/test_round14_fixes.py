@@ -189,8 +189,8 @@ def test_fire_taker_normal_sets_settle_grace():
 
 
 # ── B-F4（溢价 manual 平仓带）：现行行为有专门测试锁定
-# （test_run_modes.test_premium_close_band_sets_cycle_done_in_manual），
-# 与定案表述的张力已列待用户定，本轮不改、不另加测试 ──
+# （test_run_modes.test_premium_close_band_sets_cycle_done_in_manual）。
+# 用户 2026-11-08 已定案：manual 平仓条件生效，现行行为即定案 ──
 
 
 # ── S2：analyze 分位数两端同口径 ──

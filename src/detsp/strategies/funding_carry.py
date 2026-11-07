@@ -177,9 +177,10 @@ class FundingCarryStrategy:
         self.single_cycle = False
         self.cycle_done = False
         # 自主（manual）模式：引擎 build_task 注入。首 tick 不看
-        # 入场门槛立即按最优方向开仓，开仓后不做退出检查（费差
-        # 退出/最长持有都不触发），等人工 stop 全平；直接构造
-        # 默认 False
+        # 入场门槛立即按最优方向开仓（人工开仓）；开仓后平仓
+        # 条件生效——净费差低于最低费差线且连续确认后自动
+        # 平仓，也可人工 stop 全平；平仓后任务结束、不自动
+        # 重开；直接构造默认 False
         self.manual_immediate = False
         # 费差库入场复检钩子（可选，监督器接库时注入）：flat 阶段
         # 正常入场路径在开仓前调用，签名
@@ -379,17 +380,22 @@ class FundingCarryStrategy:
             self.params.leverage,
             self.executor.market_mmr(self._venue_id(leg), self.params.symbol))
 
-    def _open_pair(self, long_leg: str, now: float) -> None:
+    def _open_pair(self, long_leg: str, now: float,
+                   ignore_spread_gate: bool = False) -> None:
         p = self.params
         ex = self.executor
         short_leg = "b" if long_leg == "a" else "a"
         book_a = ex.venue(p.venue_a).book(p.symbol)
         book_b = ex.venue(p.venue_b).book(p.symbol)
-        if book_a.mid <= 0 or book_b.mid <= 0 or \
+        if book_a.mid <= 0 or book_b.mid <= 0:
+            return
+        if not ignore_spread_gate and \
                 abs(book_a.mid / book_b.mid - 1) * 10_000 > \
                 p.max_open_spread_bps:
             return  # 开仓价差闸门：两所价差（bps）超过最大开仓
-            # 价差不开（防同名不同标的），替代原 3% 粗闸门
+            # 价差不开（防同名不同标的），替代原 3% 粗闸门；
+            # manual 首笔传 ignore_spread_gate=True 只跳过本检查，
+            # 下面的强平距离估算检查照常
         worst_est = min(self._est_corridor("a"), self._est_corridor("b"))
         if worst_est < self.min_corridor_pct:
             return  # 杠杆太高，估算强平距离不足
@@ -502,11 +508,10 @@ class FundingCarryStrategy:
             return
 
         if self.phase == "open":
-            if self.manual_immediate:
-                # 自主模式：退出检查（费差跌破最低费差线）不触发
-                # 自动平仓，等人工 stop；安全检查（孤腿/强平距离）
-                # 在上面 _safety 照常保留
-                return
+            # manual 与其他模式一致：退出检查照常运行——净费差
+            # 低于最低费差线且连续确认 exit_confirm_checks 次
+            # 平双腿；安全检查（孤腿/强平距离）在上面 _safety
+            # 照常先行
             if now - self._last_check < p.check_seconds:
                 return
             self._last_check = now
@@ -531,9 +536,10 @@ class FundingCarryStrategy:
             self.phase = "flat"
 
         # flat：自主模式首笔——不看入场门槛、不等检查周期，
-        # 按当前最优方向（多低费/空高费）立即开仓。费率闸门
-        # （合理性/口径）仍保留：数据不可信时不开，记原因等
-        # 下一 tick 再试
+        # 按当前最优方向（多低费/空高费）立即开仓，并绕过最大
+        # 开仓价差闸门（人工开仓定案）。费率闸门（合理性/口径）
+        # 与强平距离估算检查仍保留：数据不可信时不开，记原因
+        # 等下一 tick 再试
         if self.manual_immediate and not self._opened_once:
             self._last_check = now
             ok, reason, ha, hb = self._gate_rates()
@@ -541,7 +547,7 @@ class FundingCarryStrategy:
                 self.last_error = reason
                 return
             long_leg, _edge = best_carry_direction(ha, hb)
-            self._open_pair(long_leg, now)
+            self._open_pair(long_leg, now, ignore_spread_gate=True)
             return
 
         # flat：等入场检查周期

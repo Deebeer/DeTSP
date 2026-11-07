@@ -2,7 +2,8 @@
 
 覆盖：策略页产物含四模式文案与大白话说明、五段标题与段序、
 总结句容器（secSummary）与模板替换、全自动只读参数区、
-manual 隐藏三段与网格 out_of_range_action 豁免标记、
+manual 隐藏开仓条件与平仓后两段、平仓条件显示，与网格
+out_of_range_action 及资金费 min_edge_bps_per_hour 豁免标记、
 specs 无 section 时的兜底分组渲染分支；server 创建 full_auto
 任务后 /api/tasks 带 run_mode=full_auto 且落盘、amount_usd
 （保证金）透传（网格可不带 qty_per_grid）、创建传 auto 落盘
@@ -47,7 +48,9 @@ def test_page_has_four_run_modes_and_plain_descriptions():
     for label in ("自主", "半自动·固定标的", "半自动·自动选标", "全自动"):
         assert label in PAGE_HTML
     # 每模式一行大白话（MODE_DESCS 原文关键句）
-    assert "点「开仓」立即开仓，平仓你手动点" in PAGE_HTML
+    assert "点「开仓」立即开仓、不等开仓条件；平仓条件照常生效" in PAGE_HTML
+    assert "平仓条件到达自动平仓，也可手动平仓" in PAGE_HTML
+    assert "平仓你手动点" not in PAGE_HTML
     assert "在这个标的上按条件开仓→平仓→再开仓" in PAGE_HTML
     assert "每轮系统重新选标" in PAGE_HTML
     assert "只选策略和保证金，两腿/标的/参数系统全定" in PAGE_HTML
@@ -63,13 +66,20 @@ def test_page_has_four_run_modes_and_plain_descriptions():
 
 
 def test_page_mode_visibility_rules():
-    # manual 隐藏三段（JS 按 data-section 处理，不刷新页面）
-    assert 'hideSecs=["开仓条件","平仓条件","平仓后怎么办"]' in PAGE_HTML
+    # manual 隐藏开仓条件与平仓后两段、平仓条件显示（JS 按
+    # data-section 处理，不刷新页面）
+    assert 'hideSecs=["开仓条件","平仓后怎么办"]' in PAGE_HTML
     assert "applySectionVisibility" in PAGE_HTML
     # 网格例外最终做法：out_of_range_action 打 data-manual-keep
     # 标记，隐藏其所在段时只豁免显示它一个字段
     assert "data-manual-keep" in PAGE_HTML
     assert "out_of_range_action" in PAGE_HTML
+    # 资金费 min_edge_bps_per_hour 是进出共用一条线、manual 下作
+    # 退出线：同样打 data-manual-keep 标记（configFieldHtml 与
+    # zoneFieldHtml 两处渲染入口都带关联写法）
+    assert 'f.name==="min_edge_bps_per_hour"' in PAGE_HTML
+    assert PAGE_HTML.count('f.name==="min_edge_bps_per_hour"') >= 2
+    assert 'f.name==="out_of_range_action"||f.name==="min_edge_bps_per_hour"' in PAGE_HTML
     # semi_auto：币种下拉禁用 + 自动选标注明
     assert 'S.runMode==="semi_auto"' in PAGE_HTML
     assert "半自动·自动选标：标的由系统自动选" in PAGE_HTML

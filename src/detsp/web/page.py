@@ -382,9 +382,10 @@ return pg.venue_fields.indexOf(f.name)<0&&f.name!=="symbol"&&f.name!==pg.amount;
 }
 function configFieldHtml(f){
 let html=renderField(f, f.default, false);
-// 网格 manual 例外标记：out_of_range_action 是网格唯一的退出
-// 方式，manual 隐藏平仓段时靠这个标记单独豁免显示它一个字段
-if(f.name==="out_of_range_action")
+// manual 豁免标记：out_of_range_action 是网格唯一的退出方式、
+// min_edge_bps_per_hour 是资金费进出共用一条线（manual 下作退出
+// 线），两者所在段被隐藏时靠这个标记单独豁免显示它一个字段
+if(f.name==="out_of_range_action"||f.name==="min_edge_bps_per_hour")
 html=html.replace('<label class="fld">',
 '<label class="fld" data-manual-keep="1">');
 return html;
@@ -808,7 +809,8 @@ if(modes.length===1) stat.textContent="运行模式："+modes[0].label;
 }
 // zone 字段渲染：与 renderField 同口径，另给溢价中枢三字段打
 // data-lib-field 标记（接中枢库时按模式置只读/回填），给网格
-// out_of_range_action 打 manual 豁免标记（同 configFieldHtml），
+// out_of_range_action 与资金费 min_edge_bps_per_hour 打 manual
+// 豁免标记（同 configFieldHtml），
 // 给每个字段打 data-section 标记（applySectionVisibility 按
 // 字段逐个显隐用——zone 渲染走扁平 .pform、没有 .cfgSec 容器，
 // 此前段级显隐对 zone 字段整体失效，第十四轮补）
@@ -817,7 +819,7 @@ let html=renderField(f, f.default, false);
 if(f.section)
 html=html.replace('class="fld"',
 'class="fld" data-section="'+f.section+'"');
-if(f.name==="out_of_range_action")
+if(f.name==="out_of_range_action"||f.name==="min_edge_bps_per_hour")
 html=html.replace('<label class="fld"',
 '<label class="fld" data-manual-keep="1"');
 if(["midline_bps","upper_bps","lower_bps"].indexOf(f.name)>=0)
@@ -1013,7 +1015,7 @@ const v=Number(el.value); return isNaN(v)?0:v;
 // 自动选标 / full_auto 全自动；旧值 auto 一律归一为 semi_auto。
 // 切换只影响新建任务的提交参数与本页显隐，不刷新页面。
 const MODE_DESCS={
-manual:"自主：两腿、标的、金额都你定；点「开仓」立即开仓，平仓你手动点。",
+manual:"自主：两腿、标的、金额都你定；点「开仓」立即开仓、不等开仓条件；平仓条件照常生效（到达自动平仓），你也可随时手动平仓；这一笔平完任务结束。",
 semi_fixed:"固腿固标（半自动·固定标的）：你定两腿/标的/金额和条件，系统在这个标的上按条件开仓→平仓→再开仓，循环到你停止。",
 semi_auto:"固腿优标（半自动·自动选标）：你定两腿/金额和条件，每轮系统重新选标，自动开仓→平仓→再选标，循环到你停止。",
 full_auto:"优腿优标（全自动）：只选策略和保证金，两腿/标的/参数系统全定（没填的参数按内置中性档），循环到你停止。"};
@@ -1024,12 +1026,13 @@ if(mode==="auto") return "semi_auto";
 return ["manual","semi_fixed","semi_auto","full_auto"].indexOf(mode)>=0
 ?mode:"manual";
 }
-// manual 隐藏开/平/平仓后三段；网格例外（最终做法）：网格的
-// out_of_range_action 是唯一退出方式，给它的字段打了
-// data-manual-keep 标记，隐藏时它所在段只显示它一个字段、
-// 段总结句隐藏，其余字段藏起（见 configFieldHtml/此处逻辑）
+// manual 隐藏开仓条件与平仓后怎么办两段、平仓条件段显示；
+// 豁免标记：网格的 out_of_range_action 是唯一退出方式、资金费
+// 的 min_edge_bps_per_hour 是进出共用一条线（manual 下作退出线），
+// 给它们的字段打了 data-manual-keep 标记，隐藏时它所在段只显示
+// 它一个字段、段总结句隐藏，其余字段藏起（见 configFieldHtml/此处逻辑）
 function applySectionVisibility(S){
-const hideSecs=["开仓条件","平仓条件","平仓后怎么办"];
+const hideSecs=["开仓条件","平仓后怎么办"];
 S.root.querySelectorAll(".cfgSec").forEach(secEl=>{
 const sec=secEl.getAttribute("data-section");
 const sum=secEl.querySelector("[data-sec-summary]");
@@ -1561,7 +1564,7 @@ const modeTxt=S.runMode==="full_auto"
 ?"运行模式：固腿优标（半自动·自动选标）——你定两腿/保证金/条件，系统每轮重新选标，自动开仓、平仓、再选标循环，点停止才停。"
 :S.runMode==="semi_fixed"
 ?"运行模式：固腿固标（半自动·固定标的）——在你选的标的上按条件开仓、平仓、再开仓，循环到你点停止。"
-:"运行模式：自主——点「开仓」立即开仓，平仓你手动点，平完这一笔任务结束。";
+:"运行模式：自主——点「开仓」立即开仓、不等开仓条件；平仓条件到达自动平仓，也可手动平仓，平完这一笔任务结束。";
 // 溢价仓位上限（第十三轮）：仓位 = 保证金 × 基准腿杠杆派生，
 // 本身就是上限——第十二轮的「名义超最大持仓」预览警告构造上
 // 不再可能，已删除，不再有单独的最大持仓概念

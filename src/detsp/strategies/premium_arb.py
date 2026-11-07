@@ -280,8 +280,9 @@ class PremiumArbStrategy:
         self.cycle_done = False
         self._cycle_seen = False
         # 自主（manual）模式：引擎 build_task 注入。首 tick 立即打
-        # 一笔配对切片，之后不再 fire、平仓靠人工 stop；直接构造
-        # 默认 False
+        # 一笔配对切片，之后不再 fire（无新的方向性入场）；平仓
+        # 条件（回归平仓带）生效自动全平，也可人工 stop；直接
+        # 构造默认 False
         self.manual_immediate = False
         self._manual_fired = False
         self.stopped = False
@@ -763,10 +764,9 @@ class PremiumArbStrategy:
             return
 
         # 回归平仓带（信号处理前；_maker 非 None 的 tick 已在
-        # 上面返回，不会误平 maker 待成交期间的仓位）。注：
-        # manual（single_cycle）下平仓带同样生效并置 cycle_done，
-        # 是现行既定行为（有专门测试锁定）；与「manual 自动平仓
-        # 条件不生效」的表述存在张力，第十四轮列待用户定，未改
+        # 上面返回，不会误平 maker 待成交期间的仓位）。用户
+        # 2026-11-08 定案：manual = 人工开仓 + 平仓条件生效，
+        # 回归平仓带在 manual 下生效并置 cycle_done 是定案行为
         if self._check_close_band(base_book, hedge_book, now):
             return
 
@@ -784,8 +784,8 @@ class PremiumArbStrategy:
 
         if self.manual_immediate:
             # 自主模式：首 tick 立即打一笔配对切片，一笔后不再
-            # fire（对账/强平监控/回归平仓在上面照常）；平仓靠
-            # 人工 stop（_flatten）
+            # fire（无新的方向性入场；对账/强平监控/回归平仓
+            # 在上面照常，平仓条件生效，也可人工 stop）
             if not self._manual_fired and not block_fire:
                 self._manual_fire(base_book, hedge_book, now)
             return

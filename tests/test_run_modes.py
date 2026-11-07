@@ -1,9 +1,10 @@
 """第九轮两种模式 + 第十轮三模式四值（manual / semi_fixed /
 semi_auto / full_auto，旧值 auto 归一 semi_auto）。
 
-覆盖：run_mode 四值校验、缺省与归一；第十轮 manual 改为立即
-开仓、人工平仓（自动平仓条件不生效）；semi_fixed 原生同标的
-循环；AutoCycle 监督器（pair 固定两腿选标 / all_pairs 全自动
+覆盖：run_mode 四值校验、缺省与归一；manual 定案语义（第十五
+轮按用户 2026-11-08 定案：人工开仓立即开首笔、平仓条件生效
+自动平仓、平后结束不重开）；semi_fixed 原生同标的循环；
+AutoCycle 监督器（pair 固定两腿选标 / all_pairs 全自动
 跨所选组合）跑通选标→开→平→冷却→再选标且轮数递增、stop 后
 内层仓位已平；premium 回归平仓带；引擎拒绝已删除的
 rotation_hedge 并列出三策略清单；specs 五段映射全覆盖；面板
@@ -144,14 +145,16 @@ def test_auto_task_conflicts_with_any_symbol_same_venue():
         build_config(env={}, yaml_data={"tasks": [auto, other]})
 
 
-# ── 自主模式：carry 立即开仓且不自动退出（第十轮语义大改） ──
-# 第九轮原用例 test_carry_manual_cycle_done_and_no_reopen 断言
-# 「达门槛开仓、最长持有到期自动平仓置 cycle_done」，与第十轮
-# manual 语义（不看门槛立即开、退出检查不触发、人工 stop 平仓）
-# 冲突，已按新语义改写为下面两个用例；原生循环行为移交
+# ── 自主模式：carry 立即开仓且平仓条件生效自动退出 ──
+# 语义沿革：第九轮原用例断言「达门槛开仓、最长持有到期自动
+# 平仓置 cycle_done」；第十轮一度改为「不看门槛立即开、退出
+# 检查不触发、等人工 stop」；第十五轮按用户 2026-11-08 定案
+# 再次改写为下面的用例——manual = 人工开仓（点开仓立即开
+# 首笔、不等开仓条件）+ 平仓条件生效（到达自动平仓，也可
+# 人工平仓），平仓后任务结束、不自动重开。原生循环行为由
 # semi_fixed 用例覆盖（见本文件后部）。
 
-def test_carry_manual_immediate_opens_below_threshold_and_never_auto_exits():
+def test_carry_manual_immediate_opens_below_threshold_and_auto_exits_on_condition():
     venues = _venues()
     # 费差只有 1 bps/小时（a 0.0001 / b 0.0002），低于入场门槛 2
     venues["lighter"].set_funding("BTC", 0.0002)
@@ -162,17 +165,53 @@ def test_carry_manual_immediate_opens_below_threshold_and_never_auto_exits():
     engine.tick(now=1000)   # 不看门槛：首 tick 立即按最优方向开仓
     assert _legs(engine) == (pytest.approx(0.005), pytest.approx(-0.005))
     assert rt.phase == "open"
-    # 费差跌破最低费差线（多腿 a 费率反超）：manual 不自动平
+    # 费差跌破最低费差线（多腿 a 费率反超，净费差转负）：manual
+    # 平仓条件生效——按 check_seconds=30、exit_confirm_checks=3
+    # （系统值）的现行节奏推进，未满 3 次确认不平
     venues["arcus"].set_funding("BTC", 0.0009)
-    engine.tick(now=1051)
-    engine.tick(now=1100)
-    engine.tick(now=1200)
+    engine.tick(now=1051)   # 第 1 次确认
+    assert _legs(engine) == (pytest.approx(0.005), pytest.approx(-0.005))
+    assert rt.cycle_done is False
+    engine.tick(now=1100)   # 第 2 次确认
     assert _legs(engine) == (pytest.approx(0.005), pytest.approx(-0.005))
     assert rt.cycle_done is False
     assert engine.tasks[0].disabled is False
-    # 人工 stop 照常全平
-    rt.stop()
+    engine.tick(now=1200)   # 第 3 次确认 → 双腿自动全平
     assert _legs(engine) == (0.0, 0.0)
+    assert rt.cycle_done is True
+    assert engine.tasks[0].disabled is True   # 引擎停用任务
+    # 平仓后不自动重开：费差恢复后再 tick 仍空仓
+    venues["arcus"].set_funding("BTC", 0.0001)
+    venues["lighter"].set_funding("BTC", 0.0005)
+    engine.tick(now=1300)
+    assert _legs(engine) == (0.0, 0.0)
+    assert engine.tasks[0].disabled is True
+
+
+def test_carry_manual_first_open_bypasses_spread_gate():
+    # 两所 mid 价差：60000 vs 70000 ≈ 1429 bps > 最大开仓价差
+    # 300 bps。manual 首笔绕过该闸门仍开仓成功（人工开仓定案）；
+    # 同一场景 semi_fixed 被闸门挡住不开（对照）
+    def _wide_venues():
+        vs = _venues()
+        vs["lighter"].set_price("BTC", 70_000.0)
+        return vs
+
+    engine = _engine(_wide_venues(), {
+        "name": "carry", "strategy": "funding_carry",
+        "params": dict(CARRY_PARAMS)})
+    engine.tick(now=1000)
+    assert _legs(engine) == (pytest.approx(0.005), pytest.approx(-0.005))
+    assert engine.tasks[0].runtime.phase == "open"
+
+    engine2 = _engine(_wide_venues(), {
+        "name": "carry", "strategy": "funding_carry",
+        "run_mode": "semi_fixed",
+        "params": dict(CARRY_PARAMS)})
+    engine2.tick(now=1000)
+    engine2.tick(now=1031)
+    assert _legs(engine2) == (0.0, 0.0)
+    assert engine2.tasks[0].runtime.phase == "flat"
 
 
 # ── 已删除策略：rotation_hedge 被引擎与 config 双层拒绝 ──
@@ -192,9 +231,10 @@ def test_rotation_hedge_removed_and_rejected():
         build_task(bad, eng.executor, eng.risk_cfg)
 
 
-# ── 自主模式：premium 首 tick 打一笔、之后不 fire、人工 stop 平 ──
-# 第九轮原用例断言「溢价反转自动反向平仓」，与第十轮 manual
-# 语义（一笔后不再 fire、平仓靠人工 stop）冲突，已按新语义改写。
+# ── 自主模式：premium 首 tick 打一笔、之后不 fire ──
+# 第九轮原用例断言「溢价反转自动反向平仓」，与 manual 语义
+# （一笔后不再 fire、无新入场；本用例走人工 stop 平仓）冲突，
+# 已按新语义改写。
 
 def test_premium_manual_only_one_cycle():
     base = PaperVenue(venue_id="entropy", prices={"SNDK": 100.0})
@@ -562,6 +602,8 @@ def test_premium_close_band_flattens_on_regression():
     assert rt._last_fire == 1   # 复用执行冷却：平仓刷新 _last_fire
 
 
+# 定案（用户 2026-11-08）：manual = 人工开仓 + 平仓条件生效，
+# 回归平仓带在 manual 下触发自动全平并置 cycle_done 即定案行为
 def test_premium_close_band_sets_cycle_done_in_manual():
     engine, hedge = _premium_engine(close_band=20.0, run_mode="manual")
     rt = engine.tasks[0].runtime
