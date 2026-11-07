@@ -26,7 +26,8 @@ DeTSP 借鉴/移植了以下开源项目（前三家为 MIT 许可；perp-dex-to
     （strategies/volume_loop.py），2026-11-03 策略层重写时
     已随该策略一并移除；
   - strategies/rotation_hedge.py 的可选参数 max_position_qty
-    「逐步建仓到上限」语义（源自 hedge/ 的 --max-position）；
+    「逐步建仓到上限」语义（源自 hedge/ 的 --max-position），
+    2026-11-05 第十一轮已随该策略一并移除；
   - venues/aster.py、venues/lighter.py 与其实盘实现的对照校准
     （Aster 市价单 avgPrice 成交价、Lighter 数量截断与订单状态
     字段口径）。
@@ -47,5 +48,6 @@ DeTSP 借鉴/移植了以下开源项目（前三家为 MIT 许可；perp-dex-to
   （签名/端点/参数一致；avgPrice、reduceOnly 两处按其口径补齐）。
 - venues/lighter.py 的数量截断与订单状态字段口径、
   strategies/premium_arb.py 的 maker 执行模式、以及
-  rotation_hedge 的 max_position_qty：
+  rotation_hedge 的 max_position_qty（已随该策略于 2026-11-05
+  第十一轮移除）：
   源自 perp-dex-tools（非商业许可，个人自用），见上方条目。

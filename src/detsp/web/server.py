@@ -48,8 +48,8 @@ _LOOPBACK = ("127.0.0.1", "localhost", "::1")
 # 预设全砍：不再有 run_preset / 风险档（老请求带了也忽略）
 RUN_MODES = ("manual", "semi_fixed", "semi_auto", "full_auto")
 _RUN_MODE_ERROR = ("运行模式不合法：{v}，只许 manual（自主）/ "
-                   "semi_fixed（半自动·固定标的）/ semi_auto"
-                   "（半自动·自动选标）/ full_auto（全自动）；"
+                   "semi_fixed（固腿固标）/ semi_auto"
+                   "（固腿优标）/ full_auto（优腿优标）；"
                    "旧值 auto 按 semi_auto 处理")
 
 
@@ -182,6 +182,23 @@ class PanelState:
         elif self.market_scanner is not None and self.scanner is None:
             self.scanner = self.market_scanner
         self._init_library_services()
+        self._attach_library_to_engine()
+
+    def _attach_library_to_engine(self) -> None:
+        """把统计库接进引擎：自动档任务（固腿优标/优腿优标）的
+        监督器靠它走中枢库选标与费差持续性硬关。此前只有面板
+        展示侧接了库，引擎组装任务时从未注入，硬关在生产环境
+        整体未生效（第十四轮修）。回填引擎字段 + 已组装的监督器
+        runtime；后续新建/重组任务由 build_task 透传。"""
+        lib = self._library()
+        eng = getattr(self, "engine", None)
+        if lib is None or eng is None:
+            return
+        eng.library = lib
+        for t in getattr(eng, "tasks", []) or []:
+            rt = getattr(t, "runtime", None)
+            if rt is not None and hasattr(rt, "auto_phase"):
+                rt.library = lib
 
     def _init_library_services(self) -> None:
         """按 state_dir 初始化库服务（容错降级）。
@@ -489,28 +506,24 @@ class PanelState:
     def _taker_bps(self, venue_id) -> float:
         """某所 taker 费率（bps）：内置通用默认常量（5 bps）；
         场所非法时 0。"""
-        if venue_id not in VENUE_IDS:
-            return 0.0
-        try:
-            from ..core.fee_table import get_fees
+        from ..core.fee_table import taker_bps
 
-            taker, _maker = get_fees(venue_id)
-            return float(taker)
-        except Exception:  # noqa: BLE001
-            return 0.0
+        return taker_bps(venue_id)
 
     def _funding_cost_bps(self, va, vb, params: dict) -> float:
         """开平总成本（bps）= (两所 taker 之和) × 2 + 最大开仓价差。
 
         最大开仓价差取任务/表单的 max_open_spread_bps（资金费五项
-        配置之一），缺失时按其默认值 300 bps。
-        """
+        配置之一），缺失时按其默认值 300 bps。公式本体在
+        core.fee_table.roundtrip_cost_bps（全系统一处）。"""
+        from ..core.fee_table import roundtrip_cost_bps
+
         mos = params.get("max_open_spread_bps")
         try:
-            mos = float(mos) if mos is not None else 300.0
+            mos = float(mos) if mos is not None else None
         except (TypeError, ValueError):
-            mos = 300.0
-        return (self._taker_bps(va) + self._taker_bps(vb)) * 2 + mos
+            mos = None
+        return roundtrip_cost_bps(va, vb, mos)
 
     def libraries_funding_view(self, va=None, vb=None, symbol=None,
                                line=None, max_open_spread=None,
@@ -799,7 +812,7 @@ class PanelState:
                 stop = getattr(t.runtime, "stop", None)
                 if callable(stop):
                     try:
-                        stop()   # 四个策略的停止语义统一：撤自有
+                        stop()   # 三个策略的停止语义统一：撤自有
                         # 挂单 + 平掉全部持仓（见各 runtime 的
                         # stop_note），note 如实回报实际动作
                         note = getattr(
@@ -826,7 +839,10 @@ class PanelState:
             new_task = build_task(
                 cfg, self.engine.executor, self.app_config.risk,
                 scanner=getattr(self.engine, "market_scanner", None)
-                or self.market_scanner)
+                or self.market_scanner,
+                library=self._library(),
+                max_consecutive_errors=getattr(
+                    self.engine, "max_consecutive_errors", None))
         except Exception as e:
             return {"ok": False, "error": f"启动失败：{e}"}
         for note in getattr(new_task.runtime, "recovery_notes", []) or []:
@@ -1215,7 +1231,10 @@ def make_handler(state: PanelState):
                             "venues": list(state.venues)})
             elif u.path == "/api/fills":
                 q = parse_qs(u.query)
-                limit = int(q.get("limit", ["50"])[0])
+                try:
+                    limit = int(q.get("limit", ["50"])[0])
+                except (TypeError, ValueError):
+                    limit = 50
                 self._json({"fills": state.ledger.recent_fills(limit=limit)})
             elif u.path == "/api/market":
                 q = parse_qs(u.query)

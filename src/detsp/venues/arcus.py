@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import time
-from decimal import Decimal
 from typing import Any, Callable
 
 import httpx

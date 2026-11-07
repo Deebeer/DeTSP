@@ -9,10 +9,11 @@ K = Key(venue="arcus", account="default", symbol="BTC")
 
 def test_claim_and_owner():
     r = OwnershipRegistry()
+    assert r.owner_of(K) is None      # 未占用
     r.claim(K, "grid")
     assert r.owner_of(K) == "grid"
-    assert r.can_start(K, "grid")
-    assert not r.can_start(K, "rotation_hedge")
+    # 他方接管同一键走 claim 抛冲突（can_start 预检已删，
+    # 生产与测试统一走 claim/owner_of 口径）
 
 
 def test_conflict_raises():

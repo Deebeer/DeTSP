@@ -309,7 +309,7 @@ class Executor:
         归因口径：同一 (venue,symbol) 同时只有归属任务自己的单，
         多笔待发现按登记顺序逐笔以各自基线推断、各自封顶。
         """
-        now = time.time() if now is None else now
+        now = self._clock() if now is None else now
         settled: list[str] = []
         for oid, pf in list(self._pending_fills.items()):
             adapter = self.venues[pf.venue_id]
@@ -539,7 +539,7 @@ class Executor:
                 qty=req.qty, recorded=filled, baseline_qty=cur_qty,
                 ref_price=fill_price if filled > 0 else
                 (book.ask if req.side is Side.BUY else book.bid),
-                deadline=time.time() + PENDING_FILL_TTL_SECONDS)
+                deadline=self._clock() + PENDING_FILL_TTL_SECONDS)
         return ExecResult(status=status, order=order, filled_qty=filled,
                           fill_price=fill_price)
 

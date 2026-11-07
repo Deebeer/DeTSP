@@ -45,12 +45,6 @@ class OwnershipRegistry:
                 )
             self._position_owner[key] = strategy
 
-    def can_start(self, key: Key, strategy: str) -> bool:
-        """不抛错的预检：该策略能否接管该键。"""
-        with self._lock:
-            owner = self._position_owner.get(key)
-            return owner is None or owner == strategy
-
     def keys_of(self, strategy: str) -> list[Key]:
         """某策略当前 claim 的全部键（策略层 caps 按全部腿合计
         名义校验时用，见 Executor.place 的统一口径）。"""

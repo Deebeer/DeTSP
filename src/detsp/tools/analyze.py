@@ -77,8 +77,12 @@ def analyze_rows(rows: list[dict], fees_bps: float = 0.0,
         "premium_mean_bps": round(statistics.fmean(premiums), 2),
         "premium_std_bps": round(statistics.pstdev(premiums), 2)
         if len(premiums) > 1 else 0.0,
-        "premium_p10_bps": round(sorted_p[int(len(sorted_p) * 0.10)], 2),
-        "premium_p90_bps": round(sorted_p[int(len(sorted_p) * 0.90) - 1], 2),
+        # 分位数统一口径：index = min(n-1, int(n*q))（此前 P90 多
+        # 减 1、两端约定不一致，小样本会偏一格，第十四轮统一）
+        "premium_p10_bps": round(
+            sorted_p[min(len(sorted_p) - 1, int(len(sorted_p) * 0.10))], 2),
+        "premium_p90_bps": round(
+            sorted_p[min(len(sorted_p) - 1, int(len(sorted_p) * 0.90))], 2),
         "fees_bps": fees_bps,
         "table": table,
         "suggested": {

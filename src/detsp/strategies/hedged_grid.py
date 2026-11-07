@@ -209,7 +209,7 @@ class HedgedGridStrategy:
     """
 
     name = "hedged_grid"
-    # 面板停止语义：四策略统一为撤单 + 平仓型
+    # 面板停止语义：三策略统一为撤单 + 平仓型
     stop_note = "已停止：双腿挂单已撤、双腿持仓已平"
 
     def __init__(self, params: HedgedGridParams, executor=None,
@@ -222,7 +222,7 @@ class HedgedGridStrategy:
         self.cycle_done = False
         # 自主（manual）模式标记：引擎 build_task 注入。网格的
         # 铺格就是其开仓本质，manual_immediate 对行为无改变，
-        # 只保证四策略属性齐全、设置不报错；直接构造默认 False
+        # 只保证三策略属性齐全、设置不报错；直接构造默认 False
         self.manual_immediate = False
         self.started = False
         self.stopped = False
@@ -633,12 +633,15 @@ class HedgedGridStrategy:
                              price=None, reduce_only=True),
                 intent="close")
         if force:
-            self.hedge_forced_count += 1
             self.last_error = (
                 f"对冲裸露超时（残差 {residual}，已持续 "
                 f"{now - self._unhedged_since:.0f}s），强制对冲 "
                 f"{delta}，结果 {res.status}")
             self._unhedged_since = None
+            if res.status not in ("rejected", "unknown"):
+                # 强制对冲计数只记真正下出/成交的：被拒也计数会
+                # 把失败误报成已执行（第十四轮修）
+                self.hedge_forced_count += 1
         if res.status in ("rejected", "unknown"):
             self.last_error = (f"对冲调平失败：{res.detail or res.status}"
                                f"（残差 {residual} 未消除）")

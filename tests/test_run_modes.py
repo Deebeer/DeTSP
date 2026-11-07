@@ -728,11 +728,6 @@ def test_full_auto_no_candidate_stays_scanning():
 
 # ── 第十一轮：AutoCycle 接库选标 ──
 
-class _FakeFeeTable:
-    def get(self, venue_id):
-        return (5.0, 0.0)
-
-
 class _FakeLibrary:
     """假统计库：premium 两标的都有 entry（ETH 触发次数更高）；
     funding 两标的样本充足、ETH 分数更高；gate 可切换放行。"""
@@ -804,7 +799,6 @@ def test_auto_funding_library_gate_score_and_entry_gate():
     rt = engine.tasks[0].runtime
     lib = _FakeLibrary()
     rt.library = lib
-    rt.fee_table = _FakeFeeTable()
     engine.tick(now=1000)
     # score: ETH 3.0×10 > BTC 2.0×10 → 选 ETH；往返成本口径
     # (5+5)×2 + 300（默认最大开仓价差）= 320 已传给 gate

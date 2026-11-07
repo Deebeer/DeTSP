@@ -68,8 +68,6 @@ def test_fee_constants_uniform_defaults(tmp_path):
     for vid in VENUE_IDS:
         assert ft.get(vid) == (5.0, 2.0)
         assert get_fees(vid) == (5.0, 2.0)
-    assert ft.as_dict()["tradexyz"] == {"taker_bps": 5.0,
-                                        "maker_bps": 2.0}
     assert not hasattr(ft, "set")
     assert not (tmp_path / "fees.json").exists()
     with pytest.raises(ValueError):
@@ -89,7 +87,7 @@ def test_fee_table_ignores_stale_fees_json(tmp_path):
         encoding="utf-8")
     ft = FeeTable(path)
     assert ft.get("arcus") == (5.0, 2.0)
-    assert ft.as_dict()["arcus"] == {"taker_bps": 5.0, "maker_bps": 2.0}
+    assert get_fees("arcus") == (5.0, 2.0)
 
 
 # ---------- 溢价分钟聚合 ----------

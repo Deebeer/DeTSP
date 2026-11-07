@@ -96,6 +96,18 @@ def _read_csv_rows(path: Path) -> list[dict]:
     return rows
 
 
+def _dedupe_by_ts(rows: list[dict], key: str) -> list[dict]:
+    """同一时间戳只留最后一行、按时间戳升序返回。
+
+    服务在同一分钟/小时桶内停机重启时，flush 会把同一桶再落一
+    行；不去重会让样本量与持续时长被重复行虚增（第十四轮修）。"""
+    seen: dict[float, dict] = {}
+    for r in rows:
+        if key in r:
+            seen[r[key]] = r
+    return [seen[k] for k in sorted(seen)]
+
+
 class StatsLibrary:
     """中枢库 + 费差库：快照聚合落盘、滚动重算、持续性统计。"""
 
@@ -257,8 +269,10 @@ class StatsLibrary:
                 if len(parts) != 3:
                     continue
                 base, hedge, symbol = parts
-                rows = [r for r in _read_csv_rows(path)
-                        if r.get("minute_ts", 0) >= cutoff]
+                rows = _dedupe_by_ts(
+                    [r for r in _read_csv_rows(path)
+                     if r.get("minute_ts", 0) >= cutoff],
+                    "minute_ts")
                 if len(rows) < _MIN_PREMIUM_MINUTES:
                     continue
                 try:
@@ -355,23 +369,33 @@ class StatsLibrary:
             return None
         rows = _read_csv_rows(self._funding_path((ova, ovb, symbol)))
         cutoff = float(now) - _FUNDING_WINDOW_SECONDS
-        rows = sorted(
-            (r for r in rows if r.get("hour_ts", 0) >= cutoff
-             and "net_bps_h" in r and "hour_ts" in r),
-            key=lambda r: r["hour_ts"])
+        rows = _dedupe_by_ts(
+            [r for r in rows if r.get("hour_ts", 0) >= cutoff
+             and "net_bps_h" in r and "hour_ts" in r],
+            "hour_ts")
         if not rows:
             return None
         nets = [r["net_bps_h"] for r in rows]
+        # 持续段必须按真实时间连续：相邻行 hour_ts 差不是 3600
+        # （停机空洞）就断段——否则停机几小时会被算成连续达标，
+        # 中位持续时长虚高、硬关误放行（第十四轮修）
         segments: list[int] = []
         run = 0
         above_count = 0
-        for net in nets:
-            if net >= min_line_bps:
+        prev_ts: float | None = None
+        for r in rows:
+            ts = r["hour_ts"]
+            contiguous = prev_ts is not None and ts - prev_ts == 3600
+            if r["net_bps_h"] >= min_line_bps:
+                if run and not contiguous:
+                    segments.append(run)
+                    run = 0
                 run += 1
                 above_count += 1
             elif run:
                 segments.append(run)
                 run = 0
+            prev_ts = ts
         if run:
             segments.append(run)
         return {
@@ -423,8 +447,9 @@ class LibraryService:
                  recompute_interval: float = 3600.0) -> None:
         self._scanner = scanner
         self._data_dir = Path(data_dir)
-        self.fee_table = fee_table if fee_table is not None else FeeTable(
-            self._data_dir / "fees.json")
+        # 费率是内置常量（第十二轮），FeeTable 无参即可；历史上
+        # 这里传 data/fees.json 路径只是签名残留，路径从不被读
+        self.fee_table = fee_table if fee_table is not None else FeeTable()
         self.library = StatsLibrary(self._data_dir, self.fee_table)
         self._record_interval = max(float(record_interval), 0.01)
         self._recompute_interval = max(float(recompute_interval), 0.01)

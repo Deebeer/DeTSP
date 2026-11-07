@@ -135,7 +135,10 @@ _FIELD_META: dict[str, dict[str, dict]] = {
         "inventory_floor_frac": {"label": "库存阶梯起点（持仓达到派生仓位的这个比例后，才开始抬门槛）",
                                  "group": "风控"},
         "take_fraction": {"label": "吃单深度比例（每笔单最多吃掉对手盘挂单量的这个比例）",
-                          "group": "风控"},
+                          "group": "风控",
+                          "help": "当前无深度数据来源，实盘路径暂不生效"
+                                  "（切片按固定比例走）；待深度切片接入"
+                                  "后启用。"},
         "base_taker_fee_bps": {"label": "基准腿吃单费率（只用来估算收益：吃单一次按这个 bps 扣费）",
                                "group": "执行"},
         "hedge_taker_fee_bps": {"label": "对冲腿吃单费率（只用来估算收益：吃单一次按这个 bps 扣费）",
@@ -203,37 +206,6 @@ _FIELD_META: dict[str, dict[str, dict]] = {
     },
 }
 
-# 自动化配置分组（面板「配置」区内「自动化配置」子区的小分组
-# 标题）：策略都是自动运行，这些字段是机器人自动开/平仓
-# 行为的旋钮，按语义分 开仓 / 平仓 / 保护 / 其他 四组。只有非
-# primary、非两腿场所字段（即进自动化配置的那些）需要登记；
-# 未登记者归「其他」。
-ADV_GROUPS: dict[str, dict[str, str]] = {
-    "hedged_grid": {
-        "mode": "开仓", "skip_band_frac": "开仓",
-        "out_of_range_action": "平仓",
-        "hedge_deadband_qty": "保护", "max_unhedged_seconds": "保护",
-        "max_residual_seconds": "保护", "fee_bps_per_side": "保护",
-        "takeover_position": "其他",
-    },
-    "premium_arb": {
-        "persist_seconds": "开仓", "cooldown_seconds": "开仓",
-        "max_order_notional_usd": "开仓",
-        "min_order_notional_usd": "开仓",
-        "inventory_scale_bps": "开仓", "inventory_floor_frac": "开仓",
-        "take_fraction": "开仓", "maker_offset_ticks": "开仓",
-        "maker_timeout_seconds": "开仓",
-        "close_band_bps": "平仓",
-        "settle_grace_seconds": "保护",
-        "max_slippage_bps": "保护",
-    },
-    "funding_carry": {
-        "reopen": "开仓",
-        "max_slippage_bps": "保护",
-    },
-}
-
-
 # 配置五段（第十轮定版，单一事实源）：每策略每个字段恰好属于
 # 一段，面板配置区按段组织、按模式显隐。段顺序固定为
 # SECTION_ORDER；字段名以各 Params dataclass 为准（含新增字段）。
@@ -275,6 +247,11 @@ SECTION_MAP: dict[str, dict[str, str]] = {
         "cooldown_seconds": "平仓后怎么办",
         "settle_grace_seconds": "保护",
         "max_slippage_bps": "保护",
+        # 系统值（hidden，不在面板输出）：仅为完整性登记——每字段
+        # 恰好属于一段的口径对 hidden 字段同样成立（第十四轮补登）
+        "base_taker_fee_bps": "开仓条件",
+        "hedge_taker_fee_bps": "开仓条件",
+        "reconcile_seconds": "保护",
     },
     "hedged_grid": {
         "grid_venue": "交易对象", "hedge_venue": "交易对象",
@@ -518,9 +495,6 @@ def strategy_specs() -> list[dict]:
                 "section": SECTION_MAP.get(stype, {}).get(f.name),
                 "zone": zone,
                 "primary": f.name in primary,
-                # 自动化配置子区内的语义分组（开仓/平仓/保护/
-                # 其他）；primary 与两腿字段不进该子区，为 None
-                "adv_group": ADV_GROUPS.get(stype, {}).get(f.name),
             }
             if "help" in meta:
                 item["help"] = meta["help"]

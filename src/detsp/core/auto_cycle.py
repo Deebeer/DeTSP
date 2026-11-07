@@ -44,7 +44,7 @@ class AutoCycleRuntime:
     def __init__(self, strategy_type, params: dict, executor,
                  risk_cfg=None, owner: str = "", scanner=None,
                  selection_scope: str = "pair",
-                 amount_usd=None, library=None, fee_table=None) -> None:
+                 amount_usd=None, library=None) -> None:
         self.strategy_type = strategy_type
         # 原始（已清洗）参数替身：内层每笔按它组装，供序列化读
         self.params: dict = dict(params)
@@ -59,13 +59,11 @@ class AutoCycleRuntime:
         # 请直接去掉该参数
         self.selection_scope = selection_scope
         self.amount_usd = amount_usd
-        # 统计库（可选，server 注入；第十一轮接库契约，见
+        # 统计库（可选，引擎/server 注入；第十一轮接库契约，见
         # core/stats_library.py）：None 时选标保持现行行为
-        # （扫描行口径），测试与旧部署兼容。fee_table 参数仅为
-        # 签名兼容保留（第十二轮费率改内置常量，_taker_bps
-        # 直接读常量，不再用它）
+        # （扫描行口径），测试与旧部署兼容。费率直接读
+        # core.fee_table 内置常量（第十二轮），无 fee_table 参数
         self.library = library
-        self.fee_table = fee_table
         fa, fb = self._VENUE_FIELDS.get(strategy_type, ("venue_a", "venue_b"))
         self.venue_a = self.params.get(fa) or ""
         self.venue_b = self.params.get(fb) or ""
@@ -144,17 +142,11 @@ class AutoCycleRuntime:
 
     # ----- 统计库接库选标（第十一轮，library 非 None 时启用） -----
     def _taker_bps(self, venue_id: str) -> float:
-        """某场所 taker 费率（bps）：第十二轮起读内置通用默认
-        常量（全所统一 5 bps）；场所为空/非法按 0（不挡选标）。"""
-        if not venue_id:
-            return 0.0
-        try:
-            from .fee_table import get_fees
+        """某场所 taker 费率（bps）：统一走 core.fee_table 的
+        内置常量口径（与 web/server 共用同一实现）。"""
+        from .fee_table import taker_bps
 
-            taker, _maker = get_fees(venue_id)
-            return float(taker)
-        except Exception:  # noqa: BLE001 — 非法场所按 0（不挡选标）
-            return 0.0
+        return taker_bps(venue_id)
 
     def _funding_min_line(self) -> float:
         v = self.params.get("min_edge_bps_per_hour")
@@ -164,10 +156,12 @@ class AutoCycleRuntime:
 
     def _funding_roundtrip_cost(self, va: str, vb: str) -> float:
         """往返成本口径（选标与内层 entry_gate 复检共用）：
-        两腿 taker 费率之和 ×2（开+平）+ 最大开仓价差。"""
-        spread = self.params.get("max_open_spread_bps")
-        spread = 300.0 if spread is None else float(spread)
-        return (self._taker_bps(va) + self._taker_bps(vb)) * 2 + spread
+        两腿 taker 费率之和 ×2（开+平）+ 最大开仓价差；
+        公式本体在 core.fee_table.roundtrip_cost_bps（全系统一处）。"""
+        from .fee_table import roundtrip_cost_bps
+
+        return roundtrip_cost_bps(
+            va, vb, self.params.get("max_open_spread_bps"))
 
     def _candidate_rows(self) -> list[dict]:
         if self.selection_scope == "all_pairs":
@@ -355,7 +349,12 @@ class AutoCycleRuntime:
                             "全自动溢价套利选标行缺带符号价差，"
                             "定不了溢价中枢，稍后自动重试")
                 else:
-                    # 中枢 = 选标快照的带符号价差，取整到 0.1 bps
+                    # 中枢 = 选标快照的带符号价差，取整到 0.1 bps。
+                    # 注意口径差（第十四轮列待用户定，未改）：scanner
+                    # 的 signed_spread_bps 以两腿均价为分母，策略/
+                    # 统计库的 premium_bps 以对冲腿价为分母，两者在
+                    # 300 bps 价差时相差约 4.6 bps；现行行为是直接
+                    # 采用 scanner 值（有测试锁定），改口径须用户定
                     merged["midline_bps"] = round(float(signed), 1)
             if "upper_bps" not in merged:
                 merged["upper_bps"] = FULL_AUTO_PREMIUM_UPPER_BPS

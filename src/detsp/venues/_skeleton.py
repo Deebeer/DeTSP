@@ -70,4 +70,7 @@ class SkeletonVenue(VenueAdapter):
     def funding_snapshot(self) -> list[FundingInfo]:
         if self._paper is not None:
             return self._paper.funding_snapshot()
-        return []
+        # live 未覆盖本方法时与其他接口同口径抛 NotImplementedError，
+        # 不静默返回空表（空表会被上层误读成「全市场无费率」）；
+        # 现行四所均已覆盖本方法，此分支实际不触发
+        return self._live()

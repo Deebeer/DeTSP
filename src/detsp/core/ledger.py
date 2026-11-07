@@ -125,11 +125,6 @@ class Ledger:
             ).fetchall()
         return [dict(zip(cols, r)) for r in rows]
 
-    def count_closed_positions(self) -> int:
-        with self._lock:
-            return int(self._conn.execute(
-                "SELECT COUNT(*) FROM closed_positions").fetchone()[0])
-
     def record(self, fill: Fill) -> int:
         ts = fill.ts if fill.ts > 0 else time.time()
         with self._lock:
@@ -169,13 +164,6 @@ class Ledger:
             args = (strategy,)
         with self._lock:
             return float(self._conn.execute(sql, args).fetchone()[0])
-
-    def volume_by_strategy(self) -> dict[str, float]:
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT strategy, COALESCE(SUM(ABS(qty) * price), 0) FROM fills GROUP BY strategy"
-            ).fetchall()
-        return {r[0]: float(r[1]) for r in rows}
 
     def recent_fills(self, limit: int = 50, since: float | None = None) -> list[dict]:
         """最近成交（倒序），供面板账本页展示。since 为起始时间戳（秒）。"""

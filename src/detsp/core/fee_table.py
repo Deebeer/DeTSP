@@ -15,8 +15,6 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
-
 from .config import VENUE_IDS
 
 # 内置通用默认费率（bps）：全所统一
@@ -32,12 +30,29 @@ def get_fees(venue_id: str) -> tuple[float, float]:
     return TAKER_FEE_BPS, MAKER_FEE_BPS
 
 
-def fees_dict() -> dict[str, dict[str, float]]:
-    """全部场所的费率（深拷贝）：{venue_id: {taker_bps, maker_bps}}。"""
-    return {
-        vid: {"taker_bps": TAKER_FEE_BPS, "maker_bps": MAKER_FEE_BPS}
-        for vid in VENUE_IDS
-    }
+def taker_bps(venue_id) -> float:
+    """某场所 taker 费率（bps）；为空/非法返回 0（不挡选标）。
+
+    选标与回本成本的统一入口（auto_cycle 与 web/server 共用，
+    此前两处各写一份同口径实现，第十四轮收敛到这里）。"""
+    if not venue_id:
+        return 0.0
+    try:
+        taker, _maker = get_fees(str(venue_id))
+        return float(taker)
+    except Exception:  # noqa: BLE001 — 非法场所按 0
+        return 0.0
+
+
+def roundtrip_cost_bps(venue_a, venue_b,
+                       max_open_spread_bps=None) -> float:
+    """双腿开平总成本（bps）= (两腿 taker 之和) × 2 + 最大开仓价差。
+
+    最大开仓价差缺省 300（资金费五项配置的默认值）。费差库回本
+    时间 = 本成本 ÷ 当前净费差，口径全系统一处。"""
+    spread = 300.0 if max_open_spread_bps is None \
+        else float(max_open_spread_bps)
+    return (taker_bps(venue_a) + taker_bps(venue_b)) * 2 + spread
 
 
 class FeeTable:
@@ -50,17 +65,9 @@ class FeeTable:
     """
 
     def __init__(self, path=None) -> None:
-        # path 仅为签名兼容，刻意不读不写
-        self._path = path
-
-    @property
-    def path(self):
-        return self._path
+        # path 仅为签名兼容，刻意不读不写、不保存
+        pass
 
     def get(self, venue_id: str) -> tuple[float, float]:
         """返回 (taker_bps, maker_bps)；未知场所抛 ValueError。"""
         return get_fees(venue_id)
-
-    def as_dict(self) -> dict[str, dict[str, float]]:
-        """全部费率的深拷贝：{venue_id: {"taker_bps":…, "maker_bps":…}}。"""
-        return deepcopy(fees_dict())

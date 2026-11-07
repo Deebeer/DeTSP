@@ -382,8 +382,11 @@ class LighterVenue(SkeletonVenue):
             msg = str(err) if err is not None else \
                 f"code={resp.code} msg={getattr(resp, 'message', None)}"
             raise RuntimeError(f"{self.venue_id} 下单被拒：{msg}")
+        # 回执数量写实际下单量（已向下截断到最小单位），不是请求
+        # 量——回执 qty 被上层当作已下单量用，未截断会虚报
+        filled_qty = base / 10 ** m["size_decimals"]
         return Order(order_id=f"coi:{coi}", symbol=req.symbol, side=req.side,
-                     qty=req.qty, price=req.price, status="open")
+                     qty=filled_qty, price=req.price, status="open")
 
     def cancel_order(self, order_id: str) -> bool:
         if self._paper is not None:

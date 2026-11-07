@@ -28,7 +28,7 @@ Top 5 合并、按机会值 % 降序，点行跳策略页并带入两腿与
 分区渲染（legs/position/config/more，hidden 不渲染；
 derived_fields 组装派生、面板不渲染输入框）；specs 尚未带
 zone 时回退旧渲染（配置区按五段 section 组织、再无 section
-时走 primary + adv_group 分组），不白屏。
+时走按 section 映射的语义分组），不白屏。
 运行模式用 page.run_modes 的显示名渲染（中性网格只有「自主」
 一项时不渲染切换器、只显示静态文字；溢价/资金费三档为
 固腿固标 semi_fixed / 固腿优标 semi_auto / 优腿优标
@@ -125,7 +125,6 @@ fieldset legend{color:var(--mut);font-size:11px;padding:0 6px;text-transform:upp
 .fname{display:block;color:var(--bright)}
 .fdesc{display:block;color:var(--mut);font-size:11px;margin-top:1px;line-height:1.45}
 .upd{float:right;font-size:11px;color:var(--mut);font-weight:normal;letter-spacing:0;text-transform:none}
-.legLev{flex-basis:100%;font-size:12px;color:var(--mut)}
 .fld input[type=number],.fld input[type=text],.fld select,#mName{width:100%;box-sizing:border-box;background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:5px 8px;margin-top:3px;font:inherit}
 .fhelp{font-size:11px;color:var(--mut);line-height:1.5;margin-top:2px}
 #modal select{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:5px 8px;font:inherit}
@@ -144,8 +143,6 @@ fieldset legend{color:var(--mut);font-size:11px;padding:0 6px;text-transform:upp
 .block h3{margin:0 0 10px;font-size:12px;color:var(--bright);letter-spacing:.05em}
 .block h3::before{content:"[ ";color:var(--acc)}
 .block h3::after{content:" ]";color:var(--acc)}
-label.inl{display:inline-block;margin:0 18px 4px 0;font-size:12px}
-label.inl select{display:block;margin-top:4px;background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:5px 8px;min-width:170px;font:inherit}
 .pform select,.aform select,.pform input,.aform input{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:5px 8px;font:inherit}
 .pform .fld input,.pform .fld select,.aform .fld input,.aform .fld select{width:100%;box-sizing:border-box;margin-top:3px}
 .pform{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:0 16px}
@@ -155,8 +152,8 @@ label.inl select{display:block;margin-top:4px;background:var(--bg);color:var(--t
 .amtMain{flex:0 1 320px}
 .amtMain .fld{font-size:13px;color:var(--mut)}
 .amtMain input{font-size:19px;padding:7px 10px}
-.presetRow,.modeRow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
-.presetRow button.on,.modeRow button.on{background:var(--acc);color:var(--onacc);border-color:var(--acc);font-weight:bold}
+.modeRow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.modeRow button.on{background:var(--acc);color:var(--onacc);border-color:var(--acc);font-weight:bold}
 .pickRow{cursor:pointer}
 .pickRow:hover td{background:rgba(63,185,80,.08)}
 .symWrap{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
@@ -171,19 +168,11 @@ label.inl select{display:block;margin-top:4px;background:var(--bg);color:var(--t
 .dirB.long{color:var(--acc);border-color:var(--acc)}
 .dirB.short{color:var(--red);border-color:var(--red)}
 .howBox ol{margin:4px 0 4px 18px;padding:0;line-height:1.8;font-size:12px}
-.pickBtn{padding:1px 10px}
 .runErr{white-space:pre-wrap}
-.marginLine{font-size:14px;margin:4px 0}
-tr.best td{background:rgba(63,185,80,.09)}
-tr.selrow td{background:rgba(63,185,80,.17)}
-td.na{color:var(--dim)}
-.chip{background:transparent;border:1px solid var(--line2);margin:2px 4px 2px 0}
-.chip.on{background:var(--acc);color:var(--onacc);border-color:var(--acc)}
 details{margin:6px 0}
 details summary{cursor:pointer;color:var(--mut);font-size:12px}
 details div{font-size:12px;padding:6px 4px;line-height:1.8}
 .sec input{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:0;padding:5px 8px;width:100%;box-sizing:border-box;margin-top:3px;font:inherit}
-.pairPrices{margin-top:8px}
 .gridSug{margin-top:10px}
 .levInfo{font-size:12px;color:var(--mut);margin:10px 0 0}
 .posGrid{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}
@@ -369,11 +358,13 @@ groups[g].map(f=>renderField(f,(values&&values[f.name]!==undefined)?values[f.nam
 }
 
 // 兜底分组渲染（specs 无 section 时用）：按开仓 / 平仓 / 保护 /
-// 其他语义分组（specs 的 adv_group），与弹窗 fieldsHtml 分开
+// 其他语义分组（由 field.section 映射；specs 的 adv_group 已于
+// 第十四轮删除），与弹窗 fieldsHtml 分开
 function advFieldsHtml(fields){
 const order=["开仓","平仓","保护","其他"];
+const sec2g={"开仓条件":"开仓","平仓条件":"平仓","平仓后怎么办":"平仓","保护":"保护"};
 const groups={};
-fields.forEach(f=>{const g=f.adv_group||"其他";(groups[g]=groups[g]||[]).push(f)});
+fields.forEach(f=>{const g=sec2g[f.section]||"其他";(groups[g]=groups[g]||[]).push(f)});
 return order.filter(g=>groups[g]&&groups[g].length).map(g=>
 "<fieldset><legend>"+esc(g)+"</legend>"+
 groups[g].map(f=>renderField(f,f.default,false)).join("")+"</fieldset>").join("");
@@ -382,7 +373,7 @@ groups[g].map(f=>renderField(f,f.default,false)).join("")+"</fieldset>").join(""
 // ---------- 配置五段（第十轮）：交易对象 / 开仓条件 / 平仓条件 /
 // 平仓后怎么办 / 保护。段归属来自 specs 的 field.section；任一
 // 字段都没带 section 时返回 null，调用方回退上面的旧分组渲染
-//（primary + adv_group），保证后端未就绪的中间状态不白屏。
+//（按 section 映射的语义分组），保证后端未就绪的中间状态不白屏。
 const SECTION_ORDER=["交易对象","开仓条件","平仓条件","平仓后怎么办","保护"];
 function isConfigField(spec, f){
 const pg=spec.page;
@@ -817,12 +808,18 @@ if(modes.length===1) stat.textContent="运行模式："+modes[0].label;
 }
 // zone 字段渲染：与 renderField 同口径，另给溢价中枢三字段打
 // data-lib-field 标记（接中枢库时按模式置只读/回填），给网格
-// out_of_range_action 打 manual 豁免标记（同 configFieldHtml）
+// out_of_range_action 打 manual 豁免标记（同 configFieldHtml），
+// 给每个字段打 data-section 标记（applySectionVisibility 按
+// 字段逐个显隐用——zone 渲染走扁平 .pform、没有 .cfgSec 容器，
+// 此前段级显隐对 zone 字段整体失效，第十四轮补）
 function zoneFieldHtml(f){
 let html=renderField(f, f.default, false);
+if(f.section)
+html=html.replace('class="fld"',
+'class="fld" data-section="'+f.section+'"');
 if(f.name==="out_of_range_action")
-html=html.replace('<label class="fld">',
-'<label class="fld" data-manual-keep="1">');
+html=html.replace('<label class="fld"',
+'<label class="fld" data-manual-keep="1"');
 if(["midline_bps","upper_bps","lower_bps"].indexOf(f.name)>=0)
 html=html.replace('data-f="'+f.name+'"',
 'data-f="'+f.name+'" data-lib-field="'+f.name+'"');
@@ -833,7 +830,6 @@ function buildStrategyPage(spec){
 const st=spec.strategy, pg=spec.page;
 const root=document.getElementById("page-strat-"+st);
 if(!root) return;
-const amtField=pg.amount?fieldOf(spec, pg.amount):null;
 const primaryRest=spec.fields.filter(f=>f.primary&&pg.venue_fields.indexOf(f.name)<0&&f.name!=="symbol"&&f.name!==pg.amount);
 const advanced=spec.fields.filter(f=>!f.primary&&pg.venue_fields.indexOf(f.name)<0);
 // 分区：字段按 zone 分组——legs=选择两腿（场所下拉专用渲
@@ -920,7 +916,7 @@ root.innerHTML=
 "<h2>"+esc(spec.title)+'</h2><p class="muted">'+esc(spec.blurb)+"</p>"+
 '<details class="block howBox"><summary>运作方式</summary><ol>'+steps+"</ol></details>"+
 '<div class="block"><h3>运行模式</h3>'+
-'<div class="modeRow"><button data-mode="manual" class="on">自主</button><button data-mode="semi_fixed">半自动·固定标的</button><button data-mode="semi_auto">半自动·自动选标</button><button data-mode="full_auto">全自动</button></div>'+
+'<div class="modeRow"><button data-mode="manual" class="on">自主</button><button data-mode="semi_fixed">固腿固标</button><button data-mode="semi_auto">固腿优标</button><button data-mode="full_auto">优腿优标</button></div>'+
 '<p class="muted modeStatic" style="display:none"></p>'+
 '<p class="muted modeDesc"></p></div>'+
 '<div class="block fullAutoNote" style="display:none"><p class="muted">全自动：两腿和标的都由系统选，你只选策略、在下面填保证金。</p></div>'+
@@ -996,11 +992,6 @@ root.querySelector(".runBtn").addEventListener("click",()=>runStrategy(st));
 function pageSymbol(S){
 return S.symSel?S.symSel.value:(S.selSymbol||"");
 }
-function setPageSymbol(S, sym){
-S.selSymbol=sym;
-const el=S.symSel; if(!el) return;
-if([...el.options].some(o=>o.value===sym)) el.value=sym;
-}
 
 function numField(S, name){
 const el=S.root.querySelector('[data-f="'+name+'"]');
@@ -1060,6 +1051,19 @@ secEl.querySelectorAll(".fhelp").forEach(h=>{h.style.display=""});
 if(sum) delete sum.dataset.forceHide;
 }
 });
+// zone 渲染的字段没有 .cfgSec 容器（扁平 .pform）：按字段自身
+// 的 data-section 逐个显隐，口径与上面段容器一致；.fhelp 是
+// label 的紧随兄弟元素，一并显隐
+S.root.querySelectorAll(".fld[data-section]").forEach(l=>{
+if(l.closest(".cfgSec")) return;
+const sec=l.getAttribute("data-section");
+const hide=S.runMode==="manual"&&hideSecs.indexOf(sec)>=0
+&&!l.hasAttribute("data-manual-keep");
+l.style.display=hide?"none":"";
+const help=l.nextElementSibling;
+if(help&&help.classList.contains("fhelp"))
+help.style.display=hide?"none":"";
+});
 }
 function setRunMode(st, mode){
 const S=SPAGES[st]; if(!S) return;
@@ -1080,8 +1084,6 @@ if(S.symSel) S.symSel.disabled=S.runMode==="semi_auto";
 const full=S.runMode==="full_auto";
 const legs=S.root.querySelector(".legsBlock");
 if(legs) legs.style.display=full?"none":"";
-const mkt=S.root.querySelector(".marketBlock");
-if(mkt) mkt.style.display=full?"none":"";
 const symW=S.root.querySelector(".symWrap");
 if(symW) symW.style.display=full?"none":"";   // 全自动连币种也由系统选
 const faNote=S.root.querySelector(".fullAutoNote");
@@ -1188,6 +1190,9 @@ const S=SPAGES[st]; if(!S||st!=="funding_carry") return;
 const el=S.root.querySelector(".fundingLibInfo"); if(!el) return;
 const va=S.vA.value, vb=S.vB.value, sym=pageSymbol(S);
 if(!va||!vb||!sym){el.textContent=""; return}
+// 字段名回退（min_entry_*/max_open_spread 为第十一轮改名前的旧名）：
+// 与 server._funding_gate_warnings 同口径保留——防老面板任务的
+// 已存参数在改名后读不到，不是残留（第十四轮核定保留）
 const line=fundingFormValue(S,["min_edge_bps_per_hour","min_entry_edge_bps_per_hour"],0);
 const mos=fundingFormValue(S,["max_open_spread_bps","max_open_spread"],300);
 const row=pairRow(st);
@@ -1278,14 +1283,6 @@ let line2='<span class="sdLab">'+esc(pg.venue_labels[0])+"资金费</span>："+b
 '<span class="sdLab">'+esc(pg.venue_labels[1])+"资金费</span>："+bpsH(row.rate_b_bps_h);
 if(kind==="funding") line2+=' · <span class="sdLab">费差</span>：'+(row.edge_bps_h==null?"—":fmt(row.edge_bps_h,3)+" bps/时");
 S.posData.innerHTML=line1+"<br>"+line2;
-}
-// 旧名保留为转调（个别刷新路径仍以旧名触发）
-function renderPairPrices(st){ renderPosData(st); }
-function renderSymData(st){ renderPosData(st); }
-
-// 资金费口径的中文短名（pairs 行 rate_kind_* 原值的展示口径）
-function rateKindTxt(k){
-return {predicted:"预测", current:"当期", last_settled:"上期已结算"}[k]||"口径未知";
 }
 
 // 腿的杠杆行文案：最高杠杆 + 保证金模式（数据来自 pairs 行，
@@ -1386,7 +1383,7 @@ error:d.error};
 }catch(e){S.candles[key]={ok:false, error:"网络异常，K线暂时取不到"}}
 S.candleFetching[key]=false;
 updateGridSug(st);
-renderSymData(st);
+renderPosData(st);
 }
 
 // ---------- 选择两腿 / 仓位设置联动（腿行 + 杠杆行 + 保证金旁注） ----------
@@ -1524,7 +1521,7 @@ return esc(L.lab)+" <b>"+esc(L.vid)+"</b> 可用 $"+fmt(v.available)+
 }).join("　");
 let ind="";
 if(st==="funding_carry"){
-const th=numField(S,"min_edge_bps_per_hour")??numField(S,"min_entry_edge_bps_per_hour");
+const th=numField(S,"min_edge_bps_per_hour")??numField(S,"min_entry_edge_bps_per_hour");   // 旧字段名回退，同 loadFundingInfo 处口径
 if(!pr||pr.edge==null) ind='<p class="muted">入场条件：暂无所选标的的费差数据。</p>';
 else if(pr.mixed) ind='<p style="color:var(--yel)">入场条件：当前费差 '+fmt(pr.edge,3)+' bps/小时为混口径（仅参考），与门槛不可直接比较；策略开仓时也会拒绝混口径组合。</p>';
 else if(th!=null&&pr.edge>=th) ind='<p class="ok">入场条件：已达入场门槛（费差 '+fmt(pr.edge,3)+" ≥ 门槛 "+fmt(th,3)+' bps/小时）；方向：多 '+esc(pr.longV)+" / 空 "+esc(pr.shortV)+"。</p>";

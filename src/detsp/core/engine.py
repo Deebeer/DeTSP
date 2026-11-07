@@ -51,8 +51,8 @@ def normalize_run_mode(value) -> str:
         return v
     raise ValueError(
         f"run_mode 非法：{value}，只许 manual（自主）/ "
-        f"semi_fixed（半自动·固定标的）/ semi_auto（半自动·自动选标）"
-        f"/ full_auto（全自动），auto 是 semi_auto 的旧名")
+        f"semi_fixed（固腿固标）/ semi_auto（固腿优标）"
+        f"/ full_auto（优腿优标），auto 是 semi_auto 的旧名")
 
 
 @dataclass
@@ -147,7 +147,11 @@ def _premium_params_derived(clean_params: dict,
                 position * float(out["order_cap_pct"]) / 100.0
         return out
     except Exception:  # noqa: BLE001 — 派生失败不挡启动
-        return clean_params
+        # 兜底也不许把用户写死的 max_position_usd 带回去（函数头
+        # 契约：进入即丢弃）；费率覆盖失败时保留原参数值
+        fallback = dict(clean_params)
+        fallback.pop("max_position_usd", None)
+        return fallback
 
 
 def build_runtime(strategy: str, clean_params: dict, executor: Executor,
@@ -184,7 +188,8 @@ def build_runtime(strategy: str, clean_params: dict, executor: Executor,
 
 
 def build_task(task_cfg: dict, executor: Executor, risk_cfg,
-               scanner=None) -> Task:
+               scanner=None, library=None,
+               max_consecutive_errors: int | None = None) -> Task:
     """由 config 的一条 task dict 组装策略运行时。
 
     只认三个现行策略：hedged_grid / premium_arb / funding_carry。
@@ -311,7 +316,7 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg,
             risk_cfg=risk_cfg, owner=name, scanner=scanner,
             selection_scope="pair" if run_mode == "semi_auto"
             else "all_pairs",
-            amount_usd=amount_usd)
+            amount_usd=amount_usd, library=library)
     else:
         runtime = build_runtime(stype, clean, executor, risk_cfg, name,
                                 amount_usd=amount_usd)
@@ -331,8 +336,14 @@ def build_task(task_cfg: dict, executor: Executor, risk_cfg,
     # 解释——老任务数值不变、直接按保证金算仓位，不加任何
     # 提示事件或标记（用户明确不要复核提示）；新语义写在使用
     # 说明里
-    return Task(name=name, strategy_type=str(stype), runtime=runtime,
+    task = Task(name=name, strategy_type=str(stype), runtime=runtime,
                 run_mode=run_mode, amount_usd=amount_usd)
+    if max_consecutive_errors is not None:
+        # 错误停机阈值以引擎配置为准（risk.max_consecutive_errors），
+        # 不用 ErrorCounter 的默认 3 硬扛（第十四轮修假接线）
+        task.errors = ErrorCounter(
+            max_consecutive=int(max_consecutive_errors))
+    return task
 
 
 @dataclass
@@ -349,6 +360,12 @@ class Engine:
     # 行情扫描器（from_config 时存入）：全自动任务的监督器选标用，
     # 组装任务时透传给 build_task
     market_scanner: object = None
+    # 统计库（中枢库/费差库的 StatsLibrary）：组装自动档任务时
+    # 透传给监督器（硬关与接库选标靠它）。面板状态层在库服务
+    # 就绪后回填本字段并同步已组装任务的 runtime.library
+    library: object = None
+    # poll_pending_fills 连续失败计数（失败要留事件痕迹，不静默）
+    _poll_fills_failures: int = field(default=0, repr=False)
     # 面板任务名集合（与 config 任务区分：只有它们能在面板删改）
     panel_task_names: set[str] = field(default_factory=set)
     # S3：启动恢复对账等事件（面板可见）
@@ -396,7 +413,7 @@ class Engine:
     @classmethod
     def from_config(cls, app_config, venues: dict, ledger: Ledger | None = None,
                     caps=None, state_dir: str | Path | None = None,
-                    scanner=None) -> "Engine":
+                    scanner=None, library=None) -> "Engine":
         """按 AppConfig.tasks 组装引擎。
 
         - caps：显式传入优先；缺省时从 app_config.caps（H1 的 config
@@ -422,7 +439,7 @@ class Engine:
                             min_corridor_pct=app_config.risk.min_corridor_pct)
         engine = cls(registry=registry, kill_switch=kill_switch,
                      executor=executor, risk_cfg=app_config.risk,
-                     market_scanner=scanner,
+                     market_scanner=scanner, library=library,
                      max_consecutive_errors=app_config.risk.max_consecutive_errors)
         if kill_switch.halted:
             engine.events.append(
@@ -430,8 +447,10 @@ class Engine:
                 f"须人工 reset 才恢复开仓")
         for task_cfg in getattr(app_config, "tasks", []) or []:
             try:
-                task = build_task(task_cfg, executor, app_config.risk,
-                                  scanner=scanner)
+                task = build_task(
+                    task_cfg, executor, app_config.risk, scanner=scanner,
+                    library=library,
+                    max_consecutive_errors=app_config.risk.max_consecutive_errors)
                 engine.tasks.append(task)
                 for note in getattr(task.runtime, "recovery_notes", []) or []:
                     engine.events.append(f"[{task.name}] {note}")
@@ -458,7 +477,8 @@ class Engine:
         if any(t.name == name for t in self.tasks) or name in self.errors:
             raise ValueError(f"任务名已存在：{name}（重名任务请先删除或改名）")
         task = build_task(task_cfg, self.executor, self.risk_cfg,
-                          scanner=self.market_scanner)
+                          scanner=self.market_scanner, library=self.library,
+                          max_consecutive_errors=self.max_consecutive_errors)
         self.tasks.append(task)
         self.panel_task_names.add(name)
         for note in getattr(task.runtime, "recovery_notes", []) or []:
@@ -490,8 +510,10 @@ class Engine:
                 self.events.append(f"[面板任务 {name}] 加载失败已跳过：{msg}")
                 continue
             try:
-                task = build_task(cfg, self.executor, self.risk_cfg,
-                                  scanner=self.market_scanner)
+                task = build_task(
+                    cfg, self.executor, self.risk_cfg,
+                    scanner=self.market_scanner, library=self.library,
+                    max_consecutive_errors=self.max_consecutive_errors)
                 self.tasks.append(task)
                 for note in getattr(task.runtime, "recovery_notes", []) or []:
                     self.events.append(f"[{name}] {note}")
@@ -527,8 +549,14 @@ class Engine:
             # 异步结算场所的市价单成交补记账本（审查 M2）
             try:
                 self.executor.poll_pending_fills()
-            except Exception:  # noqa: BLE001 — 发现失败不挡任务调度
-                pass
+                self._poll_fills_failures = 0
+            except Exception as e:  # noqa: BLE001 — 发现失败不挡任务调度
+                # 不静默：连续失败只在首次留事件（防刷屏），面板可见
+                self._poll_fills_failures += 1
+                if self._poll_fills_failures == 1:
+                    self.events.append(
+                        f"市价单成交发现（poll_pending_fills）失败：{e}；"
+                        f"待发现单暂不定案，后续 tick 继续重试")
         now = time.time() if now is None else now
         allow_open = not self.kill_switch.halted
         for task in self.tasks:

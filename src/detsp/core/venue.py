@@ -17,10 +17,6 @@ class Side(str, Enum):
     SELL = "sell"
 
     @property
-    def opposite(self) -> "Side":
-        return Side.SELL if self is Side.BUY else Side.BUY
-
-    @property
     def sign(self) -> int:
         return 1 if self is Side.BUY else -1
 

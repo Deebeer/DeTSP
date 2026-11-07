@@ -29,7 +29,11 @@ LIGHTER_DEPLOYMENT = {"lighter": "mainnet", "lighter_rh": "robinhood"}
 MODES = ("paper", "live")
 
 _YAML_TOP_KEYS = {"engine", "risk", "venues", "tasks", "caps", "watchlist"}
-_YAML_RISK_KEYS = {"min_corridor_pct", "close_corridor_pct", "max_consecutive_errors"}
+_YAML_RISK_KEYS = {"min_corridor_pct", "max_consecutive_errors"}
+# 已废弃但容忍忽略的 risk 键（老 config.yaml 带了不报错、不生效）：
+# close_corridor_pct 的平仓线职责第十一轮起归各策略参数
+# （funding_carry 的 close_corridor_pct 等），全局 risk 不再读它
+_YAML_RISK_DEPRECATED = {"close_corridor_pct"}
 _YAML_CAPS_KEYS = {"global_usd", "venues", "strategies"}
 _TASK_KEYS = {"name", "strategy", "venue", "symbol", "venue_a", "venue_b",
               "base_venue", "hedge_venue", "grid_venue", "params", "run_mode",
@@ -67,7 +71,6 @@ class VenueConfig:
 @dataclass
 class RiskConfig:
     min_corridor_pct: float = 3.0
-    close_corridor_pct: float = 1.5
     max_consecutive_errors: int = 3
 
 
@@ -145,7 +148,7 @@ def build_config(env: dict[str, str] | None = None, yaml_data: dict | None = Non
         venues.setdefault(vid, VenueConfig(venue_id=vid))
 
     risk_raw = yaml_data.get("risk") or {}
-    unknown_risk = set(risk_raw) - _YAML_RISK_KEYS
+    unknown_risk = set(risk_raw) - _YAML_RISK_KEYS - _YAML_RISK_DEPRECATED
     if unknown_risk:
         raise ConfigError(f"risk 含未知键：{sorted(unknown_risk)}")
     risk = RiskConfig(**{k: risk_raw[k] for k in _YAML_RISK_KEYS & set(risk_raw)})
@@ -221,30 +224,13 @@ def build_config(env: dict[str, str] | None = None, yaml_data: dict | None = Non
         seen_names.add(name)
         # H4：同一 (venue, symbol) 不许被两个任务占用——account 在本
         # 系统里由 venue 唯一决定（每场所一个账户），故 (venue,symbol)
-        # 即 (venue,account,symbol) 口径。字段可能写在 task 顶层或
-        # params 里（与 engine.build_task 的合并口径一致），两处都看
-        def _tf(key: str) -> str:
-            if t.get(key):
-                return str(t[key])
-            return str((t.get("params") or {}).get(key) or "")
+        # 即 (venue,account,symbol) 口径。占用键的推导统一走
+        # engine.task_occupied_keys 单一事实源（第十四轮收敛：
+        # 此前 config 与 engine 各写一份同口径实现）；这里只做
+        # 通配感知的冲突比对
+        from .engine import task_occupied_keys
 
-        used: set[tuple[str, str]] = set()
-        strat = t["strategy"]
-        if run_mode_norm == "full_auto":
-            # 全自动两腿未知：对全部场所通配占用，键 ("*", "*")
-            used.add(("*", "*"))
-        else:
-            # semi_auto 动态选标，占整个场所：symbol 记通配 "*"
-            sym = "*" if run_mode_norm == "semi_auto" else _tf("symbol")
-            if strat == "hedged_grid":
-                used.add((_tf("grid_venue"), sym))
-                used.add((_tf("hedge_venue"), sym))
-            elif strat == "funding_carry":
-                used.add((_tf("venue_a"), sym))
-                used.add((_tf("venue_b"), sym))
-            elif strat == "premium_arb":
-                used.add((_tf("base_venue"), sym))
-                used.add((_tf("hedge_venue"), sym))
+        used = task_occupied_keys({**t, "run_mode": run_mode_norm})
         # 通配感知冲突：venue 与 symbol 任一维相等或任一侧为 "*"
         # 通配即冲突——选标类任务占用的场所不许再被任何任务占，
         # full_auto 的 ("*", "*") 与一切任务冲突

@@ -60,7 +60,7 @@ class PaperVenue(VenueAdapter):
         self._positions: dict[str, Position] = {}
         self._orders: dict[str, Order] = {}       # 挂单中
         self._done: dict[str, Order] = {}         # 终态（filled/canceled）
-        self._funding: dict[str, tuple[float, float]] = {}
+        self._funding: dict[str, tuple[float, float, str]] = {}
         self._seq = itertools.count(1)
         # 价格驱动（H6）：公开行情 provider + 随机游走兜底
         self._quote_provider = quote_provider

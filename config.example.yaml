@@ -21,7 +21,9 @@ engine:
 
 risk:
   min_corridor_pct: 3.0     # 开仓门槛：估算强平距离低于此值不开仓
-  close_corridor_pct: 1.5   # 平仓线：任一腿强平距离低于此值双腿同平
+  # 平仓线不在全局 risk 里：由各策略自己的参数管（如资金费的
+  # close_corridor_pct 强平保护）。老配置在 risk 下写了
+  # close_corridor_pct 会被容忍并忽略，不报错、不生效
   max_consecutive_errors: 3
 
 caps:

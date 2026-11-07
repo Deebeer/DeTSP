@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import time
 
+from .config import HL_DEX, VENUE_IDS
 from .risk import funding_hourly_rate
 from .venue import FundingInfo
 
@@ -52,9 +53,8 @@ LIGHTER_BASES = {
     "lighter": "https://mainnet.zklighter.elliot.ai/api/v1",
     "lighter_rh": "https://api.rh.lighter.xyz/api/v1",
 }
-HL_DEX = {"hyperliquid": "", "entropy": "io", "tradexyz": "xyz"}
-VENUE_ORDER = ("arcus", "lighter", "lighter_rh", "hyperliquid",
-               "entropy", "tradexyz", "aster")
+# 场所顺序与 HL 家族映射统一以 core.config 为单一事实源
+VENUE_ORDER = VENUE_IDS
 ALL_VENUES = frozenset(VENUE_ORDER)
 _LIGHTER_FUNDING_INTERVAL = 28800.0   # Lighter 费率周期 8 小时
 _ASTER_FUNDING_INTERVAL = 28800.0     # Aster 结算周期 8 小时
@@ -537,7 +537,15 @@ class MarketScanner:
 
         def _hl_job() -> None:
             hl_errors: dict[str, str] = {}
-            hl = self._full_hl_family(hl_errors, listings)
+            try:
+                hl = self._full_hl_family(hl_errors, listings)
+            except Exception as e:  # noqa: BLE001 — 单组失败隔离
+                # HL 返回结构异常时不能拖垮整张快照（其余四组都
+                # 经 _grab 隔离，HL 此前漏了这层，第十四轮补）
+                _log(f"HL 家族抓取失败：{type(e).__name__}: {e}")
+                hl = {}
+                for vid in HL_DEX:
+                    hl_errors.setdefault(vid, ERR_VENUE_DOWN)
             for vid in HL_DEX:
                 data[vid] = hl.get(vid, {})
             errors.update(hl_errors)

@@ -431,11 +431,20 @@ class PremiumArbStrategy:
         corr_base, corr_hedge = self._corridors()
         base_kw = {"leg_role": "base", "opening": True} if opening else {}
         hedge_kw = {"leg_role": "hedge", "opening": False} if opening else {}
-        ex.place(self.owner, p.base_venue, base_req, intent="open",
-                 corridor_pct=corr_base, **base_kw)
-        ex.place(self.owner, p.hedge_venue, hedge_req, intent="open",
-                 corridor_pct=corr_hedge, **hedge_kw)
-        self._settle_until = now + p.settle_grace_seconds
+        res_base = ex.place(self.owner, p.base_venue, base_req,
+                            intent="open", corridor_pct=corr_base,
+                            **base_kw)
+        res_hedge = ex.place(self.owner, p.hedge_venue, hedge_req,
+                             intent="open", corridor_pct=corr_hedge,
+                             **hedge_kw)
+        if any(getattr(r, "status", None) == "rejected"
+               for r in (res_base, res_hedge)):
+            # 任一腿明确被拒：不设结算宽限——另一腿可能已裸奔，
+            # 让对账下一 tick 立即介入收尾，而不是被宽限期挡住
+            # 最长 settle_grace_seconds 才修（第十四轮修）
+            self._settle_until = now
+        else:
+            self._settle_until = now + p.settle_grace_seconds
         self._last_reconcile = -1e18  # 宽限期满后下一 tick 先对账确认
         self._last_fire = now
         self._note_cycle_positions()
@@ -519,12 +528,16 @@ class PremiumArbStrategy:
         p = self.params
         hedge_side = Side.BUY if signal == "sell_base" else Side.SELL
         _, corr_hedge = self._corridors()
-        self.executor.place(
+        res_hedge = self.executor.place(
             self.owner, p.hedge_venue,
             OrderRequest(p.symbol, hedge_side, filled_qty, price=None),
             intent="open", corridor_pct=corr_hedge,
             leg_role="hedge", opening=False)
-        self._settle_until = now + p.settle_grace_seconds
+        if getattr(res_hedge, "status", None) == "rejected":
+            # 对冲腿被拒：主腿已裸奔，不设宽限，对账立即收尾
+            self._settle_until = now
+        else:
+            self._settle_until = now + p.settle_grace_seconds
         self._last_reconcile = -1e18
         self._note_cycle_positions()
 
@@ -750,7 +763,10 @@ class PremiumArbStrategy:
             return
 
         # 回归平仓带（信号处理前；_maker 非 None 的 tick 已在
-        # 上面返回，不会误平 maker 待成交期间的仓位）
+        # 上面返回，不会误平 maker 待成交期间的仓位）。注：
+        # manual（single_cycle）下平仓带同样生效并置 cycle_done，
+        # 是现行既定行为（有专门测试锁定）；与「manual 自动平仓
+        # 条件不生效」的表述存在张力，第十四轮列待用户定，未改
         if self._check_close_band(base_book, hedge_book, now):
             return
 

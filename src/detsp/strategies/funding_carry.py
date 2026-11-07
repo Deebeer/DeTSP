@@ -75,6 +75,10 @@ class CarryParams:
             raise ValueError("venue_a / venue_b 必填")
         if self.notional_usd <= 0:
             raise ValueError("notional_usd 必须大于 0")
+        if self.leverage <= 0:
+            raise ValueError("leverage 必须大于 0")
+        if not self.symbol:
+            raise ValueError("symbol 必填")
         if self.min_edge_bps_per_hour <= 0:
             raise ValueError("min_edge_bps_per_hour 必须大于 0")
         if self.max_open_spread_bps <= 0:
@@ -134,8 +138,9 @@ def current_edge_bps_per_hour(long_leg: str, hourly_a: float,
 class FundingCarryStrategy:
     """资金费套利 执行状态机。
 
-    阶段：flat（空仓等入场）→ open（双腿持有吃费）→ 平仓后
-    cooldown（冷却结束且 reopen=True 才允许再入场）。
+    阶段：flat（空仓等入场）→ opening（开仓已下单、等异步结算
+    确认，宽限期满按真实持仓定案）→ open（双腿持有吃费）→
+    平仓后 cooldown（冷却结束且 reopen=True 才允许再入场）。
     - 检查节奏：资金费判断只在 check_seconds 周期到时做；安全
       检查（孤腿/强平距离）每 tick 都做，安全永远优先
     - 开仓：双腿 taker 等量；下单后先立即回读确认双腿成形，
@@ -158,7 +163,7 @@ class FundingCarryStrategy:
         self.min_corridor_pct = getattr(risk_cfg, "min_corridor_pct", 3.0)
         # 强平保护平仓线取策略参数（第十一轮定案，不再取 risk_cfg）
         self.close_corridor_pct = params.close_corridor_pct
-        self.phase = "flat"          # flat / open / cooldown
+        self.phase = "flat"          # flat / opening / open / cooldown
         self.long_leg: str = ""      # 当前持仓的多腿："a" / "b"
         self.opened_at = 0.0
         self.cooldown_until = -1e18

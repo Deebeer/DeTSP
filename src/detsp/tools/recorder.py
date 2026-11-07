@@ -53,7 +53,10 @@ class MinuteAggregator:
         minute = int(ts // 60) * 60
         done = None
         if self._minute is not None and minute != self._minute:
-            done = self._bar()
+            # 上一分钟可能整分钟都是坏盘口（无有效样本）：_bar 对
+            # 空样本会崩，只在有样本时才出 bar（与 flush 同口径）
+            if self._premiums:
+                done = self._bar()
             self._reset()
         self._minute = minute
         base_mid = (base_bid + base_ask) / 2

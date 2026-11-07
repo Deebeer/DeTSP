@@ -6,14 +6,10 @@ from detsp.core.risk import (
     ErrorCounter,
     KillSwitch,
     RiskHaltError,
-    basis_ok,
-    corridor_ok,
     detect_single_leg,
     liquidation_corridor_pct,
     net_delta,
-    should_force_close,
     within_cap,
-    worst_corridor_pct,
 )
 from detsp.core.venue import Side
 
@@ -30,28 +26,6 @@ def test_corridor_short():
 def test_corridor_invalid_price():
     with pytest.raises(ValueError):
         liquidation_corridor_pct(0, 90, Side.BUY)
-
-
-def test_worst_corridor():
-    assert worst_corridor_pct([8.0, 3.5, 12.0]) == 3.5
-    assert worst_corridor_pct([]) is None
-
-
-def test_corridor_ok():
-    assert corridor_ok(3.0, 3.0)
-    assert not corridor_ok(2.9, 3.0)
-
-
-def test_force_close_lines():
-    assert should_force_close(1.4, 10.0, 1.5)          # 跌破平仓线
-    assert should_force_close(4.9, 10.0, 1.5)          # 只剩开仓时一半
-    assert not should_force_close(6.0, 10.0, 1.5)
-
-
-def test_basis_gate():
-    assert basis_ok(100, 102, 3.0)
-    assert not basis_ok(100, 104, 3.0)
-    assert not basis_ok(100, 0, 3.0)
 
 
 def test_single_leg():

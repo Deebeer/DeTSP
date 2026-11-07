@@ -33,21 +33,6 @@ def liquidation_corridor_pct(price: float, liq_price: float, side: Side) -> floa
     return (liq_price - price) / price * 100
 
 
-def worst_corridor_pct(corridors: list[float]) -> float | None:
-    """多条腿取最近（最小）的强平距离；无腿时返回 None。"""
-    return min(corridors) if corridors else None
-
-
-def corridor_ok(corridor_pct: float, min_pct: float) -> bool:
-    """开仓门槛：强平距离不低于 min_pct 才允许开仓。"""
-    return corridor_pct >= min_pct
-
-
-def should_force_close(corridor_pct: float, open_corridor_pct: float, close_pct: float) -> bool:
-    """持仓监控平仓线：低于 close_pct，或只剩开仓时一半，触发双腿同平。"""
-    return corridor_pct < close_pct or corridor_pct < open_corridor_pct / 2
-
-
 def estimate_liq_price(entry_price: float, leverage: float, side: Side,
                        maint_margin_rate: float = 0.0) -> float:
     """按杠杆估算强平价（交易所不给 liq_price 时用）。
@@ -122,7 +107,7 @@ def funding_rate_suspect(rate: float) -> bool:
 
 
 def evaluate_funding_pair(info_a, info_b) -> tuple[bool, str, float, float]:
-    """开仓选向前的一对费率评估（carry 与轮换共用）。
+    """开仓选向前的一对费率评估（funding_carry 选向用）。
 
     返回 (可否选向, 原因, a 的每小时费率, b 的每小时费率)。
     任一腿触发合理性闸门、或两腿取值口径（rate_kind）不一致，
@@ -180,13 +165,6 @@ def detect_period_anomaly(rows: list) -> str | None:
         f"请核对该所的费率周期")
 
 
-def basis_ok(price_a: float, price_b: float, max_diff_pct: float = 3.0) -> bool:
-    """价差闸门：两所中价相差超过 max_diff_pct 不开仓（防同名不同标的）。"""
-    if price_a <= 0 or price_b <= 0:
-        return False
-    return abs(price_a / price_b - 1) * 100 <= max_diff_pct
-
-
 def detect_single_leg(legs: dict[str, float]) -> bool:
     """单腿检测：对冲仓位里恰好只有一条腿有持仓。
 
@@ -211,11 +189,6 @@ def net_delta(legs: dict[str, float]) -> float:
 def within_cap(notional: float, cap: float) -> bool:
     """仓位上限检查；cap<=0 表示不限。"""
     return cap <= 0 or notional <= cap
-
-
-def check_caps(position: Position, venue_cap: float, strategy_cap: float) -> bool:
-    n = position.notional
-    return within_cap(n, venue_cap) and within_cap(n, strategy_cap)
 
 
 class KillSwitch:
